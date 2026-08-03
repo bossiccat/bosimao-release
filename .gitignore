@@ -39,3 +39,6 @@ backend/.audit_tmp/
 
 # WorkBuddy 会话元数据
 .workbuddy/
+
+# 旧 venv 备份（可手动删除）
+.venv_old/

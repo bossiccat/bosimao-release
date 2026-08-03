@@ -1,4 +1,4 @@
-# 一键开发启动：模型 server（提示/健康检查）→ 后端 uvicorn → 前端 Vite
+﻿# 一键开发启动：模型 server（提示/健康检查）→ 后端 uvicorn → 前端 Vite
 # 用法: powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
 
 $ErrorActionPreference = "Stop"
