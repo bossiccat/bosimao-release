@@ -1,0 +1,25 @@
+# 推送配置 — 贾克斯模式
+# Provider 路由与限频；密钥在 .env（不入库）
+
+push:
+  # 启用的 Provider 顺序（主 → 备），manager 按序路由 + 熔断
+  providers:
+    - wecom
+    - ntfy
+
+  # 企业微信 webhook（URL 在 .env: WECOM_WEBHOOK_URL）
+  wecom:
+    enabled: true
+    rate_limit_per_minute: 15   # 官方 ~20/min，留余量
+
+  # ntfy（默认官方服务器或自建；topic 在 .env: NTFY_TOPIC）
+  ntfy:
+    enabled: true
+    server: https://ntfy.sh
+    priority: default           # default / high / urgent
+    with_screenshot: true       # 卡住/跑偏时附截图
+
+  # 熔断策略
+  circuit_breaker:
+    fail_threshold: 3           # 连续失败 N 次熔断
+    cooldown_seconds: 300       # 熔断冷却后自动恢复

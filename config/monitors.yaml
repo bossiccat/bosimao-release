@@ -1,0 +1,44 @@
+# 监控目标配置 — 贾克斯模式
+# 改此文件即生效（orchestrator 热重载），无需重启
+# 进程名以本机实测为准（O-008 用户裁决）
+
+monitors:
+  # Codex：桌面版（开源，CLI 未装）；进程名实测存在，窗口标题正则待 B2 校准
+  - app_id: codex
+    app_name: OpenAI Codex
+    process_name: codex.exe
+    window_title_regex: "(?i)codex"
+    poll_interval_seconds: 6
+    enabled: true
+
+  # Trae：进程名实测为 TRAE SOLO CN.exe（非 trae.exe）
+  - app_id: trae
+    app_name: Trae
+    process_name: "TRAE SOLO CN.exe"
+    window_title_regex: "(?i)trae"
+    poll_interval_seconds: 8
+    enabled: true
+
+  - app_id: hermes
+    app_name: Hermes
+    process_name: hermes.exe
+    window_title_regex: "(?i)hermes"
+    poll_interval_seconds: 8
+    enabled: true
+
+  # WorkBuddy：本次新增监控目标（用户裁决 O-008）
+  - app_id: workbuddy
+    app_name: WorkBuddy
+    process_name: WorkBuddy.exe
+    window_title_regex: "(?i)workbuddy"
+    poll_interval_seconds: 8
+    enabled: true
+
+# 全局轮询降频（语音对话期间）
+voice_active_poll_interval_seconds: 12
+
+# 截图参数
+capture:
+  max_width: 1280          # 降采样宽度上限（控制推理耗时）
+  jpeg_quality: 85
+  tmp_dir: ./tmp/captures

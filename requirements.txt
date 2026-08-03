@@ -1,0 +1,30 @@
+# 贾克斯模式 - 后端 Python 依赖
+# 版本锁定（M0 契约，见 docs/SPEC.md §3）
+
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.8
+pydantic-settings>=2.4
+pyyaml>=6.0
+
+# 窗口捕获
+windows-capture==2.0.0
+psutil>=6.0
+pywin32>=306
+pillow>=10.4
+numpy>=1.26
+
+# 语音（V1.1）
+silero-vad==6.2.1
+sherpa-onnx==1.13.2
+edge-tts>=6.1
+sounddevice>=0.4.6
+soundfile>=0.12
+
+# 模型客户端
+httpx>=0.27
+websockets>=12.0
+
+# 测试
+pytest>=8.2
+pytest-asyncio>=0.23

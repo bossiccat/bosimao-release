@@ -1,0 +1,19 @@
+[package]
+name = "jax-pet"
+version = "1.0.0"
+description = "贾克斯模式 - AI 智能体监控中枢桌宠"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = ["custom-protocol"]
+
+# Tauri v2 Windows 需要
+[target.'cfg(windows)'.dependencies]

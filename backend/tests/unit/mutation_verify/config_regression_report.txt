@@ -1,0 +1,20 @@
+======================================================================
+config 层级 bug 回归验证（先红后绿）
+目标: C:\Users\Administrator\WorkBuddy\监视app\backend\app\config.py
+测试: C:\Users\Administrator\WorkBuddy\监视app\backend\tests\unit\test_config_loading.py
+======================================================================
+
+[阶段1] 历史 buggy 实现 pytest exit=1 -> RED (测试捕获 bug ✅)
+        恢复校验: OK
+        >       assert cfg.stuck_frame_threshold == 5, "注入 5 却得默认 3 → config 层级 bug 复现"
+        E       assert 3 == 5
+        >       assert cfg.providers == ["ntfy"], "providers 必须来自 YAML"
+        E       assert ['wecom', 'ntfy'] == ['ntfy']
+        FAILED tests/unit/test_config_loading.py::TestDetectionLoading::test_detection_values_applied
+        FAILED tests/unit/test_config_loading.py::TestPushLoading::test_push_values_applied
+
+[阶段2] 修复版实现 pytest exit=0 -> GREEN ✅
+        [safe-delete][SAFE_DELETE_FAIL_CLOSED] {"target": "\\\\?\\C:\\Users\\Administrator\\AppData\\Local\\Temp\\pytest-of-Administrator\\garbage-a20a2a1e-c758-4348-8c6c-557bc07f99a1", "reason": "windows-sandbox-recycle-bin-unavailable"}
+
+======================================================================
+PASS：测试能捕获 config 层级 bug（红），修复后通过（绿）

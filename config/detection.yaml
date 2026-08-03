@@ -1,0 +1,26 @@
+# 检测参数配置 — 贾克斯模式
+# 防误判靠参数而非改代码；改配置即生效
+
+detection:
+  # 卡住判定：连续 N 帧状态不变 AND 持续超时 T 秒 → 触发提醒（双条件防误判）
+  stuck_frame_threshold: 3
+  stuck_timeout_seconds: 120
+
+  # 跑偏判定：连续 N 帧为 off_track 即触发（内容级，可单帧判定但留缓冲）
+  off_track_frame_threshold: 2
+
+  # 视觉分析提示词模板路径（外置可调，Agent 改版后可换模板）
+  prompt_template: ./config/prompts/vision_analyze.md
+
+  # 提醒节流（防止刷屏）
+  min_alert_interval_seconds: 60
+  max_alerts_per_hour: 30
+
+reminder:
+  # 四级渐进打扰
+  level_1_status_dot: true        # 状态点变色
+  level_2_pet_move: true          # 桌宠微动
+  level_3_pet_alert: true         # 浮起放大 + 脉冲
+  level_4_voice_push: true        # 语音播报 + 手机推送（仅卡住/跑偏）
+  voice_alert_enabled: true
+  push_alert_enabled: true

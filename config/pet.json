@@ -1,0 +1,27 @@
+{
+  "pet": {
+    "name": "星核 Spark",
+    "skin": "orb",
+    "monitoring": {
+      "width_px": 80,
+      "opacity": 0.3,
+      "breath_scale_min": 1.0,
+      "breath_scale_max": 1.02,
+      "breath_cycle_seconds": 6
+    },
+    "alerting": {
+      "width_px": 140,
+      "opacity": 1.0,
+      "pulse_hz": 2,
+      "rise_seconds": 0.4
+    },
+    "colors": {
+      "core_start": "#2563EB",
+      "core_end": "#38BDF8",
+      "idle_brightness": 0.2
+    },
+    "motion": {
+      "reduced_motion_fallback": true
+    }
+  }
+}

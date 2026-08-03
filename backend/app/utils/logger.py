@@ -1,0 +1,38 @@
+"""结构化日志（JSON lines + SLI 打点）"""
+from __future__ import annotations
+
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+
+_LOG_DIR = Path(__file__).resolve().parents[3] / "logs"
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        entry = {
+            "ts": time.time(),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info:
+            entry["exc"] = self.formatException(record.exc_info)
+        return json.dumps(entry, ensure_ascii=False)
+
+
+def setup_logging(level: str = "INFO", log_file: bool = True) -> None:
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(JsonFormatter())
+    root.addHandler(console)
+
+    if log_file:
+        _LOG_DIR.mkdir(exist_ok=True)
+        fh = logging.FileHandler(_LOG_DIR / "jax.log", encoding="utf-8")
+        fh.setFormatter(JsonFormatter())
+        root.addHandler(fh)

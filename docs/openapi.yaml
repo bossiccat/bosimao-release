@@ -1,0 +1,275 @@
+# OpenAPI 契约 — 贾克斯模式后端 API
+# 版本：v1.1（M-1 修复基线）2026-08-03
+# 基础路径：http://127.0.0.1:8000
+# 说明：前后端对照开发依据；WS 契约见文末 schema
+# M-1 修订：① 时间字段 date-time→unix 秒（与 state.py 实发一致）② voice 端点标 x-implemented:false（V1.1）
+#           ③ capture_mode 枚举补 pending-auth/lost ④ /health 补 model_vram_mb（标 V1.1 未实现）
+#           ⑤ WS pet_state/voice_transcript 标 x-phase:v1.1
+
+openapi: 3.0.3
+info:
+  title: 贾克斯模式 - AI 智能体监控中枢 API
+  version: 1.0.0
+  description: 桌宠 UI 与后端的全部 HTTP/WS 接口契约
+
+servers:
+  - url: http://127.0.0.1:8000
+    description: 本机后端
+
+paths:
+  # ========== 状态查询 ==========
+  /api/v1/status:
+    get:
+      summary: 全局状态汇总（监控目标 + 每会话状态）
+      operationId: getStatus
+      responses:
+        "200":
+          description: 状态快照
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GlobalStatus"
+        "503":
+          description: 模型服务未就绪
+
+  /api/v1/status/sessions/{app_id}:
+    get:
+      summary: 单个被监控会话详情
+      operationId: getSession
+      parameters:
+        - name: app_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: codex
+      responses:
+        "200":
+          description: 会话状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSession"
+
+  # ========== 控制指令 ==========
+  /api/v1/control:
+    post:
+      summary: 控制指令（启停监控 / 手动触发提醒测试）
+      operationId: sendControl
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ControlCommand"
+      responses:
+        "202":
+          description: 指令已受理
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: boolean
+                    example: true
+        "400":
+          description: 指令非法
+
+  /api/v1/control/test-push:
+    post:
+      summary: 测试推送（手动验证手机可达）
+      operationId: testPush
+      responses:
+        "200":
+          description: 推送测试结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PushResult"
+
+  # ========== 语音（V1.1，未实现） ==========
+  # 后端 routes_control.py 未实现 voice 端点；WS control 收到 voice_wake/voice_suspend 仅 echo ack
+  # 排期：V1.1（关联 OPEN-DECISIONS O-005 / O-003）
+  /api/v1/voice/wake:
+    post:
+      summary: 唤醒语音会话（进入 Listening）【V1.1 未实现】
+      operationId: voiceWake
+      x-implemented: false
+      x-phase: v1.1
+      responses:
+        "202":
+          description: 语音会话已唤醒
+
+  /api/v1/voice/suspend:
+    post:
+      summary: 挂起语音会话（回落 Monitoring）【V1.1 未实现】
+      operationId: voiceSuspend
+      x-implemented: false
+      x-phase: v1.1
+      responses:
+        "202":
+          description: 语音会话已挂起
+
+  # ========== 配置热重载 ==========
+  /api/v1/config/reload:
+    post:
+      summary: 热重载 config/*.yaml（改配置即生效）
+      operationId: reloadConfig
+      responses:
+        "200":
+          description: 重载结果（含非法项清单）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  errors:
+                    type: array
+                    items:
+                      type: string
+                    example: []
+
+  # ========== 健康检查 ==========
+  /health:
+    get:
+      summary: 后端健康检查
+      operationId: healthCheck
+      responses:
+        "200":
+          description: 健康状态
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  model_server:
+                    type: string
+                    example: up
+                  model_vram_mb:
+                    type: integer
+                    example: 9400
+                    description: 模型显存占用 MB（显存守卫用；后端主进程暂未实现 nvml 查询）
+                    x-implemented: false
+                    x-phase: v1.1
+
+components:
+  schemas:
+    GlobalStatus:
+      type: object
+      properties:
+        engine:
+          type: object
+          properties:
+            model_loaded:
+              type: boolean
+            vram_mb:
+              type: integer
+            inference_busy:
+              type: boolean
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentSession"
+        pet_state:
+          type: string
+          enum: [idle, monitoring, listening, thinking, speaking, alerting]
+        updated_at:
+          type: number
+          format: unix-epoch
+          description: 全局状态快照时间，Unix 秒（后端 state.py 实发 float，前端按 number 消费）
+
+    AgentSession:
+      type: object
+      required: [app_id, app_name, state]
+      properties:
+        app_id:
+          type: string
+          example: codex
+        app_name:
+          type: string
+          example: OpenAI Codex
+        window_found:
+          type: boolean
+        capture_mode:
+          type: string
+          enum: [wgc, dxgi, none, pending-auth, lost]
+          description: 捕获模式。wgc=Windows 图形捕获（已授权）；dxgi=整屏兜底；none=未捕获；pending-auth=窗口已找到但未授权（session_manager.locate_all 实发）；lost=窗口丢失/授权失效（设计值，V1.1 落地）
+        state:
+          type: string
+          enum: [progress, stuck, off_track, unknown, offline]
+        last_state:
+          type: string
+          enum: [progress, stuck, off_track, unknown, offline]
+        state_changed_at:
+          type: number
+          format: unix-epoch
+          description: 状态变更时间，Unix 秒（后端 state.py 实发 float，前端已按 number 消费）
+        stuck_frames:
+          type: integer
+          description: 连续不变帧数
+        last_summary:
+          type: string
+          description: 最近一次视觉分析摘要（单行）
+        last_suggestion:
+          type: string
+          description: 最近优化建议（P1）
+        last_frame_at:
+          type: number
+          format: unix-epoch
+          description: 最近捕获帧时间，Unix 秒（后端 state.py 实发 float）
+        frame_count:
+          type: integer
+        last_analysis_ms:
+          type: integer
+          description: 最近一次视觉判定耗时（毫秒）
+        alert_level:
+          type: integer
+          enum: [0, 1, 2, 3, 4]
+          description: 当前渐进打扰级别
+
+    ControlCommand:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [start_monitoring, stop_monitoring, pause_monitoring, resume_monitoring, trigger_alert_test]
+        target:
+          type: string
+          description: 目标 app_id；缺省 = 全部
+          example: codex
+
+    PushResult:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        provider:
+          type: string
+          example: wecom
+        error:
+          type: string
+          nullable: true
+
+  # ========== WS /ws/pet 消息契约 ==========
+  # 方向：backend → UI
+  #   {type: "event", event: "session_updated", data: AgentSession}          ✅ 已实现（routes_ws.py:43）
+  #   {type: "event", event: "alert", data: {app_id, level: 1-4, state, summary, suggestion?}}  ✅ 已实现（routes_ws.py:46）
+  #   {type: "event", event: "pet_state", data: {state: "listening", payload: {...}}}  ⏳ V1.1 未实现（events.py 已定义 EVT_PET_STATE，WsHub 未订阅广播）
+  #   {type: "event", event: "voice_transcript", data: {text, is_final}}                 ⏳ V1.1 未实现（events.py 已定义 EVT_VOICE_TRANSCRIPT，WsHub 未订阅广播）
+  #   {type: "pong", ts: 1234567890}                                     ✅ 已实现（心跳应答）
+  # 方向：UI → backend
+  #   {type: "ping", ts: 1234567890}                                     ✅ 已实现
+  #   {type: "control", action: "trigger_alert_test", target: "codex"}   ✅ 已实现（echo ack 受理）
+  #   {type: "control", action: "voice_wake"}                            ⏳ V1.1 未实现（仅 echo ack，不进入 Listening）
+  #   {type: "control", action: "voice_suspend"}                         ⏳ V1.1 未实现（仅 echo ack，不回落 Monitoring）
+  #
+  # 心跳：UI 每 15s 发 ping，backend 回 pong；断开自动重连（指数退避，上限 30s）
+  # WS 契约修订记录：pet_state / voice_transcript / voice 控制指令均标 x-phase: v1.1（后端 WsHub 仅广播 session_updated/alert）

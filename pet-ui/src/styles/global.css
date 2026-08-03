@@ -1,0 +1,27 @@
+/* 全局样式（深色开发者环境） */
+@import "./tokens.css";
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+  background: transparent; /* 桌宠透明窗口 */
+  font-family: var(--font-body);
+  color: var(--fg);
+  user-select: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,57 @@
+/* Design Token — 贾克斯模式（与 docs/DESIGN.md §2 契约一致，禁止硬编码色值） */
+
+:root {
+  /* A1-identity（深色默认） */
+  --bg: #0b0e14;
+  --surface: #12161f;
+  --surface-2: #1a202c;
+  --fg: #e6eaf2;
+  --fg-2: #9aa4b2;
+  --muted: #6b7686;
+  --accent: #38bdf8;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-soft: rgba(255, 255, 255, 0.05);
+
+  /* A2-semantic */
+  --success: #34d399;
+  --warn: #f59e0b;
+  --danger: #f87171;
+  --info: #38bdf8;
+  --focus-ring: rgba(56, 189, 248, 0.4);
+  --thinking: #818cf8;
+
+  /* 宠物本体 */
+  --pet-core-start: #2563eb;
+  --pet-core-end: #38bdf8;
+
+  /* 投影（阴影一律走 token，禁止散写 rgba） */
+  --shadow-card: 0 4px 20px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.45);
+
+  /* 动效 */
+  --motion-fast: 150ms;
+  --motion-base: 250ms;
+
+  /* 字体 */
+  --font-display: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI",
+    "PingFang SC", "Noto Sans SC", sans-serif;
+  --font-body: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI",
+    "PingFang SC", "Noto Sans SC", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+}
+
+/* ===== 浅色主题（预留，Settings 主题切换启用 data-theme="light"） =====
+ * 仅预留核心 Token 覆盖；完整浅色皮肤在后续主题工作中补齐 */
+[data-theme="light"] {
+  --bg: #f6f8fb;
+  --surface: #ffffff;
+  --surface-2: #eef1f6;
+  --fg: #1a2230;
+  --fg-2: #4a5668;
+  --muted: #7a8698;
+  --accent: #0ea5e9;
+  --border: rgba(16, 24, 40, 0.12);
+  --border-soft: rgba(16, 24, 40, 0.07);
+  --shadow-card: 0 2px 4px rgba(16, 24, 40, 0.04), 0 8px 16px rgba(16, 24, 40, 0.08);
+  --shadow-pop: 0 4px 8px rgba(16, 24, 40, 0.04), 0 12px 28px rgba(16, 24, 40, 0.12);
+}

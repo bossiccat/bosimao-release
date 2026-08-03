@@ -1,0 +1,51 @@
+======================================================================
+status_detector 变异验证报告
+目标实现: C:\Users\Administrator\WorkBuddy\监视app\backend\app\engine\status_detector.py
+测试文件: C:\Users\Administrator\WorkBuddy\监视app\backend\tests\unit\test_status_detector.py
+原实现 sha256: c03d2a1e691867f4f06bb6be7b16ed82b96dc6d932e9319cd986561b1fef92a8
+======================================================================
+
+[基线] 原实现 pytest exit=0 -> PASS (全绿)
+
+----------------------------------------------------------------------
+
+[KILLED] frame_threshold_3_to_2
+    变异: snapshot.stuck_frames >= cfg.stuck_frame_threshold  ->  snapshot.stuck_frames >= cfg.stuck_frame_threshold - 1
+    pytest exit=1 | 恢复校验: OK
+    >       assert not r.triggered, "帧阈值 3：仅 2 帧即使超 120s 也不应触发"
+    E       AssertionError: 帧阈值 3：仅 2 帧即使超 120s 也不应触发
+    E       assert not True
+    tests\unit\test_status_detector.py:98: AssertionError
+    FAILED tests/unit/test_status_detector.py::TestStuckFrameBoundary::test_2_frames_elapsed_120_not_trigger
+
+[KILLED] frame_threshold_3_to_4
+    变异: snapshot.stuck_frames >= cfg.stuck_frame_threshold  ->  snapshot.stuck_frames >= cfg.stuck_frame_threshold + 1
+    pytest exit=1 | 恢复校验: OK
+    >       assert r.triggered, "3 帧 + elapsed=120s 必须触发"
+    E       AssertionError: 3 帧 + elapsed=120s 必须触发
+    E       assert False
+    tests\unit\test_status_detector.py:112: AssertionError
+    FAILED tests/unit/test_status_detector.py::TestStuckFrameBoundary::test_3_frames_exact_120_triggers
+
+[KILLED] timeout_120_to_121
+    变异: elapsed >= cfg.stuck_timeout_seconds  ->  elapsed >= cfg.stuck_timeout_seconds + 1
+    pytest exit=1 | 恢复校验: OK
+    >       assert r.triggered, "3 帧 + elapsed=120s 必须触发"
+    E       AssertionError: 3 帧 + elapsed=120s 必须触发
+    E       assert False
+    tests\unit\test_status_detector.py:112: AssertionError
+    FAILED tests/unit/test_status_detector.py::TestStuckFrameBoundary::test_3_frames_exact_120_triggers
+
+[KILLED] timeout_120_to_119
+    变异: elapsed >= cfg.stuck_timeout_seconds  ->  elapsed >= cfg.stuck_timeout_seconds - 1
+    pytest exit=1 | 恢复校验: OK
+    >       assert not r.triggered, "elapsed=119s 不应触发（边界内）"
+    E       AssertionError: elapsed=119s 不应触发（边界内）
+    E       assert not True
+    tests\unit\test_status_detector.py:85: AssertionError
+    FAILED tests/unit/test_status_detector.py::TestStuckFrameBoundary::test_timeout_119s_not_trigger
+
+======================================================================
+变异总杀：4/4
+======================================================================
+PASS：4 变异全杀，测试可防阈值/超时误改
