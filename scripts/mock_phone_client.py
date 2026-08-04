@@ -158,6 +158,10 @@ async def wait_relay_up(port: int, timeout_s: float = 8.0) -> None:
 async def main() -> int:
     parser = argparse.ArgumentParser(description="M2 全链路模拟联调")
     parser.add_argument("--relay-port", type=int, default=19090)
+    parser.add_argument("--relay-url", default=None,
+                        help="外部中继地址（如 wss://公网中继/relay/ws）；提供时跳过本地内嵌中继，用于跨网络联调")
+    parser.add_argument("--token", default=os.environ.get("RELAY_TOKEN", ""),
+                        help="中继鉴权 token（默认取环境变量 RELAY_TOKEN）")
     parser.add_argument("--gateway-port", type=int, default=18000)
     parser.add_argument("--gateway", choices=["mock", "real"], default="mock",
                         help="mock=内嵌骨架网关；real=对接 backend /ws/voice(8000)")
@@ -173,14 +177,22 @@ async def main() -> int:
     e2ee = RelayE2EE(__import__("base64").b64decode(env_key)) if env_key else None
     dev_key_b64 = env_key or __import__("base64").b64encode(os.urandom(32)).decode()
 
-    # 1) 启动中继（进程内 uvicorn）
-    relay_cfg = RelayConfig(port=args.relay_port, heartbeat_timeout_s=60, session_timeout_s=600)
-    relay_app = create_relay_app(relay_cfg)
-    relay_server = uvicorn.Server(uvicorn.Config(relay_app, host="127.0.0.1",
-                                                 port=args.relay_port, log_level="warning"))
-    relay_task = asyncio.create_task(relay_server.serve())
-    await wait_relay_up(args.relay_port)
-    print(f"[relay] 中继已就绪 ws://127.0.0.1:{args.relay_port}/relay/ws e2ee={'on' if e2ee else 'off'}")
+    # 1) 中继：默认启动本地内嵌中继；--relay-url 提供时改用外部中继（跨网络联调）
+    relay_url = args.relay_url
+    relay_task = None
+    relay_server = None
+    if relay_url is None:
+        relay_cfg = RelayConfig(port=args.relay_port, heartbeat_timeout_s=60, session_timeout_s=600)
+        relay_app = create_relay_app(relay_cfg)
+        relay_server = uvicorn.Server(uvicorn.Config(relay_app, host="127.0.0.1",
+                                                     port=args.relay_port, log_level="warning"))
+        relay_task = asyncio.create_task(relay_server.serve())
+        await wait_relay_up(args.relay_port)
+        relay_url = f"ws://127.0.0.1:{args.relay_port}/relay/ws"
+        print(f"[relay] 中继已就绪 {relay_url} e2ee={'on' if e2ee else 'off'}")
+    else:
+        print(f"[relay] 使用外部中继 {relay_url} token={'on' if args.token else 'off'} "
+              f"e2ee={'on' if e2ee else 'off'}（跳过本地内嵌中继）")
 
     # 2) 启动骨架网关（mock）或直连真实网关
     gw_task = None
@@ -197,8 +209,8 @@ async def main() -> int:
 
     # 3) 启动 PC 侧 relay_client（与网关桥接）
     pc = RelayClient(
-        relay_url=f"ws://127.0.0.1:{args.relay_port}/relay/ws",
-        token="", device_id="jax-pc-01", pairing_code=args.pairing_code,
+        relay_url=relay_url,
+        token=args.token, device_id="jax-pc-01", pairing_code=args.pairing_code,
         gateway_url=gw_url, e2ee=e2ee,
     )
     pc_task = asyncio.create_task(pc.start())
@@ -207,8 +219,8 @@ async def main() -> int:
     pcm = bytes((i * 7) % 256 for i in range(32000))  # 模拟 ~1s PCM16 16k
     try:
         for r in range(1, args.rounds + 1):
-            res = await run_phone_round(f"ws://127.0.0.1:{args.relay_port}/relay/ws",
-                                        "", args.pairing_code, e2ee, pcm)
+            res = await run_phone_round(relay_url,
+                                        args.token, args.pairing_code, e2ee, pcm)
             gw_proc = ""
             if mock_gw is not None and mock_gw.t_first_audio is not None and mock_gw.t_reply_done is not None:
                 gw_proc = f"{mock_gw.t_reply_done - mock_gw.t_first_audio:.3f}"
@@ -222,11 +234,13 @@ async def main() -> int:
     finally:
         await pc.stop()
         pc_task.cancel()
-        relay_server.should_exit = True
-        try:
-            await asyncio.wait_for(relay_task, timeout=3)
-        except Exception:  # noqa: BLE001
-            pass
+        if relay_server is not None:
+            relay_server.should_exit = True
+        if relay_task is not None:
+            try:
+                await asyncio.wait_for(relay_task, timeout=3)
+            except Exception:  # noqa: BLE001
+                pass
         if gw_task is not None:
             gw_task.cancel()
 
