@@ -1,10 +1,14 @@
 # OpenAPI 契约 — 贾克斯模式后端 API
-# 版本：v1.1（M-1 修复基线）2026-08-03
+# 版本：v1.2（V1.5 M1 voice 网关）2026-08-04
 # 基础路径：http://127.0.0.1:8000
 # 说明：前后端对照开发依据；WS 契约见文末 schema
 # M-1 修订：① 时间字段 date-time→unix 秒（与 state.py 实发一致）② voice 端点标 x-implemented:false（V1.1）
 #           ③ capture_mode 枚举补 pending-auth/lost ④ /health 补 model_vram_mb（标 V1.1 未实现）
 #           ⑤ WS pet_state/voice_transcript 标 x-phase:v1.1
+# V1.5-M1 修订：⑥ 新增 WS /ws/voice 语音流契约（mobile-voice-spec §7）⑦ 新增 POST /api/v1/voice/pair、
+#                GET /api/v1/voice/status（x-phase: v1.5-m1，已实现）
+# V1.5-M2 修订：⑧ 新增中继服务契约 POST /relay/pair + WS /relay/ws（x-phase: v1.5-m2，已实现）
+#               部署目标 = CloudBase（CloudRun 容器，支持长连接 WS；实现见 backend/relay/）
 
 openapi: 3.0.3
 info:
@@ -110,6 +114,96 @@ paths:
       responses:
         "202":
           description: 语音会话已挂起
+
+  # ========== voice 网关（mobile-voice-spec §8/§10，V1.5 M1 落地） ==========
+  # 实时音频走 WS（/ws/voice），不走 REST；控制面如下。
+  /api/v1/voice/pair:
+    post:
+      summary: 配对码 + token 签发（M1 stub：局域网直连；中继配对属 M2）
+      operationId: createVoicePair
+      x-phase: v1.5-m1
+      x-implemented: true
+      responses:
+        "200":
+          description: 配对码 + token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: {type: integer, example: 0}
+                  data:
+                    type: object
+                    properties:
+                      pairing_code: {type: string, example: "123456"}
+                      token: {type: string}
+                      expires_in_s: {type: integer, example: 300}
+                      ts: {type: integer, format: unix-epoch}
+
+  /api/v1/voice/status:
+    get:
+      summary: 语音网关状态（phone 在线数 / 路径 / 引擎 / STT 模型状态）
+      operationId: getVoiceStatus
+      x-phase: v1.5-m1
+      x-implemented: true
+      responses:
+        "200":
+          description: 网关状态
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: {type: integer, example: 0}
+                  data:
+                    type: object
+                    properties:
+                      relay: {type: string, example: lan_direct}
+                      path: {type: string, enum: [A, B]}
+                      engine: {type: string, example: half_duplex}
+                      stt_model: {type: string, enum: [ok, missing, runtime_missing, error]}
+                      tts: {type: string, example: zh-CN-XiaoxiaoNeural}
+                      online: {type: integer}
+                      sessions:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            device_id: {type: string}
+                            state: {type: string, enum: [monitoring, listening, thinking, speaking, idle]}
+                            path: {type: string, example: B}
+                            stt_model_ok: {type: boolean}
+                            buffer_bytes: {type: integer}
+                            last_rx: {type: number, format: unix-epoch}
+
+  # ========== 中继服务（mobile-voice-spec §6/§7，V1.5 M2 落地，backend/relay/） ==========
+  # 独立服务：python -m backend.relay.relay_server（uvicorn 端口 19090），纯透传不解析不存储。
+  # 部署目标：CloudBase（CloudRun 容器，支持长连接 WS）；局域网直连不走中继（见 /ws/voice）。
+  /relay/pair:
+    post:
+      summary: 签发配对码 + 中继连接信息（配对主流程走 WS /relay/ws 的 pair 帧）
+      operationId: createRelayPair
+      x-phase: v1.5-m2
+      x-implemented: true
+      x-deploy: cloudbase
+      responses:
+        "200":
+          description: 配对码 + WS 连接信息
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: {type: integer, example: 0}
+                  data:
+                    type: object
+                    properties:
+                      pairing_code: {type: string, example: "123456"}
+                      ws_url: {type: string, example: "wss://relay.example.com/relay/ws"}
+                      token_required: {type: boolean}
+                      e2ee_enabled: {type: boolean}
+                      ts: {type: integer, format: unix-epoch}
+                  message: {type: string, example: "配对码已签发"}
 
   # ========== 配置热重载 ==========
   /api/v1/config/reload:
@@ -273,3 +367,51 @@ components:
   #
   # 心跳：UI 每 15s 发 ping，backend 回 pong；断开自动重连（指数退避，上限 30s）
   # WS 契约修订记录：pet_state / voice_transcript / voice 控制指令均标 x-phase: v1.1（后端 WsHub 仅广播 session_updated/alert）
+
+  # ========== WS /ws/voice 语音流契约（mobile-voice-spec §7，V1.5 M1） ==========
+  # 端点：WS /ws/voice（局域网直连主端点）；/api/v1/voice/stream 为同协议别名（M1 已实现）
+  # 鉴权：?token= 查询参数 或 hello.token（.env VOICE_TOKEN；未配置时为开发态放行）
+  # 帧格式：
+  #   控制帧 = WS 文本帧（JSON，见下方 schema）
+  #   音频帧 = WS 二进制帧：[0x02][seq:u32 BE][ts_ms:u64 BE][payload]（payload=PCM16 16k 或 E2EE 密文）
+  # 上行（手机 → PC）：hello / audio_start / audio_end / wake / cancel / heartbeat / speech_start / speech_end / interrupt
+  # 下行（PC → 手机）：ready / session_state / transcript / audio_start / audio_end / reply_done / error / pong / ping
+  #
+  # 一轮对话（路径 B 半双工）：
+  #   phone: hello → pc: ready → phone: wake → phone: 音频帧流 → phone: audio_end
+  #   → pc: session_state(thinking) → pc: transcript(final) → pc: session_state(speaking)
+  #   → pc: audio_start → pc: 下行音频帧流 → pc: audio_end(done) → pc: reply_done → pc: session_state(monitoring)
+  #
+  # 握手示例（控制帧 JSON）：
+  #   {"type":"hello","role":"phone","device_id":"samsung-s24","app_version":"0.1.0",
+  #    "audio":{"dir":"up","format":"pcm_s16le_16k","chunk_ms":40},"features":["wakeword","bargein"]}
+  #   {"type":"ready","session_id":"vs-1780000000-xxxx","audio":{"up":"pcm_s16le_16k","down":"mp3_24k"}}
+  #
+  # VoiceControlFrame（控制帧，统一 schema，x-phase: v1.5-m1）
+  #   type: hello|audio_start|audio_end|wake|cancel|heartbeat|speech_start|speech_end|interrupt
+  #        |ready|session_state|transcript|audio_start|audio_end|reply_done|error|pong|ping
+  #   通用字段：ts(unix_ms) / device_id / session_id
+  #   session_state.state ∈ {monitoring, listening, thinking, speaking, idle}
+  #   error.code ∈ {auth_failed, bad_frame, kicked, stt_unavailable, tts_unavailable, empty, timeout, internal}
+  #   audio_end.reason ∈ {done, interrupted, error}
+  #   reply_done.route ∈ {brain, local}
+  # 心跳：客户端每 15-30s 发 {"type":"heartbeat"} → 服务端回 {"type":"pong"}；服务端每 30s 主动 ping
+  # 互斥：同 device_id 新 hello 踢旧连接（旧连接收 {"type":"error","code":"kicked"} 后关闭）
+  # 状态：会话状态变化经 GET /api/v1/voice/status 查询；EVT 广播复用 EventBus（V1.5 M3）
+  # TODO(M3)：路径 A 全双工（apm_bridge）接入后补充 interrupt/barge-in 语义，x-phase 升 v1.5-m3
+
+  # ========== WS /relay/ws 中继契约（mobile-voice-spec §6/§7，V1.5 M2） ==========
+  # 端点：WS /relay/ws（独立中继服务，端口 19090；部署目标 CloudBase CloudRun）
+  # 鉴权：?token= 查询参数 或 pair 帧内 token（.env RELAY_TOKEN；未配置=开发态放行，生产必须配置）
+  # 角色：手机(role=phone) 与 PC(role=pc) 使用同一 pairing_code 各自连入 → 中继双向绑定
+  # 帧格式：与 /ws/voice 同构 —— 控制帧=WS 文本帧(JSON)；音频帧=WS 二进制帧
+  #   [0x02][seq:u32 BE][ts_ms:u64 BE][payload]（E2EE 时 payload=密文，中继只见密文）
+  # 握手（配对帧）：
+  #   {"type":"pair","role":"phone|pc","device_id":"...","pairing_code":"..."}
+  #   中继回 {"type":"paired","session_id":"...","peer":{"role","device_id"}}
+  # 控制帧类型（中继自身处理，不透传）：pair / paired / peer_left / heartbeat / pong / error
+  #   其余控制帧与音频帧一律原样透传给对端（纯透传不解析不存储）
+  # 心跳：两端每 15s heartbeat → 中继回 pong；60s 无帧踢连接并通知对端 peer_left
+  # E2EE：AES-256-GCM（.env RELAY_E2EE_KEY 32 字节 base64，两端共享），AAD=帧头含 seq 防重放
+  # 安全边界：中继不落盘、不解析、不日志内容；WSS(TLS) 生产强制
+  # 联调脚本：scripts/mock_phone_client.py（mock_phone → relay → PC relay_client → voice 网关）
