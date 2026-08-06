@@ -101,8 +101,10 @@ class WakeWordEngine(
             numThreads = 2,
             provider = "cpu",
             debug = false,
-            // 模型 README 声明为 zipformer（非 zipformer2）；错配会导致模型加载失败/行为异常
-            modelType = "zipformer"
+            // v0.6.1 实测（sherpa-onnx Python 验证）：模型实为 zipformer2 架构！
+            // modelType=zipformer 时 native 层读 metadata 失败直接崩溃（attention_dims 缺失，
+            // Android 表现 = 开启唤醒词后 App 闪退）。zipformer2 加载验证通过。
+            modelType = "zipformer2"
         )
         val config = KeywordSpotterConfig(
             featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),

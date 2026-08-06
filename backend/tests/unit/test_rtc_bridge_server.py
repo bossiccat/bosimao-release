@@ -164,3 +164,55 @@ async def test_health_metrics_serializable(fake_apm):
     finally:
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_replace_semantics_old_cleanup_does_not_kill_new(fake_apm):
+    """P1 回归：旧连接被顶替后的 cleanup 不得误伤新连接（压测 S6 实锤的顶替竞态）。
+    A 被 B 顶替 → A 的 finally 清理应跳过（身份检查）→ B 的 session 存活、可继续收流。"""
+    bridge, state, server, port = await _start_server()
+    url = f"ws://127.0.0.1:{port}"
+
+    a_events: list[str] = []
+
+    async def conn_a():
+        try:
+            async with websockets.connect(url, open_timeout=5) as ws:
+                await ws.send(json.dumps({"type": "hello", "device_id": "dev-a", "room_id": "r-a", "sdk_version": "t"}))
+                await asyncio.wait_for(ws.recv(), timeout=5)  # ready
+                try:
+                    await asyncio.wait_for(ws.recv(), timeout=8)
+                except websockets.exceptions.ConnectionClosed:
+                    a_events.append("closed")
+                except asyncio.TimeoutError:
+                    a_events.append("timeout")
+        except Exception as e:  # noqa: BLE001
+            a_events.append(f"err:{str(e)[:40]}")
+
+    task_a = asyncio.create_task(conn_a())
+    await asyncio.sleep(0.5)
+
+    # B 连接（顶替 A）
+    async with websockets.connect(url, open_timeout=5) as ws_b:
+        await ws_b.send(json.dumps({"type": "hello", "device_id": "dev-b", "room_id": "r-b", "sdk_version": "t"}))
+        ready = json.loads(await asyncio.wait_for(ws_b.recv(), timeout=5))
+        assert ready["type"] == "ready"
+
+        # 等 A 的 finally 清理执行完（A 已收到 close）
+        await asyncio.sleep(0.8)
+        assert "closed" in a_events, f"A 应被顶替关闭，实际 {a_events}"
+
+        # 关键断言：B 的 session 必须存活（未被 A 的 cleanup 误关）
+        assert state["sidecar_connected"] is True, "B 连接应保持 sidecar_connected=True"
+        assert bridge._session is not None and bridge._session.device_id == "dev-b"
+
+        # B 发音频 → 必须进入 B 的 session（fake_apm.fed 增长）
+        pcm = bytes(640)  # 20ms @16k
+        before = len(fake_apm[-1].fed) if fake_apm else 0
+        await ws_b.send(json.dumps({"type": "up_audio", "pcm_b64": base64.b64encode(pcm).decode()}))
+        await asyncio.sleep(0.3)
+        assert len(fake_apm[-1].fed) > before, "B 的 up_audio 必须被 B 的 session 接收"
+
+    await task_a
+    server.close()
+    await server.wait_closed()

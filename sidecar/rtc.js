@@ -69,7 +69,7 @@ function enterRoom(cred) {
 }
 
 // ---------- sidecar 主流程 ----------
-function runSidecar(cred) {
+function runSidecar() {
   // 下行注入：先停本地麦克风再开启自定义采集（官方 d.ts 要求互斥）
   try { cloud.stopLocalAudio(); } catch (e) { /* ignore */ }
   try { cloud.enableCustomAudioCapture(true); } catch (e) { log('ERR', `enableCustomAudioCapture 失败: ${e.message}`); }
@@ -92,7 +92,7 @@ function runSidecar(cred) {
   );
   bridge.start({
     type: 'hello', role: 'sidecar', sdk_version: getSdkVersion(),
-    device_id: ARGS.device, room_id: cred.room_id, user_id: cred.user_id,
+    device_id: ARGS.device, room_id: currentRoom || '', user_id: config.SIDECAR_USER_ID,
   });
 
   // 远端音频回调 → 16k s16 → WS 上行
@@ -143,7 +143,7 @@ function runSidecar(cred) {
     log('SIG', 'userSig 过期回调；由 rtc_bridge 侧重新签发后重进房（MVP 记录日志）');
   });
 
-  enterRoom(cred);
+  // v0.6.1：进房由意图轮询 pollAndJoin 触发（不再启动即进房）
 
   // 周期统计
   setInterval(() => {
@@ -154,6 +154,49 @@ function runSidecar(cred) {
   setTimeout(() => { if (!exited) exitSidecar('hold_timeout'); }, ARGS.holdS * 1000);
 }
 
+
+// ---------- 意图轮询（v0.6.1）：PC 不知道手机 device_id，枚举 pending 进对应房间 ----------
+let currentRoom = null;
+let pollingBusy = false;
+
+async function fetchSigForDevice(deviceId) {
+  // sign_for_sidecar 会消费意图（防重复进房），返回同一房间的 PC userSig
+  const resp = await fetch(`${ARGS.signUrl}/api/v1/voice/session/sign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_id: deviceId, user_id: config.SIDECAR_USER_ID }),
+  });
+  const parsed = await resp.json();
+  if (parsed.code === 0 && parsed.data && parsed.data.user_sig) {
+    log('SIG', `意图消费成功 room=${parsed.data.room_id} user=${parsed.data.user_id}`);
+    return parsed.data;
+  }
+  throw new Error(`sign 失败: ${JSON.stringify(parsed)}`);
+}
+
+async function pollAndJoin() {
+  if (exited || pollingBusy) return;
+  pollingBusy = true;
+  try {
+    const resp = await fetch(`${ARGS.signUrl}/api/v1/voice/session/pending`);
+    const parsed = await resp.json();
+    const intents = (parsed.data && parsed.data.intents) || [];
+    if (intents.length === 0) { pollingBusy = false; return; }
+    const intent = intents[0];
+    if (currentRoom === intent.room_id) { pollingBusy = false; return; }
+    log('SIG', `发现会话意图 device=${intent.device_id} room=${intent.room_id}`);
+    if (currentRoom) {
+      try { cloud.exitRoom(); } catch (e) { /* ignore */ }
+      await new Promise(r => setTimeout(r, 600));
+    }
+    const cred = await fetchSigForDevice(intent.device_id);
+    currentRoom = cred.room_id;
+    enterRoom(cred);
+  } catch (e) {
+    log('ERR', `意图轮询失败: ${e.message}`);
+  }
+  pollingBusy = false;
+}
 function exitSidecar(reason) {
   if (exited) return;
   exited = true;
@@ -181,12 +224,15 @@ async function main() {
     return;
   }
 
+  // v0.6.1：sidecar 不再进固定房间，改为意图轮询驱动（手机唤醒后云函数记录意图，PC 轮询进对应房间）
   try {
-    const cred = await fetchSig('sidecar');
-    runSidecar(cred);
+    runSidecar();
   } catch (e) {
-    log('FATAL', `启动失败: ${e.message}`);
+    log('FATAL', `runSidecar 初始化异常: ${e.message}`);
   }
+  setInterval(pollAndJoin, 2000);
+  log('SIG', '意图轮询已启动（每 2s），等待手机唤醒...');
+  setTimeout(pollAndJoin, 300);
 }
 
 main();

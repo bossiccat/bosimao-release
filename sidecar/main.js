@@ -1,5 +1,13 @@
 // Electron 主进程：创建隐藏窗口并加载渲染进程脚本（TRTC SDK 需在渲染进程/DOM 环境运行）
 // sidecar 无 UI：隐藏窗口常驻，职责最小化（进房 + 音频双向桥接 + 状态日志）
+// 防未捕获异常弹窗（Electron 默认弹 a JavaScript error occurred...）：
+// 吞掉并打印，sidecar 常驻进程不允许错误对话框打扰用户
+process.on('uncaughtException', (err) => {
+  console.error('[main] uncaughtException:', err && err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[main] unhandledRejection:', reason);
+});
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
 

@@ -42,14 +42,24 @@ class BridgeServer:
             await ws.send(json.dumps(msg, ensure_ascii=False))
 
     async def handler(self, ws) -> None:
-        # 顶替旧连接（MVP 单 sidecar）
+        # 顶替旧连接（MVP 单 sidecar）——必须先接管 self._ws 再 close 旧连接：
+        # 否则 await old.close() 握手期间 self._ws 仍指向旧连接，旧 handler 的 finally
+        # 清理会通过身份检查误伤新连接（压测 S6 实锤的顶替竞态窗口）。
         old = self._ws
+        old_session = self._session
+        self._ws = ws
         if old is not None and old is not ws:
             try:
                 await old.close(code=1000, reason="replaced")
             except Exception:  # noqa: BLE001
                 pass
-        self._ws = ws
+        # 旧 session 显式释放（旧 handler 的 _cleanup 会因身份检查跳过，这里必须兜底，防泄漏）
+        if old_session is not None:
+            try:
+                await old_session.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._session = None
         logger.info("sidecar ws connected %s", ws.remote_address)
 
         try:
@@ -98,7 +108,7 @@ class BridgeServer:
         except Exception as e:  # noqa: BLE001
             logger.warning("sidecar handler error: %s", e)
         finally:
-            await self._cleanup()
+            await self._cleanup(ws)
 
     async def _dispatch(self, msg: dict) -> None:
         mtype = msg.get("type")
@@ -123,7 +133,12 @@ class BridgeServer:
         else:
             logger.debug("ignored sidecar msg type=%s", mtype)
 
-    async def _cleanup(self) -> None:
+    async def _cleanup(self, ws) -> None:
+        # 身份检查：仅当 self._ws 仍指向本 handler 的连接时才清理。
+        # 否则旧连接被顶替后的清理会误伤新连接（旧 handler 的 finally 关掉新 session，
+        # 新连接"活着"但消息全丢——高压测试 S6 实锤的顶替竞态）。
+        if self._ws is not ws:
+            return
         self.state["sidecar_connected"] = False
         self.state["_session_ref"] = None
         self.state["room_id"] = ""

@@ -1,0 +1,17 @@
+{
+  "name": "trtc-sign",
+  "version": "1.1.0",
+  "description": "TRTC UserSig 签发云函数（Node.js + CloudBase NoSQL voice_intents 意图协调）",
+  "main": "index.js",
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.7.0"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
