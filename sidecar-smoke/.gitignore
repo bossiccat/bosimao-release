@@ -1,0 +1,6 @@
+# 依赖与运行时产物（勿提交）
+node_modules/
+.npm-cache-smoke/
+.npm-cache-smoke2/
+logs/
+*.out

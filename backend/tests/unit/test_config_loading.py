@@ -56,7 +56,7 @@ class TestDetectionLoading:
 
 class TestPushLoading:
     def test_push_values_applied(self, tmp_path, monkeypatch):
-        """providers=[ntfy]、wecom/ntfy 全关、熔断 2/60 → 必须原样加载（曾恒默认）"""
+        """providers=[ntfy]、wecom/feishu/ntfy 全关、熔断 2/60 → 必须原样加载（曾恒默认）"""
         write_yaml(
             tmp_path,
             "push.yaml",
@@ -67,6 +67,11 @@ class TestPushLoading:
               wecom:
                 enabled: false
                 rate_limit_per_minute: 7
+              feishu:
+                enabled: false
+                rate_limit_per_minute: 50
+                webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/t
+                verification_token: verif-abc
               ntfy:
                 enabled: false
                 server: https://example.com
@@ -82,6 +87,10 @@ class TestPushLoading:
         assert cfg.providers == ["ntfy"], "providers 必须来自 YAML"
         assert cfg.wecom.enabled is False, "wecom.enabled=false 必须生效"
         assert cfg.wecom.rate_limit_per_minute == 7
+        assert cfg.feishu.enabled is False, "feishu.enabled=false 必须生效"
+        assert cfg.feishu.rate_limit_per_minute == 50
+        assert cfg.feishu.webhook_url.endswith("/hook/t")
+        assert cfg.feishu.verification_token == "verif-abc"
         assert cfg.ntfy.enabled is False, "ntfy.enabled=false 必须生效"
         assert cfg.ntfy.server == "https://example.com"
         assert cfg.ntfy.priority == "high"

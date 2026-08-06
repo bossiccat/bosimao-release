@@ -3,11 +3,12 @@
 # 进程名以本机实测为准（O-008 用户裁决）
 
 monitors:
-  # Codex：桌面版（开源，CLI 未装）；进程名实测存在，窗口标题正则待 B2 校准
+  # Codex：桌面版（开源，CLI 未装）；B2 结论：主窗口进程实为 ChatGPT.exe（标题 "ChatGPT"）
+  # 2026-08-03 补测修正：title_regex 必须匹配实际标题 "ChatGPT"（原 (?i)codex 匹配不到 → 窗口永远未找到）
   - app_id: codex
     app_name: OpenAI Codex
-    process_name: codex.exe
-    window_title_regex: "(?i)codex"
+    process_name: ChatGPT.exe
+    window_title_regex: "(?i)chatgpt"
     poll_interval_seconds: 6
     enabled: true
 

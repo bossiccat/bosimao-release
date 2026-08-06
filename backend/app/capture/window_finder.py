@@ -95,3 +95,17 @@ def _get_window_rect(hwnd: int) -> WindowRect | None:
     if width <= 0 or height <= 0:
         return None
     return WindowRect(left=left, top=top, width=width, height=height)
+
+
+def is_window_minimized(hwnd: int) -> bool:
+    """判断窗口是否处于最小化状态（Win32 IsIconic）。
+
+    PoC B2 保留项：Trae 最小化必崩 WGC（WorkBuddy 偶崩），orchestrator
+    据此在最小化时主动停 WGC（避免原生崩溃）→ DXGI 兜底 → 恢复后重建。
+    """
+    if win32gui is None:
+        return False
+    try:
+        return bool(win32gui.IsIconic(hwnd))
+    except Exception:  # noqa: BLE001
+        return False

@@ -1,0 +1,305 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/jax_bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_title"
+            android:textColor="@color/jax_fg"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <!-- 会话服务器（TRTC 签发，v0.6.0 主配置） -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/settings_session_label"
+            android:textColor="@color/jax_fg2"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/etSessionUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:hint="@string/settings_session_hint"
+            android:inputType="textUri"
+            android:singleLine="true"
+            android:textColor="@color/jax_fg"
+            android:textColorHint="@color/jax_muted"
+            android:textSize="14sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="@string/settings_session_sub"
+            android:textColor="@color/jax_muted"
+            android:textSize="12sp" />
+
+        <!-- 连接模式（LAN 直连 / RELAY 中继，spec §6.2；v0.6.0 已废弃保留兼容） -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/settings_mode_label"
+            android:textColor="@color/jax_fg2"
+            android:textSize="14sp" />
+
+        <RadioGroup
+            android:id="@+id/rgMode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/rbModeLan"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/settings_mode_lan"
+                android:textColor="@color/jax_fg2"
+                android:textSize="13sp" />
+
+            <RadioButton
+                android:id="@+id/rbModeRelay"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/settings_mode_relay"
+                android:textColor="@color/jax_fg2"
+                android:textSize="13sp" />
+        </RadioGroup>
+
+        <!-- 服务器地址（LAN 直连 PC 网关） -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/settings_server_label"
+            android:textColor="@color/jax_fg2"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/etServer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:hint="@string/settings_server_hint"
+            android:inputType="textUri"
+            android:singleLine="true"
+            android:textColor="@color/jax_fg"
+            android:textColorHint="@color/jax_muted"
+            android:textSize="14sp" />
+
+        <!-- 中继地址（RELAY 模式） -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/settings_relay_label"
+            android:textColor="@color/jax_fg2"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/etRelay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:hint="@string/settings_relay_hint"
+            android:inputType="textUri"
+            android:singleLine="true"
+            android:textColor="@color/jax_fg"
+            android:textColorHint="@color/jax_muted"
+            android:textSize="14sp" />
+
+        <!-- 配对码（RELAY 模式，spec §6.4） -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/settings_pairing_label"
+            android:textColor="@color/jax_fg2"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/etPairingCode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:hint="@string/settings_pairing_hint"
+            android:inputType="text"
+            android:maxLength="12"
+            android:singleLine="true"
+            android:textColor="@color/jax_fg"
+            android:textColorHint="@color/jax_muted"
+            android:textSize="14sp" />
+
+        <!-- E2EE 密钥（留空 = 明文模式） -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/settings_e2ee_label"
+            android:textColor="@color/jax_fg2"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/etE2eeKey"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:hint="@string/settings_e2ee_hint"
+            android:inputType="textVisiblePassword"
+            android:singleLine="true"
+            android:textColor="@color/jax_fg"
+            android:textColorHint="@color/jax_muted"
+            android:textSize="14sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="@string/settings_e2ee_sub"
+            android:textColor="@color/jax_muted"
+            android:textSize="12sp" />
+
+        <!-- 设备 ID（生成后持久化，spec §7.1；PC 配对/中继会话关联） -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/settings_device_id_label"
+            android:textColor="@color/jax_fg2"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/tvDeviceId"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="@color/jax_accent"
+            android:textSize="14sp"
+            android:textIsSelectable="true" />
+
+        <!-- 唤醒词开关 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/settings_wake_label"
+                    android:textColor="@color/jax_fg2"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/settings_wake_sub"
+                    android:textColor="@color/jax_muted"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <Switch
+                android:id="@+id/swWake"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- 灵敏度 -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/settings_threshold_label"
+            android:textColor="@color/jax_fg2"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/tvThreshold"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="@color/jax_accent"
+            android:textSize="14sp" />
+
+        <SeekBar
+            android:id="@+id/sbThreshold"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="40" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_threshold_sub"
+            android:textColor="@color/jax_muted"
+            android:textSize="12sp" />
+
+        <!-- 悬浮窗开关 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/settings_overlay_label"
+                    android:textColor="@color/jax_fg2"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/settings_overlay_sub"
+                    android:textColor="@color/jax_muted"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <Switch
+                android:id="@+id/swOverlay"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnSave"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:drawablePadding="6dp"
+            android:text="@string/btn_save" />
+    </LinearLayout>
+</ScrollView>

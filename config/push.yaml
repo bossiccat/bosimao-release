@@ -4,15 +4,24 @@
 push:
   # 启用的 Provider 顺序（主 → 备），manager 按序路由 + 熔断
   providers:
-    - wecom
+    - feishu
     - ntfy
 
-  # 企业微信 webhook（URL 在 .env: WECOM_WEBHOOK_URL）
-  wecom:
+  # 飞书机器人（O-002 选型：企微→飞书，主选；webhook URL 在 .env: FEISHU_WEBHOOK_URL）
+  # 注意：事件订阅回调 POST /api/v1/push/feishu/callback 需公网可达
+  #       （用户后续提供内网穿透/服务器方案；语音对话路径见 O-014）
+  feishu:
     enabled: true
-    rate_limit_per_minute: 15   # 官方 ~20/min，留余量
+    rate_limit_per_minute: 100   # 官方 ~100/min，留余量
+    webhook_url: ""              # 备选：直接填完整 webhook（优先 .env）
+    verification_token: ""       # 事件订阅验证 token（创建飞书自建应用后填写，可选）
 
-  # ntfy（默认官方服务器或自建；topic 在 .env: NTFY_TOPIC）
+  # 企业微信 webhook（用户无企微，O-002 已裁决 → 默认关闭，保留代码）
+  wecom:
+    enabled: false
+    rate_limit_per_minute: 15    # 官方 ~20/min，留余量
+
+  # ntfy（备选，支持截图附件；topic 在 .env: NTFY_TOPIC）
   ntfy:
     enabled: true
     server: https://ntfy.sh

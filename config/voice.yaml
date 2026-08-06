@@ -1,0 +1,24 @@
+# voice 网关配置（mobile-voice-spec §8.4，契约真源）
+voice:
+  path: apm                       # apm=MiniCPM-o Realtime API 云端全双工（2026-08-05 接入，294 测试通过）
+  half_duplex:
+    stt: sherpa-onnx-1.13.2
+    stt_model: wenetspeech-streaming   # ADR-003 中文流式模型
+    stt_model_dir: C:/jaxbuild/models/sherpa/wenetspeech-streaming
+    tts: edge-tts
+    edge_tts_voice: zh-CN-XiaoxiaoNeural
+    edge_tts_cache_size: 10            # 缓存最近 10 条
+    brain_trigger: [帮我, 拆解, 重构, 实现, 修, 写, 优化, 测试]  # 触发词 → brain intent
+  session:
+    idle_timeout_s: 15.0               # V-5 静默回落
+    max_round_ms: 60000.0              # 单轮上限
+    hello_timeout_s: 10.0              # 等待 hello
+    heartbeat_interval_s: 30.0         # 心跳 30s ping
+    heartbeat_timeout_s: 60.0          # 心跳超时踢连接（必须 > interval：发 ping 后立即检查 last_rx，
+                                       # 若 timeout ≤ interval，被动应答客户端（relay_client）每周期必被误踢；
+                                       # 2026-08-05 现场 15<30 导致每 30s 踢一次）
+    buffer_max_bytes: 10485760         # 10MB 环形缓冲
+  apm:
+    api_url: wss://minicpmo45.modelbest.cn/v1/realtime?mode=audio   # MiniCPM-o Realtime API
+    system_prompt: 你是贾克斯，一个中文语音助手。回答简短自然，有问必答。  # 全双工系统提示词（可接大脑 hook）
+    # token: ""                       # 预留鉴权；当前 API 匿名可用（2026-08-05 实测）

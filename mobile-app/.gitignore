@@ -1,0 +1,19 @@
+*.iml
+.gradle/
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+app/build/
+# 构建备份/临时产物（基线 commit 不入库）
+app/build.stale*/
+*.bak
+app/libs/*.aar
+app/libs/*.jar
+app/src/main/assets/sherpa-onnx-*
+# 模型二进制不入库（脚本下载）
+*.onnx
+*.bin

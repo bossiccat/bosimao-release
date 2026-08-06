@@ -8,7 +8,13 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ..core.events import EVT_ALERT, EVT_SESSION_UPDATED, EventBus
+from ..core.events import (
+    EVT_ALERT,
+    EVT_AUTH_PROMPT,
+    EVT_AUTH_RESULT,
+    EVT_SESSION_UPDATED,
+    EventBus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +29,8 @@ class WsHub:
         self._bus = bus
         self._bus.subscribe(EVT_SESSION_UPDATED, self._broadcast_session)
         self._bus.subscribe(EVT_ALERT, self._broadcast_alert)
+        self._bus.subscribe(EVT_AUTH_PROMPT, self._broadcast_auth_prompt)
+        self._bus.subscribe(EVT_AUTH_RESULT, self._broadcast_auth_result)
 
     async def connect(self, ws: WebSocket) -> None:
         await ws.accept()
@@ -44,6 +52,14 @@ class WsHub:
 
     async def _broadcast_alert(self, data: dict) -> None:
         await self.broadcast({"type": "event", "event": "alert", "data": data})
+
+    async def _broadcast_auth_prompt(self, data: dict) -> None:
+        """授权引导：进入 authorizing 时下发（spec §4）"""
+        await self.broadcast({"type": "event", "event": "auth_prompt", "data": data})
+
+    async def _broadcast_auth_result(self, data: dict) -> None:
+        """授权结果：成功/拒绝/超时下发（spec §4）"""
+        await self.broadcast({"type": "event", "event": "auth_result", "data": data})
 
 
 def create_ws_router(bus: EventBus) -> tuple[APIRouter, WsHub]:

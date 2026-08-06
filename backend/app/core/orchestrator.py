@@ -13,7 +13,12 @@ from pathlib import Path
 
 from ..capture.session_manager import SessionManager
 from ..config import AppConfig
-from ..core.events import EVT_SESSION_UPDATED, EventBus
+from ..core.events import (
+    EVT_AUTH_PROMPT,
+    EVT_AUTH_RESULT,
+    EVT_SESSION_UPDATED,
+    EventBus,
+)
 from ..core.state import AgentState, SessionSnapshot, state
 from ..engine.llama_omni_client import LlamaOmniClient
 from ..engine.status_detector import DetectionResult, detect_status
@@ -58,16 +63,16 @@ class Orchestrator:
         for s in self._sessions.all():
             state.get_or_create(s.target.app_id, s.target.app_name)
             if s.target.enabled:
-                self._sessions.start_wgc(s.target.app_id)
+                # 已授权窗口自动启动 WGC（原生捕获移出事件循环，防 GIL/COM 阻塞）
+                await asyncio.to_thread(self._sessions.start_wgc, s.target.app_id)
         self._task = asyncio.create_task(self._monitor_loop())
         logger.info("orchestrator started: %d targets", len(self._sessions.all()))
 
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
-        for s in self._sessions.all():
-            if s.wgc:
-                s.wgc.stop()
+        # ADR-010：会话停止即清理该会话全部帧文件（防 tmp/captures 无限堆积）
+        self._sessions.stop_all()
 
     def set_voice_active(self, active: bool) -> None:
         """语音对话期间调用：监控自动降频（显存时分复用）"""
@@ -100,6 +105,42 @@ class Orchestrator:
         await self._maybe_alert(snap, result)
         return True
 
+    # ---------- WGC 授权流程（backend-capture-auth-spec §3/§4） ----------
+    async def authorize_capture(self, app_id: str, retry: bool = False) -> dict:
+        """授权入口：进入 authorizing → WS auth_prompt → 试捕获 → 回写 → WS auth_result → start_wgc。
+
+        试捕获在后台线程执行（避免阻塞事件循环）；返回 SessionManager 判定结果。
+        """
+        res = self._sessions.prepare_authorize(app_id, retry)
+        if not res["ok"]:
+            return res
+        await self._bus.emit(
+            EVT_AUTH_PROMPT,
+            {
+                "app_id": app_id,
+                "app_name": res.get("app_name", app_id),
+                "hint": res.get("hint", ""),
+            },
+        )
+        trial = await asyncio.to_thread(self._sessions.finish_authorize, app_id)
+        await self._bus.emit(
+            EVT_AUTH_RESULT,
+            {
+                "app_id": app_id,
+                "ok": trial["ok"],
+                "mode": trial.get("mode", "status-only"),
+                "error": trial.get("error"),
+            },
+        )
+        if trial["ok"]:
+            # 授权成功 → 真正启动 WGC 会话（原生捕获移出事件循环，防 GIL/COM 阻塞）
+            await asyncio.to_thread(self._sessions.start_wgc, app_id)
+        return trial
+
+    def capture_status(self) -> list[dict]:
+        """各窗口授权状态（GET /api/v1/capture/status 消费）"""
+        return [s.to_dict() for s in self._sessions.all()]
+
     # ---------- 监控循环 ----------
     async def _monitor_loop(self) -> None:
         while True:
@@ -118,15 +159,19 @@ class Orchestrator:
             target = session.target
             if not target.enabled:
                 continue
+            snap = state.get(target.app_id)
+            if snap is None:
+                continue
+            # 捕获模式同步：pending-auth/authorizing/wgc/dxgi/status-only/lost → UI
+            # （spec §4：授权过程中 capture_mode 变化随监控循环广播）
+            snap.capture_mode = session.mode
+            snap.window_found = session.window is not None
             # 轮询间隔（对话期降频）
             interval = (
                 self._cfg.monitors.voice_active_poll_interval_seconds
                 if self._voice_active
                 else target.poll_interval_seconds
             )
-            snap = state.get(target.app_id)
-            if snap is None:
-                continue
             if time.time() - snap.last_frame_at < interval:
                 continue
             await self._tick_one(target.app_id)
@@ -137,10 +182,57 @@ class Orchestrator:
         if snap is None or session is None:
             return
 
-        frame_path = self._sessions.snapshot(app_id)
-        if frame_path is None:
-            self._update_unknown(snap, "捕获失败（窗口可能最小化）")
+        # 拒绝降级（status-only）：仅窗口存在性/进程状态监控，不截屏分析（spec §7）
+        if session.mode == "status-only":
+            snap.state = AgentState.UNKNOWN
+            snap.capture_mode = "status-only"
+            snap.window_found = session.window is not None
+            snap.last_summary = "未授权，仅状态监控"
+            await self._bus.emit(EVT_SESSION_UPDATED, snap.to_dict())
             return
+
+        # 最小化/崩溃防御（POC-002 保留项 3：Trae 最小化必崩 WGC）
+        minimized = self._sessions.is_minimized(app_id)
+
+        if minimized:
+            # 最小化：主动停 WGC（避免原生崩溃）→ DXGI 兜底
+            if self._sessions.handle_minimized(app_id):
+                logger.info("minimized: stopped wgc app=%s (dxgi fallback)", app_id)
+            session.minimized = True
+            snap.capture_mode = "dxgi"
+            frame_path = self._sessions.snapshot(app_id)
+            if frame_path is None:
+                self._update_unknown(snap, "窗口最小化，仅状态监控")
+                snap.window_found = session.window is not None
+                await self._bus.emit(EVT_SESSION_UPDATED, snap.to_dict())
+                return
+        else:
+            # 窗口可见：恢复/重建 WGC
+            if session.minimized:
+                # 刚从最小化恢复 → 即时重建（合法恢复路径，不受冷却限制）
+                session.minimized = False
+                if session.authorized and self._sessions.handle_restored(app_id):
+                    session.last_rebuild_at = time.time()
+                    logger.info("wgc rebuilt after restore: app=%s", app_id)
+            elif session.wgc is None and session.authorized:
+                # WGC 缺失（未启动/已停）→ 节流重建（防崩溃循环线程堆积）
+                if self._sessions.rebuild_due(app_id):
+                    if self._sessions.handle_restored(app_id):
+                        session.last_rebuild_at = time.time()
+                        logger.info("wgc rebuilt: app=%s", app_id)
+            elif session.wgc is not None and not session.wgc.is_running():
+                # WGC 崩溃（on_closed/进程 exit）：清理崩溃会话 → 节流重建
+                self._sessions.handle_minimized(app_id)
+                if self._sessions.rebuild_due(app_id):
+                    if self._sessions.handle_restored(app_id):
+                        session.last_rebuild_at = time.time()
+                        logger.info("wgc rebuilt after crash: app=%s", app_id)
+            frame_path = self._sessions.snapshot(app_id)
+            if frame_path is None:
+                self._update_unknown(snap, "捕获失败（窗口可能最小化）")
+                snap.window_found = session.window is not None
+                await self._bus.emit(EVT_SESSION_UPDATED, snap.to_dict())
+                return
 
         t0 = time.time()
         try:

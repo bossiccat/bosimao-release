@@ -38,7 +38,7 @@ class DxgiFallback:
         self._output_dir.mkdir(parents=True, exist_ok=True)
         try:
             capture = WindowsCapture(
-                display=0,  # 主显示器整屏
+                monitor_index=1,  # 主显示器整屏（2.0.0 为 1-based，0 会抛异常）
                 cursor_capture=None,
                 draw_border=None,
             )
@@ -47,6 +47,11 @@ class DxgiFallback:
             def on_frame_arrived(frame: Frame, capture_control: InternalCaptureControl):
                 frame.save_as_image(str(path))
                 capture_control.stop()
+
+            @capture.event
+            def on_closed(capture_control: InternalCaptureControl):
+                # 2.0.0 强制要求 on_closed，否则 start() 抛异常
+                logger.info("dxgi screen capture closed")
 
             capture.start()  # 拿到第一帧即 stop
             return True
@@ -108,6 +113,9 @@ class DxgiFallback:
             self._crop_and_downsample(raw_path, out_path, box)
         else:
             self._downsample(raw_path, out_path)
-        raw_path.unlink(missing_ok=True)
+        try:
+            raw_path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001  沙盒/回收站不可用时保留原图
+            logger.debug("raw cleanup skipped: %s", raw_path)
         self._last_frame = out_path
         return out_path

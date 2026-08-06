@@ -2,13 +2,17 @@
 
 - 控制帧 = WS 文本帧（JSON）：pair / paired / peer_joined / peer_left / heartbeat / pong / error / kick
 - 音频帧 = WS 二进制帧：[0x02][seq:u32 BE][ts_ms:u64 BE][payload]
-- E2EE：AES-256-GCM 预共享密钥（.env RELAY_E2EE_KEY，32 字节 base64）；
-  payload = nonce(12) || 密文 || tag(16)；AAD = 帧头 13 字节（含 seq）→ 防重放/防篡改。
+- E2EE：AES-256-GCM 预共享密钥；与 App VoiceCipher 对齐：
+  - 密钥：32 字节 AES 密钥，可来自 32B base64（RELAY_E2EE_KEY 直传）或
+    passphrase 经 SHA-256 派生（App VoiceCipher.deriveKey 同构）
+  - payload = nonce(12) || 密文 || tag(16)；AAD = seq 仅 8 字节大端（App seqBytes 同构）
+  - ts_ms 仅存帧头，不参与 AAD（App 侧同规则）
 - 本模块独立于 app（relay 可单独启动），帧编解码与 app.voice.schemas 同构但自包含。
 """
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -25,6 +29,10 @@ AUDIO_FRAME_HEADER_LEN = AUDIO_FRAME_HEADER.size
 MAX_AUDIO_CHUNK_BYTES = 64 * 1024
 E2EE_NONCE_LEN = 12
 E2EE_TAG_LEN = 16
+E2EE_AAD_LEN = 8  # AAD = seq 8 字节大端（App VoiceCipher.seqBytes 同构）
+
+# App 默认开发密钥（VoiceConfig.DEFAULT_E2EE_KEY）；PC 侧可用它直接派生同一 32B 密钥
+DEFAULT_E2EE_PASSPHRASE = "jax-voice-dev-e2ee-20260803-0001"
 
 # 配对帧（M2）：{"type":"pair","role":"phone|pc","device_id":"...","pairing_code":"..."}
 PAIR_ROLES = ("phone", "pc")
@@ -92,19 +100,31 @@ def parse_pair_frame(raw: str) -> dict:
     return msg
 
 
-# ---------- E2EE（AES-256-GCM，AAD 含 seq 防重放） ----------
+# ---------- E2EE（AES-256-GCM，AAD = seq 8B，与 App VoiceCipher 对齐） ----------
+
+def derive_key_from_passphrase(passphrase: str) -> bytes:
+    """App VoiceCipher.deriveKey 同构：SHA-256(UTF-8) → 32 字节 AES 密钥"""
+    if not passphrase or not passphrase.strip():
+        raise ValueError("E2EE passphrase must not be blank")
+    return hashlib.sha256(passphrase.encode("utf-8")).digest()
+
 
 def load_e2ee_key(raw: str | None) -> bytes:
-    """读取 RELAY_E2EE_KEY（32 字节 base64）；缺失/非法时生成开发密钥并告警"""
-    if raw:
-        try:
-            key = base64.b64decode(raw.strip(), validate=True)
-        except Exception as e:  # noqa: BLE001 - 配置错误不阻断，回落开发密钥
-            raise ValueError(f"RELAY_E2EE_KEY 不是合法 base64: {e}") from e
-        if len(key) != 32:
-            raise ValueError(f"RELAY_E2EE_KEY 必须为 32 字节（base64），当前 {len(key)} 字节")
+    """读取 E2EE 密钥（两种表示，与 App 对齐）：
+    - 32 字节 base64（RELAY_E2EE_KEY 旧直传）→ 原样返回；
+    - 明文 passphrase → SHA-256 派生（App VoiceCipher.deriveKey 同构）。
+    缺失时生成开发密钥（调用方负责日志告警）。
+    """
+    if raw is None or not raw.strip():
+        return os.urandom(32)
+    s = raw.strip()
+    try:
+        key = base64.b64decode(s, validate=True)
+    except Exception:  # noqa: BLE001 - 非法 base64 按 passphrase 处理
+        key = b""
+    if len(key) == 32:
         return key
-    return os.urandom(32)
+    return derive_key_from_passphrase(s)
 
 
 def gen_dev_key_b64() -> str:
@@ -113,7 +133,12 @@ def gen_dev_key_b64() -> str:
 
 
 class RelayE2EE:
-    """AES-256-GCM 音频 payload 加密：AAD = 帧头（magic+seq+ts），防重放/防篡改"""
+    """AES-256-GCM 音频 payload 加密（与 App VoiceCipher 对齐）
+
+    - AAD = seq 仅 8 字节大端（u32 seq 值高位补零；App seqBytes 同构）→ 防重放/防篡改
+    - payload = [iv 12B][AES-GCM 密文+tag 16B]；ts_ms 仅存帧头，不参与 AAD
+    - encrypt_audio/decrypt_audio 保留 (seq, ts_ms, payload) 签名兼容旧调用方
+    """
 
     def __init__(self, key: bytes) -> None:
         if len(key) != 32:
@@ -121,21 +146,21 @@ class RelayE2EE:
         self._aead = AESGCM(key)
 
     @staticmethod
-    def _aad(seq: int, ts_ms: int) -> bytes:
-        return AUDIO_FRAME_HEADER.pack(AUDIO_FRAME_MAGIC, seq & 0xFFFFFFFF, ts_ms & 0xFFFFFFFFFFFFFFFF)
+    def _aad(seq: int) -> bytes:
+        return struct.pack(">Q", seq & 0xFFFFFFFFFFFFFFFF)
 
     def encrypt_audio(self, seq: int, ts_ms: int, payload: bytes) -> bytes:
-        """加密 payload：nonce || 密文 || tag（AAD 含 seq/ts）"""
+        """加密 payload：nonce(12) || 密文+tag(16)（AAD = seq 8B；ts_ms 不参与）"""
         nonce = secrets.token_bytes(E2EE_NONCE_LEN)
-        ct = self._aead.encrypt(nonce, payload, self._aad(seq, ts_ms))
+        ct = self._aead.encrypt(nonce, payload, self._aad(seq))
         return nonce + ct
 
     def decrypt_audio(self, seq: int, ts_ms: int, data: bytes) -> bytes:
-        """解密 payload；AAD 不符/被篡改/重放 seq 抛 ValueError"""
+        """解密 payload；AAD 不符/被篡改/重放 seq 抛 ValueError（ts_ms 不参与）"""
         if len(data) < E2EE_NONCE_LEN + E2EE_TAG_LEN:
             raise ValueError(f"e2ee payload too short: {len(data)}")
         nonce, ct = data[:E2EE_NONCE_LEN], data[E2EE_NONCE_LEN:]
-        return self._aead.decrypt(nonce, ct, self._aad(seq, ts_ms))
+        return self._aead.decrypt(nonce, ct, self._aad(seq))
 
 
 class ReplayGuard:

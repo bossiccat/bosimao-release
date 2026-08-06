@@ -35,8 +35,10 @@ class VisionResult:
 
 
 def parse_vision_output(text: str) -> VisionResult:
-    """解析模型输出为 VisionResult（容错：剥离 markdown 代码块 / 提取首个 JSON）"""
+    """解析模型输出为 VisionResult（容错：剥离 <think> 推理块 / markdown 代码块 / 提取首个 JSON）"""
     cleaned = text.strip()
+    # POC-001 实测：decode 输出含 <think> 推理块，先剥离（防止块内 { } 干扰 JSON 提取）
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL).strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
     cleaned = re.sub(r"\s*```$", "", cleaned)
     try:

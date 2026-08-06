@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>波斯猫 · 中继连通性测试</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; background: #f5f6f8; margin: 0; padding: 16px; color: #1a2230; }
+  h1 { font-size: 18px; color: #005040; }
+  .card { background: #fff; border-radius: 12px; padding: 16px; margin: 12px 0; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  .row { margin: 10px 0; display: flex; justify-content: space-between; align-items: center; }
+  .label { color: #8a94a6; font-size: 13px; }
+  .status { font-size: 14px; font-weight: 600; }
+  .ok { color: #0a8f6e; }
+  .fail { color: #d64545; }
+  button { background: #005040; color: #fff; border: none; border-radius: 8px; padding: 12px 20px; font-size: 15px; width: 100%; margin-top: 8px; }
+  pre { background: #f0f2f5; border-radius: 8px; padding: 10px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+  .note { font-size: 12px; color: #8a94a6; margin-top: 12px; }
+</style>
+</head>
+<body>
+  <h1>波斯猫 · 中继连通性测试</h1>
+  <div class="card">
+    <div class="row"><span class="label">目标中继</span><span class="status" id="url"></span></div>
+    <div class="row"><span class="label">WebSocket 连接</span><span class="status" id="conn">-</span></div>
+    <div class="row"><span class="label">配对结果</span><span class="status" id="pair">-</span></div>
+  </div>
+  <button onclick="run()">开始测试</button>
+  <div class="card" style="display:none" id="logCard"><pre id="log"></pre></div>
+  <div class="note">提示：若 WebSocket 连接显示失败（红色），说明手机当前网络到中继的 wss 通道不通——请切换 WiFi/4G 或检查网络；若连接成功但配对失败，把红色文字发给我们。</div>
+
+<script>
+var WS_URL = "wss://jax-relay-283963-7-1436773060.sh.run.tcloudbase.com/relay/ws";
+var TOKEN = "yOeLI165VkN3DTJ1xbHeTG8iohrgtbrVG3D/gsjPQPg=";
+document.getElementById("url").textContent = WS_URL;
+
+function log(msg) {
+  var card = document.getElementById("logCard");
+  card.style.display = "block";
+  document.getElementById("log").textContent += msg + "\n";
+}
+
+function setConn(text, cls) {
+  var el = document.getElementById("conn");
+  el.textContent = text;
+  el.className = "status " + (cls || "");
+}
+function setPair(text, cls) {
+  var el = document.getElementById("pair");
+  el.textContent = text;
+  el.className = "status " + (cls || "");
+}
+
+function run() {
+  setConn("连接中...", "");
+  setPair("-", "");
+  document.getElementById("logCard").style.display = "none";
+  log("开始测试 " + new Date().toLocaleTimeString());
+  var ws;
+  try {
+    ws = new WebSocket(WS_URL);
+  } catch (e) {
+    setConn("构造失败", "fail");
+    log("构造失败: " + e.message);
+    return;
+  }
+  var timer = setTimeout(function() {
+    setConn("连接超时（10秒）", "fail");
+    log("10s 内未连接成功 — 网络到中继 wss 可能被阻断");
+    try { ws.close(); } catch(e) {}
+  }, 10000);
+
+  ws.onopen = function() {
+    clearTimeout(timer);
+    setConn("✅ 连接成功", "ok");
+    log("WS 连接成功，发送配对帧...");
+    ws.send(JSON.stringify({
+      type: "pair",
+      role: "phone",
+      device_id: "webtest-" + Date.now().toString(36),
+      pairing_code: "JAX2026",
+      token: TOKEN
+    }));
+  };
+  ws.onmessage = function(ev) {
+    log("收到: " + ev.data);
+    if (typeof ev.data === "string") {
+      try {
+        var j = JSON.parse(ev.data);
+        if (j.type === "paired") {
+          setPair("✅ 配对成功", "ok");
+          log("配对成功! session=" + j.session_id);
+          ws.close();
+        } else if (j.type === "error") {
+          setPair("❌ " + j.message, "fail");
+        }
+      } catch(e) {}
+    }
+  };
+  ws.onerror = function(e) {
+    clearTimeout(timer);
+    setConn("❌ 连接失败", "fail");
+    log("onerror: " + (e && e.message ? e.message : "WebSocket 错误（多为网络/证书问题）"));
+  };
+  ws.onclose = function(e) {
+    clearTimeout(timer);
+    if (document.getElementById("conn").textContent.indexOf("✅") < 0) {
+      setConn("❌ 连接关闭 code=" + e.code, "fail");
+    }
+    log("连接关闭: code=" + e.code + " reason=" + e.reason);
+  };
+}
+</script>
+</body>
+</html>

@@ -1,13 +1,17 @@
-"""结构化日志（JSON lines + SLI 打点）"""
+"""结构化日志（JSON lines + SLI 打点 + 滚动文件）"""
 from __future__ import annotations
 
 import json
 import logging
 import sys
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 _LOG_DIR = Path(__file__).resolve().parents[3] / "logs"
+# ADR-010 文件堆积对策：单文件 5MB，保留 7 个备份（jax.log / jax.log.1..7）
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_BACKUP_COUNT = 7
 
 
 class JsonFormatter(logging.Formatter):
@@ -33,6 +37,11 @@ def setup_logging(level: str = "INFO", log_file: bool = True) -> None:
 
     if log_file:
         _LOG_DIR.mkdir(exist_ok=True)
-        fh = logging.FileHandler(_LOG_DIR / "jax.log", encoding="utf-8")
+        fh = RotatingFileHandler(
+            _LOG_DIR / "jax.log",
+            maxBytes=_LOG_MAX_BYTES,
+            backupCount=_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
         fh.setFormatter(JsonFormatter())
         root.addHandler(fh)

@@ -1,0 +1,45 @@
+# 大脑配置（V1.5，O-011 混合大脑）
+# 非敏感配置放这里；DEEPSEEK_API_KEY 仅存 .env（禁止入库/日志）
+# 改此文件即生效（orchestrator 热重载），无需重启
+
+brain:
+  deepseek:
+    enabled: true
+    connect_timeout_s: 10
+    read_timeout_s: 30
+    total_timeout_s: 60
+    network_retries: 2            # 网络类错误重试 2 次（退避 1s、2s）
+    network_backoff_s: [1.0, 2.0]
+    http_retries: 1               # 429/5xx 重试 1 次（退避 3s）
+    http_backoff_s: 3.0
+    circuit_fail_threshold: 3     # 连续失败 ≥3 → 熔断
+    circuit_cooldown_s: 300       # 熔断 300s
+    max_tokens_decompose: 4096   # deepseek-v4-flash 为推理模型：reasoning 会消耗预算，2048 曾截断 JSON（Unterminated string）
+    max_tokens_instruct: 4096    # 同上：指令长文 + reasoning 预算
+    max_tokens_review: 1024
+    max_tokens_health: 8
+
+  intent:
+    extract_prompt: ./config/prompts/intent_extract.md
+    summary_max_chars: 1200       # 摘要 ≤1200 字（上传 DeepSeek 硬上限）
+    local_max_tokens: 256
+    clarify_threshold: 0.6
+    max_clarify_rounds: 2
+
+  review:
+    enabled: true
+    interval_frames: 5
+    milestone_summary_max_chars: 600
+
+  inject:
+    target_app: codex
+    clipboard_delay_s: 0.15       # SetClipboardData → SendInput 竞态规避（勿删）
+    enter_delay_s: 0.1
+    expire_seconds: 300           # awaiting_confirm 起 300s 未确认 → expired
+    regenerate_limit_seconds: 60
+    instructions_dir: ./backend/data/instructions
+    audit_path: ./backend/data/inject_audit.jsonl
+    audit_preview_chars: 60
+
+  report:
+    throttle_seconds: 60

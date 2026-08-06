@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">波斯猫</string>
+
+    <!-- 六态（对齐 PRD pet_state，spec §4.6） -->
+    <string name="phase_idle">空闲</string>
+    <string name="phase_monitoring">聆听中（一直在听）</string>
+    <string name="phase_listening">已唤醒，在听</string>
+    <string name="phase_thinking">思考中</string>
+    <string name="phase_speaking">对话中</string>
+    <string name="phase_alerting">提醒中</string>
+
+    <!-- 连接状态 -->
+    <string name="conn_disconnected">未连接</string>
+    <string name="conn_connecting">连接中…</string>
+    <string name="conn_connected">已连接</string>
+
+    <!-- 主界面 -->
+    <string name="status_title">状态</string>
+    <string name="status_phase">当前状态</string>
+    <string name="status_connection">PC 网关</string>
+    <string name="status_wake_count">唤醒次数</string>
+    <string name="status_server">服务器</string>
+    <string name="waveform_hint">语音波形</string>
+    <string name="btn_start_listen">启动监听</string>
+    <string name="btn_stop_listen">停止监听</string>
+    <string name="btn_talk">立即对话</string>
+    <string name="btn_settings">设置</string>
+    <string name="btn_overlay_guide">开启悬浮窗</string>
+    <string name="btn_battery_guide">电池白名单（防杀）</string>
+    <string name="service_running">监听服务运行中</string>
+    <string name="service_stopped">监听服务已停止</string>
+    <string name="wake_hit">检测到唤醒词：%1$s</string>
+
+    <!-- 通知 -->
+    <string name="notif_channel_name">语音监听</string>
+    <string name="notif_channel_desc">波斯猫一直在听的常驻通知</string>
+    <string name="notif_title">波斯猫正在聆听</string>
+    <string name="notif_text">说"波斯猫"唤醒；点按打开 App</string>
+    <string name="notif_action_talk">立即对话</string>
+    <string name="notif_action_pause">暂停监听</string>
+    <string name="notif_action_exit">退出</string>
+
+    <!-- 设置页 -->
+    <string name="settings_title">设置</string>
+    <string name="settings_session_label">会话服务器（TRTC 签发）</string>
+    <string name="settings_session_hint">https://云函数域名，默认留空</string>
+    <string name="settings_session_sub">手机唤醒后从此接口拉取 TRTC 进房凭证（room_id/user_sig）；SecretKey 不在 App 内</string>
+    <string name="settings_mode_label">连接模式（已废弃，保留兼容）</string>
+    <string name="settings_mode_lan">局域网直连（PC 网关）</string>
+    <string name="settings_mode_relay">云端中继</string>
+    <string name="settings_server_label">PC 网关地址</string>
+    <string name="settings_server_hint">ws://192.168.1.100:8000/api/v1/voice/stream</string>
+    <string name="settings_relay_label">中继地址</string>
+    <string name="settings_relay_hint">wss://relay.example.com/relay/ws</string>
+    <string name="settings_pairing_label">配对码</string>
+    <string name="settings_pairing_hint">默认 JAX2026（与 PC relay 一致）</string>
+    <string name="settings_e2ee_label">E2EE 密钥</string>
+    <string name="settings_e2ee_hint">jax-voice-dev-e2ee-20260803-0001</string>
+    <string name="settings_e2ee_sub">留空 = 明文模式（未加密）；默认开发密钥与 PC 对齐</string>
+    <string name="settings_device_id_label">设备 ID</string>
+    <string name="settings_wake_label">唤醒词</string>
+    <string name="settings_wake_sub">说"波斯猫"唤醒（sherpa-onnx KWS）</string>
+    <string name="settings_threshold_label">KWS 灵敏度（阈值）</string>
+    <string name="settings_threshold_sub">越低越灵敏、越易误触发；建议 0.10–0.35</string>
+    <string name="settings_overlay_label">悬浮窗</string>
+    <string name="settings_overlay_sub">常驻小圆球，显示状态色，轻触唤醒</string>
+    <string name="btn_save">保存</string>
+    <string name="saved">已保存</string>
+
+    <!-- 权限提示 -->
+    <string name="perm_mic_rationale">需要麦克风权限才能"一直在听"并检测唤醒词</string>
+    <string name="perm_notif_rationale">需要通知权限才能显示常驻监听通知</string>
+
+    <!-- 崩溃日志弹窗（用户取不到日志时的兜底：App 内直接看 + 分享） -->
+    <string name="crash_dialog_title">上次发生崩溃</string>
+    <string name="crash_dialog_message">原因：\n%1$s</string>
+    <string name="crash_dialog_ok">知道了</string>
+    <string name="crash_dialog_share">分享</string>
+    <string name="crash_dialog_copy">复制</string>
+    <string name="crash_copy_done">已复制到剪贴板</string>
+    <string name="crash_share_subject">波斯猫崩溃日志</string>
+    <string name="crash_share_text">波斯猫 App 崩溃日志\n\n%1$s</string>
+    <string name="crash_share_chooser">分享崩溃日志</string>
+    <string name="crash_share_failed">没有可用的分享应用</string>
+
+    <!-- 防御性初始化/保存错误提示 -->
+    <string name="init_error_toast">初始化失败：%1$s</string>
+    <string name="save_error_toast">保存失败：%1$s</string>
+</resources>

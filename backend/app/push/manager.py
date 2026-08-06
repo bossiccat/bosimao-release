@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..config import PushConfig, Settings
 from .base import PushResult, PushService
+from .feishu import FeishuProvider
 from .ntfy import NtfyProvider
 from .wecom import WecomProvider
 
@@ -37,6 +38,14 @@ class PushManager:
                 )
             except ValueError as e:
                 logger.warning("wecom provider 未启用: %s", e)
+        if cfg.feishu.enabled:
+            try:
+                self._providers["feishu"] = FeishuProvider(
+                    settings.feishu_webhook_url or cfg.feishu.webhook_url,
+                    cfg.feishu.rate_limit_per_minute,
+                )
+            except ValueError as e:
+                logger.warning("feishu provider 未启用: %s", e)
         if cfg.ntfy.enabled:
             try:
                 self._providers["ntfy"] = NtfyProvider(

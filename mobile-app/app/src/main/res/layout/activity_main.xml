@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/jax_bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <!-- 标题 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/app_name"
+                android:textColor="@color/jax_fg"
+                android:textSize="24sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvServiceState"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="4dp"
+                android:text="@string/service_stopped"
+                android:textColor="@color/jax_muted"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- 状态卡 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@color/jax_surface"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <View
+                    android:id="@+id/dotPhase"
+                    android:layout_width="12dp"
+                    android:layout_height="12dp"
+                    android:background="@drawable/bg_overlay_ball" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:text="@string/status_phase"
+                    android:textColor="@color/jax_muted"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/tvPhase"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:gravity="end"
+                    android:text="@string/phase_idle"
+                    android:textColor="@color/jax_fg"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginVertical="12dp"
+                android:background="@color/jax_border" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/status_connection"
+                    android:textColor="@color/jax_muted"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/tvConnection"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/conn_disconnected"
+                    android:textColor="@color/jax_fg2"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/status_wake_count"
+                    android:textColor="@color/jax_muted"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/tvWakeCount"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="0"
+                    android:textColor="@color/jax_fg2"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/status_server"
+                    android:textColor="@color/jax_muted"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/tvServer"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1.4"
+                    android:ellipsize="middle"
+                    android:maxLines="1"
+                    android:textColor="@color/jax_fg2"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- v0.4.7 诊断：连接/配对失败原因（红色小字，出错时显示） -->
+            <TextView
+                android:id="@+id/tvLastError"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:maxLines="2"
+                android:textColor="@color/conn_disconnected"
+                android:textSize="12sp"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <!-- 波形占位（spec §4.5 Canvas 自绘） -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/waveform_hint"
+            android:textColor="@color/jax_muted"
+            android:textSize="13sp" />
+
+        <com.jax.voice.ui.WaveformView
+            android:id="@+id/waveform"
+            android:layout_width="match_parent"
+            android:layout_height="72dp"
+            android:layout_marginTop="4dp"
+            android:background="@color/jax_surface" />
+
+        <!-- 操作按钮 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnToggleListen"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:drawablePadding="6dp"
+                android:text="@string/btn_start_listen" />
+
+            <Button
+                android:id="@+id/btnTalk"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_weight="1"
+                android:drawablePadding="6dp"
+                android:text="@string/btn_talk" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnSettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:drawablePadding="6dp"
+            android:text="@string/btn_settings" />
+
+        <Button
+            android:id="@+id/btnOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/btn_overlay_guide"
+            style="@style/Widget.Material3.Button.OutlinedButton" />
+
+        <Button
+            android:id="@+id/btnBattery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/btn_battery_guide"
+            style="@style/Widget.Material3.Button.OutlinedButton" />
+    </LinearLayout>
+</ScrollView>

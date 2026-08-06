@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 常驻麦克风：一直在听 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- RTC 传输（TRTC，ADR-012）：网络/音频设置/蓝牙 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <!-- 前台服务（Android 9+） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- 前台服务 microphone 类型（Android 14+ 强制，spec §11-1） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- 常驻通知（Android 13+ 运行时申请） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 悬浮窗（spec §4.5，引导式申请，不静默） -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 电池白名单引导（spec §4.1，仅跳系统设置，不静默申请） -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:name=".JaxApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.JaxVoice">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false" />
+
+        <!--
+          前台服务：type=microphone（Android 14+ 必须，spec §4.1/§11-1）。
+          注意：Android 14 禁止从后台启动 mic 类型前台服务；
+          本 App 仅从 Activity/通知点击启动，开机自启靠厂商白名单引导页（MainActivity）。
+        -->
+        <service
+            android:name=".voice.VoiceForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+    </application>
+</manifest>

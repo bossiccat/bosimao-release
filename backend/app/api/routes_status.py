@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from ..config import config as app_config
 from ..core.state import state
 
 router = APIRouter(prefix="/api/v1", tags=["status"])
@@ -11,7 +12,18 @@ router = APIRouter(prefix="/api/v1", tags=["status"])
 @router.get("/status")
 async def get_status() -> dict:
     """全局状态汇总"""
-    return state.to_dict()
+    data = state.to_dict()
+    # 追加 detection 配置快照（e2e 验证"改配置即生效"；不含敏感项）
+    data["config"] = {
+        "detection": {
+            "stuck_frame_threshold": app_config.detection.stuck_frame_threshold,
+            "stuck_timeout_seconds": app_config.detection.stuck_timeout_seconds,
+            "off_track_frame_threshold": app_config.detection.off_track_frame_threshold,
+            "min_alert_interval_seconds": app_config.detection.min_alert_interval_seconds,
+            "max_alerts_per_hour": app_config.detection.max_alerts_per_hour,
+        }
+    }
+    return data
 
 
 @router.get("/status/sessions/{app_id}")

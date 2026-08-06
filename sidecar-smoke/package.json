@@ -1,0 +1,16 @@
+{
+  "name": "jax-rtc-sidecar-smoke",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TRTC Electron SDK 冒烟环境（R1 gate：PCM 帧确认 + 哑对端进房）",
+  "main": "main.js",
+  "scripts": {
+    "smoke": "electron ."
+  },
+  "dependencies": {
+    "trtc-electron-sdk": "13.3.801"
+  },
+  "devDependencies": {
+    "electron": "31.7.7"
+  }
+}

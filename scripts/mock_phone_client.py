@@ -103,7 +103,7 @@ async def run_phone_round(relay_url: str, token: str, pairing_code: str,
     t = {}
     guard = ReplayGuard()
     down = bytearray()
-    async with websockets.connect(url) as ws:
+    async with websockets.connect(url, proxy=None) as ws:
         t0 = time.time()
         await ws.send(make_pair_frame("phone", "mock-phone-01", pairing_code, token=token))
         paired = json.loads(await ws.recv())

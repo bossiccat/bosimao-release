@@ -107,7 +107,9 @@ class RelayServer:
             except json.JSONDecodeError:
                 pass  # 无法解析的控制帧仍原样透传（不解析内容）
             else:
-                if msg.get("type") == "heartbeat":
+                # 拦截心跳相关帧：heartbeat/pong 均不转发（pong 是对中继 ping 的响应，
+                # 若当普通帧转发且 peer=None 会给客户端回 error("no_peer")——2026-08-05 修复）
+                if msg.get("type") in ("heartbeat", "pong"):
                     await conn.send_json({"type": "pong", "ts": msg.get("ts", time.time())})
                     return
         peer = conn.peer
@@ -138,7 +140,11 @@ class RelayServer:
                 self.stats["kicked"] += 1
                 await self._safe_close(conn, 1001, "heartbeat timeout")
                 break
-            if conn.peer is None and time.time() - conn.created_at > self.cfg.session_timeout_s:
+            # pair timeout 仅对 phone 角色生效：手机是临时连接（不配对即清理）；
+            # PC 是常驻角色（relay_client 常驻等待手机），绝不能踢——否则 PC 永远
+            # 无法保持在线，手机随时配对都会"对端不在线→静默"（2026-08-05 修复）
+            if (conn.peer is None and conn.role == "phone"
+                    and time.time() - conn.created_at > self.cfg.session_timeout_s):
                 self.stats["kicked"] += 1
                 await self._safe_close(conn, 1001, "pair timeout")
                 break

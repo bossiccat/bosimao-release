@@ -34,15 +34,27 @@ class FakeWgcClass:
         self.window_title = window_title
         self.output_dir = output_dir
         self.started = False
+        self.running = False
+        self.cleaned = False
         self.last_frame: Path | None = None
         self.last_frame_at: float = 0.0
         FakeWgcClass.instances.append(self)
 
     def start(self) -> None:
         self.started = True
+        self.running = True
+
+    def stop(self) -> None:
+        self.running = False
+
+    def is_running(self) -> bool:
+        return self.running
 
     def snapshot(self) -> tuple[Path | None, float]:
         return self.last_frame, self.last_frame_at
+
+    def cleanup(self) -> None:
+        self.cleaned = True
 
 
 class FakeDxgiClass:
@@ -92,7 +104,10 @@ def manager(tmp_path, monkeypatch):
     ]
     monkeypatch.setattr(session_manager_module, "WgcCapturer", FakeWgcClass)
     monkeypatch.setattr(session_manager_module, "DxgiFallback", FakeDxgiClass)
-    return SessionManager(targets, tmp_path)
+    # auth_file 指向临时目录，避免单元测试污染真实 backend/data 持久化
+    return SessionManager(
+        targets, tmp_path, auth_file=tmp_path / "authorized_windows.json"
+    )
 
 
 def make_window(title="Codex") -> WindowInfo:

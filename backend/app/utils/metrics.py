@@ -16,6 +16,9 @@ class Metrics:
     push_total: int = 0
     push_ok: int = 0
     started_at: float = field(default_factory=time.time)
+    # 大脑降级计数（R3 摘要降级 / R4/R5 拆解指令降级，防单点故障可观测）
+    degrade_total: int = 0
+    degrade_reasons: dict[str, int] = field(default_factory=dict)
 
     def record_frame(self, latency_ms: float) -> None:
         self.frame_latencies.append(latency_ms)
@@ -31,6 +34,11 @@ class Metrics:
         self.push_total += 1
         if ok:
             self.push_ok += 1
+
+    def record_degrade(self, reason: str) -> None:
+        """记录一次降级（如 summary_deepseek / summary_passthrough / decompose_local）"""
+        self.degrade_total += 1
+        self.degrade_reasons[reason] = self.degrade_reasons.get(reason, 0) + 1
 
     def percentile(self, values: list[float], pct: float) -> float:
         if not values:
@@ -51,6 +59,8 @@ class Metrics:
             "false_alert_count": self.false_alert_count,
             "push_total": self.push_total,
             "push_ok": self.push_ok,
+            "degrade_total": self.degrade_total,
+            "degrade_reasons": dict(self.degrade_reasons),
         }
 
 

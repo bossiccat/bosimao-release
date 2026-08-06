@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  设计 Token — 对齐 pet-ui/src/styles/tokens.css（波斯猫模式统一视觉）
+  v0.4 起为浅色主题（白底深字）：背景 #FFFFFF、surface 浅灰、文字深色。
+  禁止在代码里散写 hex；一律引用本文件（Android 资源 = Token 层）。
+-->
+<resources>
+    <!-- A1-identity（浅色默认） — 波斯猫色调：accent 用 logo 主色深绿 #005040，亮绿 #0A8F6E 点缀 -->
+    <color name="jax_accent_light">#0A8F6E</color>
+    <color name="jax_bg">#FFFFFF</color>
+    <color name="jax_surface">#F5F6F8</color>
+    <color name="jax_surface2">#E9EBEF</color>
+    <color name="jax_fg">#1A2230</color>
+    <color name="jax_fg2">#3D4657</color>
+    <color name="jax_muted">#8A94A6</color>
+    <color name="jax_accent">#005040</color>
+    <color name="jax_border">#E3E6EB</color>
+
+    <!-- A2-semantic：六态语义色（复用 pet_state 枚举语义，spec §4.5；浅色下加深保证对比度） -->
+    <color name="state_idle">#8A94A6</color>
+    <color name="state_monitoring">#005040</color>
+    <color name="state_listening">#059669</color>
+    <color name="state_thinking">#6366F1</color>
+    <color name="state_speaking">#005040</color>
+    <color name="state_alerting">#DC2626</color>
+
+    <!-- 连接状态 -->
+    <color name="conn_connected">#059669</color>
+    <color name="conn_connecting">#D97706</color>
+    <color name="conn_disconnected">#8A94A6</color>
+</resources>
