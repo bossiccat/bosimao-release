@@ -25,6 +25,7 @@ from ..voice.half_duplex import HalfDuplex
 from ..voice.rtc_session import (
     ConfigMissingError,
     InvalidDeviceIdError,
+    InvalidUserIdError,
     RtcSessionService,
     build_session_service_from_settings,
 )
@@ -40,6 +41,13 @@ class VoiceSessionRequest(BaseModel):
 
     device_id: str = Field(..., min_length=1, max_length=64, description="设备标识（幂等键）")
     pairing_code: str | None = Field(None, description="已废弃语义，MVP 可省略")
+
+
+class VoiceSignRequest(BaseModel):
+    """POST /api/v1/voice/session/sign 请求体（PC sidecar 取自身 userSig，PC-INTEGRATION §2.3）"""
+
+    device_id: str = Field(..., min_length=1, max_length=64, description="设备标识（幂等键）")
+    user_id: str = Field("jax-pc-sidecar", min_length=1, max_length=64, description="进房 userId（默认 PC sidecar）")
 
 
 def build_voice_gateway(cfg: VoiceConfig | None = None) -> tuple[APIRouter, VoiceSessionManager]:
@@ -137,6 +145,31 @@ def build_session_router(service: RtcSessionService | None = None) -> APIRouter:
             )
         except Exception:  # noqa: BLE001
             logger.exception("voice session issue failed device=%s", req.device_id)
+            return JSONResponse(
+                status_code=500,
+                content={"code": 50000, "data": None, "message": "Internal server error"},
+            )
+        return {"code": 0, "data": data, "message": ""}
+
+    @router.post("/api/v1/voice/session/sign")
+    async def voice_session_sign(req: VoiceSignRequest):
+        """PC sidecar 进房签发：{device_id, user_id} → 同一 room_id，userSig 签给 user_id
+
+        本地 Phase B 测试辅助（生产路径为云函数 /sign，SecretKey 唯一存云函数环境变量；
+        本地 .env 仅在冒烟/联调期持有，Phase B 生产路径 PC .env 置空）。
+        """
+        try:
+            data = svc.sign(req.device_id, req.user_id)
+        except (InvalidDeviceIdError, InvalidUserIdError) as e:
+            return JSONResponse(
+                status_code=400, content={"code": 40001, "data": None, "message": str(e)}
+            )
+        except ConfigMissingError as e:
+            return JSONResponse(
+                status_code=503, content={"code": 50300, "data": None, "message": str(e)}
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("voice session sign failed device=%s user=%s", req.device_id, req.user_id)
             return JSONResponse(
                 status_code=500,
                 content={"code": 50000, "data": None, "message": "Internal server error"},

@@ -13,7 +13,7 @@
 param(
     [ValidateSet("start","stop","restart","status")]
     [string]$Action = "status",
-    [ValidateSet("model","backend","relay","all")]
+    [ValidateSet("model","backend","relay","rtc-bridge","all")]
     [string]$Service = "all"
 )
 $ErrorActionPreference = "Stop"
@@ -96,9 +96,10 @@ function Stop-AllRelay {
 }
 function Invoke-SvcStart([string]$Name) {
     switch ($Name) {
-        "model"   { return Start-ModelService }
-        "backend" { return Start-BackendService }
-        "relay"   { return Start-RelayService }
+        "model"      { return Start-ModelService }
+        "backend"    { return Start-BackendService }
+        "relay"      { return Start-RelayService }
+        "rtc-bridge" { return Start-RtcBridgeService }
     }
 }
 
@@ -224,6 +225,46 @@ function Start-RelayService {
     return $true
 }
 
+# ---------------- rtc-bridge（TRTC sidecar ↔ apm_bridge 本地桥，RTC 通话承载） ----------------
+function Get-RtcBridgeProcesses {
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match "rtc_bridge" }
+}
+function Start-RtcBridgeService {
+    $Port = 19092
+    $HealthPort = 19093
+    $Log = Join-Path $LogDir "rtc_bridge.log"
+    # 幂等：健康（待命态也算健康）→ 跳过
+    if (Test-Health "http://127.0.0.1:$HealthPort/health") {
+        $cur = Get-PortPid $HealthPort
+        if ($cur) { Set-PidFile "rtc-bridge" $cur }
+        Write-Host "[rtc-bridge][ok] 已在运行（幂等跳过，PID=$cur）"
+        return $true
+    }
+    $existing = @(Get-RtcBridgeProcesses)
+    if ($existing.Count -gt 0) {
+        $ids = ($existing | ForEach-Object { $_.ProcessId }) -join ","
+        Set-PidFile "rtc-bridge" $existing[0].ProcessId
+        Write-Host "[rtc-bridge][!] 已有进程但 /health 未通过（PID $ids），不盲杀；查看 $Log"
+        return $false
+    }
+    $oldProcId = Get-PidFile "rtc-bridge"
+    if ($oldProcId -and -not (Test-ProcessAlive $oldProcId)) { Clear-PidFile "rtc-bridge" }
+    $bridgeArgs = @("-m","rtc_bridge.main")
+    Write-Host "[rtc-bridge] 启动 $Py $($bridgeArgs -join ' ')"
+    $p = Start-Process -FilePath $Py -ArgumentList $bridgeArgs -WorkingDirectory (Join-Path $Root "backend") `
+        -RedirectStandardOutput $Log -RedirectStandardError "$Log.err" -WindowStyle Hidden -PassThru
+    Set-PidFile "rtc-bridge" $p.Id
+    Write-Host "[rtc-bridge] PID=$($p.Id) 等待 /health（最多 30s）..."
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Health "http://127.0.0.1:$HealthPort/health") { Write-Host "[rtc-bridge][ok] 就绪"; return $true }
+        Start-Sleep -Seconds 2
+    }
+    Write-Host "[rtc-bridge][x] 30s 内未就绪，查看 $Log"
+    return $false
+}
+
 # ---------------- 停止（按 PID 文件 + 确认退出；缺失时按端口/命令行定位不盲杀） ----------------
 function Stop-ServiceByName([string]$Name) {
     $procId = Get-PidFile $Name
@@ -271,6 +312,18 @@ function Stop-ServiceByName([string]$Name) {
             }
             Write-Host "[backend][!] 端口 8000 被非 uvicorn 进程占用（PID $procId），不盲杀"; return $false
         }
+    } elseif ($Name -eq "rtc-bridge") {
+        $rs = @(Get-RtcBridgeProcesses)
+        if ($rs.Count -gt 0) {
+            foreach ($r in $rs) { Stop-Process -Id $r.ProcessId -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Milliseconds 800
+            $left = @(Get-RtcBridgeProcesses)
+            foreach ($r in $left) { Stop-Process -Id $r.ProcessId -Force -ErrorAction SilentlyContinue }
+            Write-Host "[rtc-bridge] 已停止全部 rtc_bridge 进程（$($rs.Count) 个）"
+            Clear-PidFile "rtc-bridge"; return $true
+        }
+        Write-Host "[rtc-bridge][ok] 未运行"
+        Clear-PidFile "rtc-bridge"; return $true
     }
     Write-Host "[$Name][ok] 未运行"
     return $true
@@ -297,12 +350,17 @@ function Show-Status {
     if ($rCount -gt 0) { $rState = "RUNNING(x$rCount)" } elseif ($rAlive) { $rState = "PID-ALIVE" } else { $rState = "DOWN" }
     Write-Host ("[relay]   wss-relay {0}{1}" -f $rState, $(if ($rProcId) { "  PID=$rProcId" } else { "" }))
     if ($rCount -gt 1) { Write-Host "[relay][!] 检测到多个 relay_client 实例残留（可能互相抢占配对码），建议 restart relay" }
+    # rtc-bridge
+    $rbProcId = Get-PidFile "rtc-bridge"; $rbAlive = Test-ProcessAlive $rbProcId
+    $rbHealth = Test-Health "http://127.0.0.1:19093/health"
+    $rbState = if ($rbHealth) { "OK" } elseif ($rbAlive) { "PID-ALIVE" } else { "DOWN" }
+    Write-Host ("[rtc-bridge] :19092  {0}{1}" -f $rbState, $(if ($rbProcId) { "  PID=$rbProcId" } else { "" }))
     Write-Host "========================================"
 }
 
 # ---------------- 主流程 ----------------
 $svcs = @()
-if ($Service -eq "all") { $svcs = @("model","backend","relay") } else { $svcs = @($Service) }
+if ($Service -eq "all") { $svcs = @("model","backend","relay","rtc-bridge") } else { $svcs = @($Service) }
 
 switch ($Action) {
     "start" {

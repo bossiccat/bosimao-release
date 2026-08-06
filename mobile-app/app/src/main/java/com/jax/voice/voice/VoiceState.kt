@@ -26,7 +26,6 @@ data class VoiceUiState(
     val wakeCount: Int = 0,
     val lastKeyword: String = "",
     val rms: Float = 0f,
-    val serverUrl: String = "",
     val wakeEnabled: Boolean = true,
     val threshold: Float = 0.25f,
     /** 最近一次连接/配对失败原因（v0.4.7 诊断：UI 直接显示，方便用户报错） */

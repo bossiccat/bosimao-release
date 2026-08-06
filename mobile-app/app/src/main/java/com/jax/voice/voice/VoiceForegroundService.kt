@@ -292,8 +292,11 @@ class VoiceForegroundService : Service() {
         updateNotificationTitle()
     }
 
-    /** 通话结束后重建监听管线（wakeEngine 常驻不释放，仅重建采集 + 分发） */
+    /** 通话结束后重建监听管线（wakeEngine 常驻不释放，仅重建采集 + 分发）
+     *  幂等：TRTC 进房失败会同时触发 onEnterRoom(<0) 与 onError 两条回调（各走一次 onCallExited），
+     *  已重启则跳过，避免双 AudioRecord 抢占 mic（Android 同一 App 不允许双路同时采集）。 */
     private fun restartMicRecorder() {
+        if (micRecorder != null) return
         try {
             val engine = wakeEngine
             val d = FrameDispatcher(

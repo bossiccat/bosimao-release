@@ -52,6 +52,7 @@
 - **负面**：
   - PC 端新增 Node.js sidecar 组件 → 需进程守护（Python 拉起 + 心跳重启），运维面增加。
   - 依赖腾讯云 TRTC 服务可用性；免费额度第一年，长期需评估 1v1 套餐成本。
+  - 云函数走 CloudBase **HTTP 访问服务默认域名**（`*.app.tcloudbase.com`）——官方定位开发/测试形态（频率限制、部分高级能力不可用、浏览器直访有安全提示中间页）；MVP 阶段手机 App 直调可接受，生产上线前须绑定已备案自定义域名（OPEN-DECISIONS O-016）。
   - 传输层加密由 TRTC 承担，应用层 E2EE（VoiceCipher）废弃——媒体流经 TRTC 编码，无法应用层加密（录音仍不落盘、不进日志）。
   - 会话期 barge-in 判定来源从本地 mic VAD 变为 SDK 播放/远端音频状态（mic handoff），打断验收口径随 QA-PLAN 调整。
 
@@ -64,7 +65,7 @@
 ## 实施补充（fe-mobile Phase A 核对，ADR 固化防歧义）
 
 - 回调名以官方 `TRTCCloudListener` 为准：`onTryToReconnect`（非 onTryReconnect）、`onConnectionLost` / `onConnectionRecovery`、音量回调 `onUserVoiceVolume`、远端音频状态 `onRemoteUserAudioStatus`；13.4 实际签名以 SDK jar 为准。
-- `TRTCParams`：`strRoomId` 与 `intRoomId` 互斥（用 strRoomId 时 intRoomId 必须为 0）。
+- `TRTCParams`：`strRoomId` 与 `roomId` 互斥（用 strRoomId 时 roomId 必须为 0；SDK 13.4 实际字段名为 `roomId`，非旧称 `intRoomId`，P2-1 修正术语）。
 - 退出时序：`exitRoom` 需等 `onExitRoom` 回调后再重启 MicRecorder，避免 mic 抢占竞态。
 
 ## 变更记录
@@ -75,6 +76,8 @@
 | 2026-08-06 | 决策 #7 新增：会话签发与进房协调 = 云函数代签（方案 A） | 手机直调云函数拿 userSig；PC 轮询会话意图取自身 userSig 进同房；SecretKey 唯一存云函数环境变量；房间号规则 TRTC_ROOM_PREFIX+device_id |
 | 2026-08-06 | 四文档对齐修正（ARCHITECTURE/MOBILE/PC/QA-PLAN vs ADR-012） | ①会话契约 wire 层统一 snake_case（room_id/user_id/user_sig/sdk_app_id/scene）②手机 userId=device_id（PC-INTEGRATION 原 "pc-phone" 定值修正）③房间号统一 TRTC_ROOM_PREFIX+device_id ④.env 变量名统一 TRTC_SDKAPPID/TRTC_SECRETKEY/TRTC_ROOM_PREFIX（原文档 TRTC_SDK_APP_ID/TRTC_SECRET_KEY 修正）⑤删除清单补 backend/app/voice/e2ee.py 与 routes_voice.py 的 /ws/voice、/api/v1/voice/stream、/api/v1/voice/pair 端点 ⑥SecretKey 保管从「只存 PC .env」改为「唯一存云函数环境变量（PC 生产置空）」⑦QA-PLAN §5.1 状态字段 "relay=rtc-connected" → "rtc_status=connected" ⑧ARCHITECTURE §3.3 打断行「手机侧 VAD 停播」→「TRTC 播放/远端音频状态停播」（对齐 §5.1 mic handoff）；AUDIT.md D1/D2/D6 审计口径同步 ⑨PC-INTEGRATION §0/§4.4/§7、MOBILE-INTEGRATION §1.3/§1.5 残留旧签发描述修正 |
 | 2026-08-06 | QA 审计 P1 复核：契约字段漂移清理 | 裁决 **wire 层 snake_case 定案**；ADR-012 决策 #3 正文残留 "roomId+userSig" 示例改为 "room_id + user_sig"。说明：TRTC 官方概念名 userSig（token）与 SDK API 名 TRTCParams.strRoomId/intRoomId 保留原文，不属于 wire 字段。变更记录本身不含 camelCase 残留示例 |
+| 2026-08-06 | 云函数部署位置/域名确认（Phase B 前置，CLOUDFN-DEPLOY.md v1.0 Accepted） | 环境 **`jinhong-d2g55ycl591208475`**（ap-shanghai，体验版，复用现有环境不新建）；云函数 `trtc-sign`（**事件函数 + Python 3.10**，纯标准库，非 HTTP 云函数/Flask）；经 **HTTP 访问服务**绑定路由 `/api/v1/voice`；公网 URL `https://jinhong-d2g55ycl591208475-1436773060.ap-shanghai.app.tcloudbase.com/api/v1/voice/session`（默认域名 host = `EnvId-<AppId>`，AppId=1436773060；EnvId 本身不带后缀，仅公网 URL host 含 `-1436773060`）；环境变量 `TRTC_SECRETKEY`（唯一持有方，控制台加密存储）/`TRTC_SDKAPPID`/`TRTC_ROOM_PREFIX`（+可选 `TRTC_DEVICE_WHITELIST`）；超时 3s/内存 128MB、不绑 VPC/CAM/存储（最小权限）；SecretKey 零明文落 repo/git/日志（对齐 AUDIT D2） |
+| 2026-08-06 | O1/O2 裁决（team-lead） | **O1 默认域名**：✅ 接受——MVP 用默认域名（开发测试形态，手机 App 直调无浏览器提示页问题），生产上线前绑定已备案自定义域名（挂 OPEN-DECISIONS O-016，waiting-on-external-condition: 域名备案）。**O2 意图存储**：✅ 接受——CloudBase NoSQL collection `voice_intents`（每 device 一文档，sign 时 `where({consumed:false}).update(...)` 条件更新防竞态），否决函数内存态（冷启动丢状态风险） |
 
 ## 关联 ADR
 

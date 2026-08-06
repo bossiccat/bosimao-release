@@ -1,0 +1,142 @@
+"""BridgeServer —— localhost WS 服务端（127.0.0.1:19092，sidecar 是客户端）
+
+- 首个消息必须为 hello（注册 device/room）；随后 up_audio / peer_state 分发到 PeerVoiceSession
+- 会话下行（down_audio / ctrl）经 _send_msg 回调写到当前 WS
+- MVP 单用户：新 sidecar 连接顶替旧连接（旧连接 close）
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from typing import Any
+
+import websockets
+
+from .session import PeerVoiceSession
+
+logger = logging.getLogger(__name__)
+
+
+class BridgeServer:
+    """sidecar ↔ rtc_bridge 桥接服务端"""
+
+    def __init__(self, cfg, state: dict) -> None:
+        self.cfg = cfg
+        self.state = state                       # 指标/健康共享字典（health.py 读取）
+        self._ws: Any = None
+        self._session: PeerVoiceSession | None = None
+        self._send_lock = asyncio.Lock()
+
+    @property
+    def sidecar_connected(self) -> bool:
+        return self._ws is not None and self._session is not None
+
+    async def _send(self, msg: dict) -> None:
+        """向当前 sidecar 发送 JSON（带锁；连接断开时静默失败）"""
+        ws = self._ws
+        if ws is None:
+            raise ConnectionError("sidecar 未连接")
+        async with self._send_lock:
+            await ws.send(json.dumps(msg, ensure_ascii=False))
+
+    async def handler(self, ws) -> None:
+        # 顶替旧连接（MVP 单 sidecar）
+        old = self._ws
+        if old is not None and old is not ws:
+            try:
+                await old.close(code=1000, reason="replaced")
+            except Exception:  # noqa: BLE001
+                pass
+        self._ws = ws
+        logger.info("sidecar ws connected %s", ws.remote_address)
+
+        try:
+            # 首帧 hello
+            raw = await asyncio.wait_for(ws.recv(), timeout=10)
+            hello = json.loads(raw)
+            if hello.get("type") != "hello":
+                await self._send({"type": "ctrl", "action": "exit", "reason": "bad_hello"})
+                return
+            device_id = hello.get("device_id", "")
+            room_id = hello.get("room_id", "")
+            sdk_version = hello.get("sdk_version", "")
+            logger.info("sidecar hello device=%s room=%s sdk=%s", device_id, room_id, sdk_version)
+            self.state["sidecar_sdk_version"] = sdk_version
+
+            self._session = PeerVoiceSession(
+                device_id=device_id,
+                room_id=room_id,
+                send_msg=self._send,
+                apm_api_url=self.cfg.apm_api_url,
+                apm_system_prompt=self.cfg.apm_system_prompt,
+                apm_token=self.cfg.apm_token,
+                down_frame_ms=self.cfg.down_frame_ms,
+                sample_rate=self.cfg.sample_rate,
+            )
+            await self._session.start()
+            self.state["room_id"] = room_id
+            self.state["device_id"] = device_id
+            self.state["sidecar_connected"] = True
+            self.state["_session_ref"] = self._session   # health /metrics 读取实时指标
+            await self._send({"type": "ready"})
+
+            # 接收循环
+            async for raw in ws:
+                if isinstance(raw, bytes):
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                await self._dispatch(msg)
+        except asyncio.TimeoutError:
+            logger.warning("sidecar hello 超时，关闭连接")
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.info("sidecar ws closed: %s", e.code)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("sidecar handler error: %s", e)
+        finally:
+            await self._cleanup()
+
+    async def _dispatch(self, msg: dict) -> None:
+        mtype = msg.get("type")
+        session = self._session
+        if session is None:
+            return
+        if mtype == "up_audio" and msg.get("pcm_b64"):
+            try:
+                import base64
+
+                pcm = base64.b64decode(msg["pcm_b64"])
+                await session.on_up_audio(pcm)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("up_audio decode failed: %s", e)
+        elif mtype == "peer_state":
+            state = msg.get("state")
+            user_id = msg.get("user_id", "")
+            if state == "enter":
+                await session.on_peer_enter(user_id)
+            elif state == "leave":
+                await session.on_peer_leave(user_id)
+        else:
+            logger.debug("ignored sidecar msg type=%s", mtype)
+
+    async def _cleanup(self) -> None:
+        self.state["sidecar_connected"] = False
+        self.state["_session_ref"] = None
+        self.state["room_id"] = ""
+        self.state["device_id"] = ""
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+        self._ws = None
+
+    async def send_ctrl_exit(self, reason: str) -> None:
+        """后端控制：通知 sidecar 退房（会话结束）"""
+        if self._ws is not None:
+            try:
+                await self._send({"type": "ctrl", "action": "exit", "reason": reason})
+            except Exception:  # noqa: BLE001
+                logger.warning("send ctrl exit failed: %s", reason)

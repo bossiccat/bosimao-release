@@ -150,8 +150,8 @@ class MainActivity : AppCompatActivity() {
                         )
                         tvWakeCount.text = state.wakeCount.toString()
                         // v0.6.0 TRTC：显示会话服务器（签发接口）地址
-                        tvServer.text = state.serverUrl.ifBlank {
-                            VoiceConfig.sessionBaseUrl(this@MainActivity).ifBlank { "未设置（设置页填写）" }
+                        tvServer.text = VoiceConfig.sessionBaseUrl(this@MainActivity).ifBlank {
+                            "未设置（设置页填写）"
                         }
                         // v0.4.7 诊断：连接失败原因显示/隐藏
                         if (state.lastError.isBlank()) {

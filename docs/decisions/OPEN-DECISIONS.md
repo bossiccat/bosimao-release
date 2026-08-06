@@ -133,3 +133,10 @@
 - 裁决：✅ **M3 全双工 = 唯一终点**（本地 llama-omni 原生 APM：流式 ASR+流式 TTS+实时打断 barge-in，mobile-voice-spec §8 apm_bridge + §4.4）；当前半双工（sherpa STT→大脑→edge-tts）仅为 M2 过渡调试链路，**不作为最终交付形态**；任何"不能迭代的替补"直接否决
 - 落地路径：PoC B3（本地模型原生全双工 APM 验证）→ apm_bridge 实装 → App 端 barge-in（silero-vad 双门限）→ 全双工替换半双工
 - Resolves when：M3 交付验收
+
+### O-016 CloudBase HTTP 访问服务自定义域名备案（2026-08-06 追加）
+- 类别：waiting-on-external-condition
+- 描述：trtc-sign 云函数走 CloudBase HTTP 访问服务**默认域名**（`https://jinhong-d2g55ycl591208475.ap-shanghai.app.tcloudbase.com/...`），官方定位开发/测试形态（频率限制、部分高级能力不可用、浏览器直访有安全提示中间页）。MVP 阶段手机 App 直调可接受（ADR-012 O1 裁决 ✅）；**生产上线前须绑定已备案自定义域名**，以获得完整服务能力与稳定性保障
+- 影响：生产环境 URL 形态、云函数访问稳定性、频率限额
+- 备选：A) 保持默认域名（MVP 已接受）；B) 绑定已备案自定义域名（需 ICP 备案 + SSL 证书，CNAME 接入云开发 CDN）
+- Resolves when：用户提供已备案域名 + 证书后配置实测（外部条件）

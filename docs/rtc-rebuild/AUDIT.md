@@ -1,11 +1,25 @@
 # AUDIT — RTC 重构 100 分制独立审计模板（波斯猫语音）
 
-> 版本：v1.0（2026-08-06）
+> 版本：v1.1（2026-08-06；v1.1：新增 §0.1 反作弊 diff 基准与回归基线记录，对接 git 基线 f6e9348）
 > 作者：qa（测试工程师）
 > 依据：docs/rtc-rebuild/QA-PLAN.md（v1.2 验收基准）、docs/rtc-rebuild/ARCHITECTURE.md（v1.0 实施契约）、docs/decisions/ADR-012-rtc-transport.md（Accepted）
 > 红线：**没有审计过达到 100 分，都不能算完成；必须全员独立 QA/测试/审计/验证；不得靠模型自证。**
 
 ---
+
+## 0.1 反作弊 diff 基准与回归基线（v1.1 新增）
+
+- **反作弊 diff 基准 commit**：`f6e9348`（chore: baseline before RTC phase A，2026-08-06，用户配合建立）
+  - 基线含 28 个 `backend/tests/unit/test_*.py` 文件；工作区已 0 未提交（git status 干净）。
+  - 所有后续验收/反作弊检测（测试文件删除、断言数、skip 新增、测试框架配置篡改）以
+    `git diff f6e9348 -- '*test*' pytest.ini pyproject.toml` 为基准。
+- **回归基线**：`pytest tests/unit` = **324 passed**（2026-08-06 qa 独立重跑确认）。
+  - 构成：原 294 基线 + be-pc 新增 `test_voice_session.py`(13) + QA 独立 `test_voice_session_qa.py`(15) + 其他新增 2。
+  - relay 38 用例（test_relay_protocol/server/client_fake_dead/client_gateway_heartbeat）完整在库，未删除。
+- **基线更新规则**：任何新增/删除测试必须走团队评审；删除/弱化/skip 新增触发 §6 反作弊门（P0 阻断）。
+
+---
+
 
 ## 0. 审计总纲（一页结论）
 

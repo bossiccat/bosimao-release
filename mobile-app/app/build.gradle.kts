@@ -44,6 +44,11 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    // JVM 单测（app/src/test/）：android.* stub 方法返回默认值，避免 android.util.Log 抛 not-mocked
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -64,4 +69,6 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0") // REST client（会话签发接口）
 
     testImplementation("junit:junit:4.13.2")
+    // RtcClient 状态机 L0 单测（RTC-CLIENT-TEST-DESIGN §2）：mock TRTCCloud，不连真实 RTC 云
+    testImplementation("io.mockk:mockk:1.13.5")
 }

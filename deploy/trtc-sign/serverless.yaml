@@ -1,0 +1,38 @@
+# trtc-sign 云函数 serverless 配置（腾讯云 SCF / CloudBase）
+#
+# 用法一（Serverless Framework）：
+#   serverless deploy
+# 用法二（CloudBase 控制台 / tcb CLI）：
+#   新建云函数 trtc-sign，函数代码根 = 本目录，运行时 Python3.x；
+#   按下方 env 配置环境变量；API Gateway 触发器按 triggers 配置。
+# 详见 README.md。
+
+service: trtc-sign
+
+provider:
+  name: tencent
+  runtime: Python3.9          # SCF Python3 运行时（3.6~3.12 均可，代码为标准库，无第三方依赖）
+  region: ap-guangzhou
+  memorySize: 128             # 纯计算 + 无状态，128MB 足够
+  timeout: 3                  # 秒：userSig 签名 <10ms，无需长超时
+  environment:
+    # 生产环境唯一持有方：SecretKey 只通过云函数环境变量注入，禁入库/日志/代码
+    TRTC_SDKAPPID: ""         # 必填：腾讯云 TRTC 应用 ID（int，如 1600155678）
+    TRTC_SECRETKEY: ""        # 必填：TRTC 控制台 SecretKey（配置时替换，禁进 git）
+    TRTC_ROOM_PREFIX: "jax-"  # 房间号前缀：room_id = prefix + device_id
+    TRTC_USER_SIG_EXPIRE_S: "600"   # userSig 有效期（契约硬上限 600s，配置超限自动回退 600）
+    TRTC_DEVICE_WHITELIST: ""       # 可选：device_id 白名单（逗号分隔，留空=放行全部）
+
+# API Gateway HTTP 触发器：手机直调公网端点
+# 路径 /api/v1/voice/session 需同时放行：POST（session/sign）、GET（pending）、OPTIONS（CORS 预检）
+triggers:
+  - type: apigw
+    name: trtc-sign-http
+    protocols:
+      - https
+    environment: release
+    apis:
+      - path: /api/v1/voice/session
+        method: ANY           # 或显式 POST + GET；需开启「启用 CORS」
+        function:
+          isIntegratedResponse: true   # SCF 直接返回 API Gateway 响应对象

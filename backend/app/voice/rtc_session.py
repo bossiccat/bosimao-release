@@ -51,6 +51,10 @@ class InvalidDeviceIdError(RtcSessionError):
     """device_id 不合法"""
 
 
+class InvalidUserIdError(RtcSessionError):
+    """user_id 不合法"""
+
+
 class RtcSessionService:
     """会话签发（无状态：room_id 由 device_id 确定性派生，天然幂等）
 
@@ -86,10 +90,42 @@ class RtcSessionService:
             "scene": SCENE_AUDIO_CALL,
         }
 
+    def sign(self, device_id: str, user_id: str) -> dict:
+        """为指定 user_id 签同一房间凭证（PC sidecar 进房用，PC-INTEGRATION §2.3 sign 语义）
+
+        与 issue 的区别：userSig 签给 user_id（如 jax-pc-sidecar），room_id 仍由
+        device_id 确定性派生（同一房间）。凭据缺失/device_id 非法/user_id 非法均抛对应错误。
+        """
+        if not self.is_configured():
+            raise ConfigMissingError("TRTC 凭据未配置（SDKAppID/SecretKey 缺失）")
+        self._validate_device_id(device_id)
+        self._validate_user_id(user_id)
+
+        room_id = f"{self.cfg.room_prefix}{device_id}"
+        user_sig = gen_user_sig(
+            sdk_app_id=self.cfg.sdk_app_id,
+            secret_key=self.cfg.secret_key,
+            user_id=user_id,
+            expire_s=self.cfg.user_sig_expire_s,
+        )
+        logger.info("sign rtc session room=%s user_id=%s sdk_app_id=%s", room_id, user_id, self.cfg.sdk_app_id)
+        return {
+            "room_id": room_id,
+            "user_id": user_id,
+            "user_sig": user_sig,
+            "sdk_app_id": self.cfg.sdk_app_id,
+            "scene": SCENE_AUDIO_CALL,
+        }
+
     @staticmethod
     def _validate_device_id(device_id: str) -> None:
         if not isinstance(device_id, str) or not _DEVICE_ID_RE.match(device_id):
             raise InvalidDeviceIdError("device_id 不合法：仅允许字母/数字/下划线/连字符，1~64 字符")
+
+    @staticmethod
+    def _validate_user_id(user_id: str) -> None:
+        if not isinstance(user_id, str) or not _DEVICE_ID_RE.match(user_id):
+            raise InvalidUserIdError("user_id 不合法：仅允许字母/数字/下划线/连字符，1~64 字符")
 
 
 def build_session_service_from_settings(settings) -> RtcSessionService:

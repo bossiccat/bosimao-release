@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>jax-rtc-sidecar</title>
+</head>
+<body>
+  <h3>TRTC sidecar（隐藏窗口，看日志 logs/sidecar-*.log）</h3>
+  <script>
+    // 渲染进程入口：require trtc-electron-sdk 需在 DOM 环境，故在主进程加载本页面后执行
+    require('./rtc.js');
+  </script>
+</body>
+</html>

@@ -20,7 +20,7 @@
     <string name="status_phase">当前状态</string>
     <string name="status_connection">PC 网关</string>
     <string name="status_wake_count">唤醒次数</string>
-    <string name="status_server">服务器</string>
+    <string name="status_server">会话服务器</string>
     <string name="waveform_hint">语音波形</string>
     <string name="btn_start_listen">启动监听</string>
     <string name="btn_stop_listen">停止监听</string>
@@ -44,20 +44,8 @@
     <!-- 设置页 -->
     <string name="settings_title">设置</string>
     <string name="settings_session_label">会话服务器（TRTC 签发）</string>
-    <string name="settings_session_hint">https://云函数域名，默认留空</string>
-    <string name="settings_session_sub">手机唤醒后从此接口拉取 TRTC 进房凭证（room_id/user_sig）；SecretKey 不在 App 内</string>
-    <string name="settings_mode_label">连接模式（已废弃，保留兼容）</string>
-    <string name="settings_mode_lan">局域网直连（PC 网关）</string>
-    <string name="settings_mode_relay">云端中继</string>
-    <string name="settings_server_label">PC 网关地址</string>
-    <string name="settings_server_hint">ws://192.168.1.100:8000/api/v1/voice/stream</string>
-    <string name="settings_relay_label">中继地址</string>
-    <string name="settings_relay_hint">wss://relay.example.com/relay/ws</string>
-    <string name="settings_pairing_label">配对码</string>
-    <string name="settings_pairing_hint">默认 JAX2026（与 PC relay 一致）</string>
-    <string name="settings_e2ee_label">E2EE 密钥</string>
-    <string name="settings_e2ee_hint">jax-voice-dev-e2ee-20260803-0001</string>
-    <string name="settings_e2ee_sub">留空 = 明文模式（未加密）；默认开发密钥与 PC 对齐</string>
+    <string name="settings_session_hint">https://&lt;云函数域名&gt;（不带 /api/v1/voice/session）</string>
+    <string name="settings_session_sub">手机唤醒后从此接口拉取 TRTC 进房凭证（room_id/user_sig），客户端自动拼接 /api/v1/voice/session；SecretKey 不在 App 内</string>
     <string name="settings_device_id_label">设备 ID</string>
     <string name="settings_wake_label">唤醒词</string>
     <string name="settings_wake_sub">说"波斯猫"唤醒（sherpa-onnx KWS）</string>
