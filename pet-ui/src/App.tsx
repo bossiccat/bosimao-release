@@ -14,7 +14,9 @@ import { Pet } from "./components/Pet";
 import { VoiceOrb, type VoicePhase } from "./components/VoiceOrb";
 import { MonitorPanel, type SessionData } from "./components/MonitorPanel";
 import { ReminderToast, type AlertData } from "./components/ReminderToast";
-import { Settings as SettingsPanel, type MonitorTarget } from "./components/Settings";
+import { Settings as SettingsPanel, type MonitorTarget, type SettingsView } from "./components/Settings";
+import { Diagnostics } from "./components/Diagnostics";
+import { About } from "./components/About";
 import { ConnectionBadge, toVoicePhase } from "./components/ConnectionBadge";
 import { ErrorBanner, type Fault } from "./components/ErrorBanner";
 import { CaConfirm } from "./components/CaConfirm";
@@ -28,6 +30,7 @@ export default function App() {
   const [alert, setAlert] = useState<AlertData | null>(null);
   const [showPanel, setShowPanel] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsView, setSettingsView] = useState<SettingsView>("main");
   const [fault, setFault] = useState<Fault | null>(null);
   const [showCaConfirm, setShowCaConfirm] = useState(false);
   const wsFaultedRef = useRef(false);
@@ -227,18 +230,33 @@ export default function App() {
         type="button"
         className="settings-trigger"
         aria-label="打开设置"
-        onClick={() => setShowSettings((v) => !v)}
+        onClick={() => {
+          setShowSettings((v) => !v);
+          setSettingsView("main");
+        }}
       >
         <SettingsIcon size={16} strokeWidth={1.8} aria-hidden="true" />
       </button>
 
       {showSettings && (
         <div className="settings-slot" onClick={(e) => e.stopPropagation()}>
-          <SettingsPanel
-            targets={targets}
-            onToggleTarget={handleToggleTarget}
-            onClose={() => setShowSettings(false)}
-          />
+          {settingsView === "main" && (
+            <SettingsPanel
+              targets={targets}
+              onToggleTarget={handleToggleTarget}
+              onClose={() => setShowSettings(false)}
+              onNavigate={(view) => setSettingsView(view)}
+            />
+          )}
+          {settingsView === "diagnostics" && (
+            <Diagnostics
+              onBack={() => setSettingsView("main")}
+              onClose={() => setShowSettings(false)}
+            />
+          )}
+          {settingsView === "about" && (
+            <About onBack={() => setSettingsView("main")} onClose={() => setShowSettings(false)} />
+          )}
         </div>
       )}
 

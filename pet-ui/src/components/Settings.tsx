@@ -6,8 +6,19 @@
  * - 推送测试：POST /api/v1/control/test-push
  */
 import { useEffect, useState } from "react";
-import { Bell, CheckCircle2, Loader2, Moon, Sun, X, XCircle } from "lucide-react";
+import {
+  Activity,
+  Bell,
+  CheckCircle2,
+  Info,
+  Loader2,
+  Moon,
+  Sun,
+  X,
+  XCircle,
+} from "lucide-react";
 import { PrivacySettings } from "./PrivacySettings";
+import { DeviceManager } from "./DeviceManager";
 
 export interface MonitorTarget {
   app_id: string;
@@ -15,10 +26,13 @@ export interface MonitorTarget {
   enabled: boolean;
 }
 
+export type SettingsView = "main" | "diagnostics" | "about";
+
 interface SettingsProps {
   targets: MonitorTarget[];
   onToggleTarget: (appId: string, enabled: boolean) => void;
   onClose: () => void;
+  onNavigate: (view: Exclude<SettingsView, "main">) => void;
 }
 
 /** config/detection.yaml 当前阈值（只读展示；热重载后由后端推送为准） */
@@ -32,7 +46,7 @@ type PushState = "idle" | "sending" | "ok" | "fail";
 
 const PUSH_API = "https://127.0.0.1:8000/api/v1/control/test-push";
 
-export function Settings({ targets, onToggleTarget, onClose }: SettingsProps) {
+export function Settings({ targets, onToggleTarget, onClose, onNavigate }: SettingsProps) {
   const [enabledMap, setEnabledMap] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(targets.map((t) => [t.app_id, t.enabled]))
   );
@@ -112,6 +126,10 @@ export function Settings({ targets, onToggleTarget, onClose }: SettingsProps) {
       </div>
 
       <div className="st-section">
+        <DeviceManager />
+      </div>
+
+      <div className="st-section">
         <PrivacySettings />
       </div>
 
@@ -144,15 +162,29 @@ export function Settings({ targets, onToggleTarget, onClose }: SettingsProps) {
         </button>
       </div>
 
+      <div className="st-section">
+        <div className="st-nav">
+          <button type="button" className="st-nav-btn" onClick={() => onNavigate("diagnostics")}>
+            <Activity size={14} strokeWidth={2} aria-hidden="true" />
+            <span>运行诊断</span>
+          </button>
+          <button type="button" className="st-nav-btn" onClick={() => onNavigate("about")}>
+            <Info size={14} strokeWidth={2} aria-hidden="true" />
+            <span>关于</span>
+          </button>
+        </div>
+      </div>
+
       <style>{`
         .settings-panel {
           background: var(--surface);
           border: 1px solid var(--border);
           border-radius: 12px;
           width: 300px;
+          max-height: calc(100vh - 72px);
+          overflow-y: auto;
           font-size: 13px;
           box-shadow: var(--elev-modal);
-          overflow: hidden;
         }
         .st-head {
           display: flex; justify-content: space-between; align-items: center;
@@ -233,6 +265,19 @@ export function Settings({ targets, onToggleTarget, onClose }: SettingsProps) {
         .st-row-btn:disabled { opacity: 0.6; cursor: default; }
         .st-row-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
         .st-push-msg { margin-left: auto; font-size: 12px; color: var(--muted); }
+        .st-nav {
+          display: flex; gap: 8px;
+        }
+        .st-nav-btn {
+          flex: 1; min-height: 36px;
+          display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+          border: 1px solid var(--border); border-radius: 8px;
+          background: transparent; color: var(--fg-2); cursor: pointer;
+          font-size: 13px; font-family: var(--font-body);
+          transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+        }
+        .st-nav-btn:hover { background: var(--surface-raised); color: var(--fg); }
+        .st-nav-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
         .st-spin { animation: st-spin 0.8s linear infinite; }
         @keyframes st-spin { to { transform: rotate(360deg); } }
         @media (prefers-reduced-motion: reduce) {

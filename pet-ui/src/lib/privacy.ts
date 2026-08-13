@@ -60,7 +60,7 @@ export class PrivacyApiError extends Error {
 }
 
 /** 读取 owner 凭证（复用项目 owner token）。Tauri 未实现 / 开发态返回 null → 请求无 Authorization，后端 fail-closed 40101。 */
-async function getOwnerToken(): Promise<string | null> {
+export async function getOwnerToken(): Promise<string | null> {
   try {
     return await invoke<string>("get_owner_credential");
   } catch {
@@ -68,8 +68,8 @@ async function getOwnerToken(): Promise<string | null> {
   }
 }
 
-/** 一次性 nonce（防重放）：≥16 字符随机串，每次 PATCH 新生成（ADR-021 D2 / SPEC §9.1）。 */
-function freshNonce(): string {
+/** 一次性 nonce（防重放）：≥16 字符随机串，每次写请求新生成（ADR-021 D2 / SPEC §9.1）。 */
+export function freshNonce(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
