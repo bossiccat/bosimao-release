@@ -63,3 +63,11 @@ pet-ui/src-tauri/gen/
 certs/*.key
 certs/*.csr
 certs/*.srl
+
+# 运行时数据（进程 PID + watchdog 状态，每次运行变化，禁止提交）
+data/pids/*.pid
+data/pids/.watchdog_state.json
+
+# 审计临时输出（一次性产物）
+audit-*.stderr.txt
+audit-*.stdout.txt

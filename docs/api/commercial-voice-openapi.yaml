@@ -1,0 +1,660 @@
+openapi: 3.0.3
+info:
+  title: 波斯猫商业双工语音 API
+  version: 1.1.0
+  description: |
+    Phase 2 控制面唯一 HTTP 契约。P0 媒体主链路是 Android TRTC ->
+    Tauri externalBin 托管的 Node/Electron Windows RTC adapter -> bounded rtc_bridge
+    -> MiniCPM-o/APM -> TRTC Android。HTTP/WS 不承担商业主媒体平面。
+
+    P0 只允许 Android 主页面、悬浮球、前台通知 action 发起同一 TRTC 全双工路径。
+    唤醒词与用户显式选择的半双工兼容模式属于 P1；P0 失败时禁止自动降级。
+
+    生产环境缺设备凭证验证器、独立 sidecar credential、nonce 存储、防重放、
+    device/IP 限流、TLS 或 TRTC SDKAppID/SecretKey 任一项时，必须拒绝启动或拒绝全部会话。
+servers:
+  - url: https://{host}
+    description: 生产 TLS 控制面；未配置稳定域名和有效证书时禁止生产放行
+    variables:
+      host:
+        default: voice.invalid
+
+tags:
+  - name: Pairing
+  - name: Devices
+  - name: Sessions
+  - name: Status
+  - name: Stream
+
+paths:
+  /api/v1/voice/devices/pairing-code:
+    post:
+      tags: [Pairing]
+      summary: 由 Windows 本机 owner 生成一次性配对码
+      description: pairing_code 的 TTL 不超过 300 秒，服务端仅存 code_hash，最多成功消费一次。
+      security:
+        - ownerBearer: []
+      parameters:
+        - $ref: '#/components/parameters/RequestNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePairingCodeRequest'
+      responses:
+        '200':
+          description: 配对码已生成
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePairingCodeResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/CredentialUnavailable' }
+
+  /api/v1/voice/devices/register:
+    post:
+      tags: [Pairing]
+      summary: Android 使用一次性配对码注册设备
+      description: |
+        pairing_code 是 bootstrap 认证主体；该端点不是匿名注册，也不要求尚未存在的
+        device credential。服务端必须在同一数据库事务内原子消费 pairing_code、创建
+        device credential 元数据并写审计。credential_secret 只在成功响应中展示一次，
+        服务端只保存抗离线攻击的哈希，列表、日志、诊断和后续读取均不得返回明文。
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/RequestNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterDeviceRequest'
+      responses:
+        '201':
+          description: 设备注册成功；credential_secret 仅本次响应可见
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterDeviceResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/StateConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/CredentialUnavailable' }
+
+  /api/v1/voice/devices:
+    get:
+      tags: [Devices]
+      summary: 查询已配对设备
+      security:
+        - ownerBearer: []
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: 设备列表；不得包含 credential_secret 或 credential_hash
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceListResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/CredentialUnavailable' }
+
+  /api/v1/voice/devices/{device_id}/revoke:
+    post:
+      tags: [Devices]
+      summary: 撤销设备及其活动会话
+      description: |
+        强一致安全动作。成功前必须使 credential 失效、登记未过期 userSig 指纹、
+        终止活动 session 并写脱敏审计。重复请求按 nonce 幂等返回当前 revoked 状态。
+        跨进程终止失败时不得报告成功，应返回可重试错误。
+      security:
+        - ownerBearer: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+        - $ref: '#/components/parameters/RequestNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeDeviceRequest'
+      responses:
+        '200':
+          description: 撤销完成或返回已撤销状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokeDeviceResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/DeviceNotFound' }
+        '409': { $ref: '#/components/responses/StateConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/CredentialUnavailable' }
+        '504': { $ref: '#/components/responses/UpstreamTimeout' }
+
+  /api/v1/voice/session:
+    post:
+      tags: [Sessions]
+      summary: 为 Android 设备签发短期 TRTC 会话
+      security:
+        - deviceBearer: []
+      parameters:
+        - $ref: '#/components/parameters/RequestNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDeviceSessionRequest'
+      responses:
+        '201':
+          description: 会话已签发；userSig TTL 不超过 600 秒
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/StateConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/CredentialUnavailable' }
+        '504': { $ref: '#/components/responses/UpstreamTimeout' }
+
+  /api/v1/voice/session/pending:
+    get:
+      tags: [Sessions]
+      summary: 原子领取一个待处理的 sidecar 会话意图
+      description: 独立 sidecar 控制面轮询；单个意图最多领取一次，仅返回会话元数据，不承载音频。
+      security:
+        - sidecarBearer: []
+      parameters:
+        - $ref: '#/components/parameters/RequestNonce'
+      responses:
+        '200':
+          description: 返回零个或一个原子领取的待处理意图
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PendingSessionResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/CredentialUnavailable' }
+
+  /api/v1/voice/session/sign:
+    post:
+      tags: [Sessions]
+      summary: 为唯一 Node/Electron sidecar 签发短期 TRTC 会话
+      description: 只接受独立 sidecar credential；禁止复用 device credential 或由客户端自报特权身份。
+      security:
+        - sidecarBearer: []
+      parameters:
+        - $ref: '#/components/parameters/RequestNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSidecarSessionRequest'
+      responses:
+        '201':
+          description: sidecar 会话已签发；主体绑定 session/device/user/room
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/StateConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/CredentialUnavailable' }
+        '504': { $ref: '#/components/responses/UpstreamTimeout' }
+
+  /api/v1/voice/status:
+    get:
+      tags: [Status]
+      summary: 查询当前凭证可见的聚合会话状态和脱敏指标
+      security:
+        - deviceBearer: []
+        - sidecarBearer: []
+      parameters:
+        - name: session_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 状态与指标；不包含原始音频、完整转写或凭证明文
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceStatusResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/DeviceNotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/CredentialUnavailable' }
+
+  /api/v1/voice/stream:
+    get:
+      tags: [Stream]
+      summary: 建立受保护的 WebSocket 控制与本机桥接通道
+      description: |
+        通过 HTTP Upgrade 建立 WebSocket。该通道只用于控制、状态、转写事件及
+        Node/Electron sidecar 到 localhost rtc_bridge 的固定协议桥接，不是商业主媒体平面。
+        Upgrade 必须使用 TLS、session-bound Bearer credential 和 X-Request-Nonce。
+        建连后 10 秒内客户端必须发送 hello；超时关闭并报告 40801。
+      security:
+        - sessionBearer: []
+      parameters:
+        - $ref: '#/components/parameters/RequestNonce'
+      responses:
+        '101':
+          description: Switching Protocols；后续帧遵循 x-websocket-contract
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '408': { $ref: '#/components/responses/HandshakeTimeout' }
+        '409': { $ref: '#/components/responses/StateConflict' }
+        '413': { $ref: '#/components/responses/QueueOverflow' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/CredentialUnavailable' }
+        '504': { $ref: '#/components/responses/UpstreamTimeout' }
+      x-websocket-contract:
+        firstClientMessage:
+          $ref: '#/components/schemas/StreamHello'
+        clientControlMessages:
+          oneOf:
+            - $ref: '#/components/schemas/HeartbeatControl'
+            - $ref: '#/components/schemas/InterruptControl'
+            - $ref: '#/components/schemas/PauseControl'
+            - $ref: '#/components/schemas/ResumeControl'
+            - $ref: '#/components/schemas/CloseControl'
+        serverControlTypes: [ready, session_state, heartbeat, pong, transcript, error, reply_done]
+        binaryFrame:
+          description: 模型侧固定 PCM16LE、16000 Hz、单声道、20 ms、640 bytes；只允许完整帧。
+          bytes: 640
+        invalidOrder:
+          code: 40901
+          name: state_conflict
+        backpressure:
+          limits: [max_frames, max_bytes, max_frame_age_ms]
+          overflowCode: 41301
+
+components:
+  securitySchemes:
+    ownerBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-owner-credential
+      description: 仅 Windows 本机 owner 持有；不得与 device 或 sidecar credential 复用。
+    deviceBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: <device_id>.<credential_secret>
+      description: |
+        Authorization 使用 `Bearer <device_id>.<credential_secret>`。device_id 必须与请求体主体一致；
+        Android 普通存储只保存 device_id、IV 与密文，只加密保存 credential_secret，取用时才组合 wire token。
+    sidecarBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-sidecar-service-credential
+    sessionBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-session-bound-credential
+
+  parameters:
+    RequestNonce:
+      name: X-Request-Nonce
+      in: header
+      required: true
+      description: 与认证主体绑定的一次性随机值；只保存哈希，短 TTL，原子消费。
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 256
+    DeviceId:
+      name: device_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: 请求字段或身份绑定非法
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 40001, data: null, message: invalid_device_or_user } } }
+    Unauthorized:
+      description: 认证失败、nonce 重放或凭证已撤销
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            auth:
+              value: { code: 40101, data: null, message: auth_failed }
+            replay:
+              value: { code: 40102, data: null, message: nonce_replay }
+            revoked:
+              value: { code: 40103, data: null, message: credential_revoked }
+    DeviceNotFound:
+      description: 设备不存在
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 40401, data: null, message: device_not_found } } }
+    HandshakeTimeout:
+      description: WebSocket hello 超时
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 40801, data: null, message: handshake_timeout } } }
+    StateConflict:
+      description: 状态、并发消费或指令顺序冲突
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 40901, data: null, message: state_conflict } } }
+    QueueOverflow:
+      description: 队列预算耗尽且无法恢复
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 41301, data: null, message: queue_overflow } } }
+    RateLimited:
+      description: device/IP/route 超限
+      headers:
+        Retry-After:
+          schema: { type: integer, minimum: 1 }
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 42901, data: null, message: rate_limited } } }
+    CredentialUnavailable:
+      description: 生产凭证、TLS、nonce、限流或 TRTC 配置不可用；fail-closed
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 50300, data: null, message: credential_unavailable } } }
+    UpstreamTimeout:
+      description: RTC、sidecar 或模型上游超时
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 50401, data: null, message: upstream_timeout } } }
+
+  schemas:
+    ErrorCode:
+      type: integer
+      enum: [40001, 40101, 40102, 40103, 40401, 40801, 40901, 41301, 42901, 50300, 50301, 50401]
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { $ref: '#/components/schemas/ErrorCode' }
+        data: { nullable: true }
+        message:
+          type: string
+          enum: [invalid_device_or_user, auth_failed, nonce_replay, credential_revoked, device_not_found, handshake_timeout, state_conflict, queue_overflow, rate_limited, credential_unavailable, termination_unconfirmed, upstream_timeout]
+
+    CreatePairingCodeRequest:
+      type: object
+      additionalProperties: false
+      required: [platform]
+      properties:
+        device_name_hint: { type: string, minLength: 1, maxLength: 80 }
+        platform: { type: string, enum: [android] }
+    PairingCodeData:
+      type: object
+      additionalProperties: false
+      required: [pairing_code, expires_at, max_uses, ttl_seconds]
+      properties:
+        pairing_code:
+          type: string
+          minLength: 20
+          maxLength: 256
+          readOnly: true
+          description: 随机一次性 bootstrap secret；只在本次响应展示，服务端仅存哈希。
+        expires_at: { type: string, format: date-time }
+        max_uses: { type: integer, enum: [1] }
+        ttl_seconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+          description: pairing_code 从创建到过期的秒数，机器可判定上限 300。
+    CreatePairingCodeResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/PairingCodeData' }
+        message: { type: string, enum: [''] }
+
+    RegisterDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [pairing_code, device_name, platform]
+      properties:
+        pairing_code:
+          type: string
+          minLength: 20
+          maxLength: 256
+          writeOnly: true
+          description: bootstrap 认证主体；与 X-Request-Nonce 一同原子消费。
+        device_name: { type: string, minLength: 1, maxLength: 80 }
+        platform: { type: string, enum: [android] }
+    RegisteredDeviceData:
+      type: object
+      additionalProperties: false
+      required: [device_id, credential_id, credential_secret, expires_at]
+      properties:
+        device_id: { type: string, format: uuid }
+        credential_id: { type: string, format: uuid }
+        credential_secret:
+          type: string
+          minLength: 32
+          maxLength: 512
+          readOnly: true
+          description: 只在本次成功响应展示；不可再次读取，服务端只保存哈希。
+        expires_at: { type: string, format: date-time }
+    RegisterDeviceResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/RegisteredDeviceData' }
+        message: { type: string, enum: [''] }
+
+    Device:
+      type: object
+      additionalProperties: false
+      required: [device_id, device_name, platform, status, expires_at, created_at]
+      properties:
+        device_id: { type: string, format: uuid }
+        device_name: { type: string }
+        platform: { type: string, enum: [android, windows_sidecar] }
+        status: { type: string, enum: [active, expired, revoked] }
+        expires_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+    DeviceListData:
+      type: object
+      additionalProperties: false
+      required: [items, total, page, limit, hasMore]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Device' } }
+        total: { type: integer, minimum: 0 }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        hasMore: { type: boolean }
+    DeviceListResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/DeviceListData' }
+        message: { type: string, enum: [''] }
+
+    RevokeDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 200 }
+    RevokedDeviceData:
+      type: object
+      additionalProperties: false
+      required: [device_id, status, revoked_at, terminated_session_ids]
+      properties:
+        device_id: { type: string, format: uuid }
+        status: { type: string, enum: [revoked] }
+        revoked_at: { type: string, format: date-time }
+        terminated_session_ids: { type: array, items: { type: string, format: uuid }, uniqueItems: true }
+    RevokeDeviceResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/RevokedDeviceData' }
+        message: { type: string, enum: [''] }
+
+    CreateDeviceSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [device_id, entry_point]
+      properties:
+        device_id: { type: string, format: uuid }
+        entry_point:
+          type: string
+          enum: [main, overlay, notification]
+          description: P0 三入口；不得为 wake_word，也不得触发自动半双工。
+    CreateSidecarSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [device_id, user_id]
+      properties:
+        device_id: { type: string, format: uuid }
+        user_id: { type: string, minLength: 1, maxLength: 64 }
+    SessionData:
+      type: object
+      additionalProperties: false
+      required: [session_id, room_id, user_id, sdk_app_id, user_sig, expires_at, scene]
+      properties:
+        session_id: { type: string, format: uuid }
+        room_id: { type: string, minLength: 1, maxLength: 64 }
+        user_id: { type: string, minLength: 1, maxLength: 64 }
+        sdk_app_id: { type: integer, format: int64, minimum: 1 }
+        user_sig: { type: string, minLength: 1, writeOnly: true, description: TTL 不超过 600 秒；禁止落库或日志明文。 }
+        expires_at: { type: string, format: date-time }
+        scene: { type: string, enum: [trtc_full_duplex] }
+    SessionResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/SessionData' }
+        message: { type: string, enum: [''] }
+
+    PendingSessionIntent:
+      type: object
+      additionalProperties: false
+      required: [session_id, device_id, room_id, expires_at]
+      properties:
+        session_id: { type: string, format: uuid }
+        device_id: { type: string, minLength: 1, maxLength: 64 }
+        room_id: { type: string, minLength: 1, maxLength: 64 }
+        expires_at: { type: number, format: double }
+    PendingSessionData:
+      type: object
+      additionalProperties: false
+      required: [intents]
+      properties:
+        intents:
+          type: array
+          maxItems: 1
+          items: { $ref: '#/components/schemas/PendingSessionIntent' }
+    PendingSessionResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/PendingSessionData' }
+        message: { type: string, enum: [''] }
+
+    VoiceStatusData:
+      type: object
+      additionalProperties: false
+      required: [session_id, state, up_frame_count, up_bytes, down_frame_count, down_bytes, queue_depth, queue_drops, reconnects]
+      properties:
+        session_id: { type: string, format: uuid }
+        turn_id: { type: string, format: uuid, nullable: true }
+        state: { type: string, enum: [IDLE, SIGNING, ENTERING, IN_ROOM, EXITING] }
+        up_frame_count: { type: integer, format: int64, minimum: 0 }
+        up_bytes: { type: integer, format: int64, minimum: 0 }
+        down_frame_count: { type: integer, format: int64, minimum: 0 }
+        down_bytes: { type: integer, format: int64, minimum: 0 }
+        first_remote_audio_ts: { type: string, format: date-time, nullable: true }
+        first_nonzero_playback_ts: { type: string, format: date-time, nullable: true }
+        queue_depth: { type: integer, minimum: 0 }
+        queue_high_watermark: { type: integer, minimum: 0 }
+        queue_drops: { type: integer, format: int64, minimum: 0 }
+        backpressure_events: { type: integer, format: int64, minimum: 0 }
+        reconnects: { type: integer, minimum: 0 }
+        error_code: { $ref: '#/components/schemas/ErrorCode' }
+    VoiceStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/VoiceStatusData' }
+        message: { type: string, enum: [''] }
+
+    StreamHello:
+      type: object
+      additionalProperties: false
+      required: [type, session_id, device_id, protocol_version, audio_format]
+      properties:
+        type: { type: string, enum: [hello] }
+        session_id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        protocol_version: { type: string, enum: ['1.0'] }
+        audio_format:
+          type: object
+          additionalProperties: false
+          required: [encoding, sample_rate_hz, channels, frame_ms, frame_bytes]
+          properties:
+            encoding: { type: string, enum: [pcm_s16le] }
+            sample_rate_hz: { type: integer, enum: [16000] }
+            channels: { type: integer, enum: [1] }
+            frame_ms: { type: integer, enum: [20] }
+            frame_bytes: { type: integer, enum: [640] }
+    BaseControl:
+      type: object
+      required: [type, session_id, generation]
+      properties:
+        type: { type: string }
+        session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
+    HeartbeatControl:
+      allOf:
+        - $ref: '#/components/schemas/BaseControl'
+        - type: object
+          properties: { type: { type: string, enum: [heartbeat] } }
+    InterruptControl:
+      allOf:
+        - $ref: '#/components/schemas/BaseControl'
+        - type: object
+          properties: { type: { type: string, enum: [interrupt] } }
+    PauseControl:
+      allOf:
+        - $ref: '#/components/schemas/BaseControl'
+        - type: object
+          properties: { type: { type: string, enum: [pause] } }
+    ResumeControl:
+      allOf:
+        - $ref: '#/components/schemas/BaseControl'
+        - type: object
+          properties: { type: { type: string, enum: [resume] } }
+    CloseControl:
+      allOf:
+        - $ref: '#/components/schemas/BaseControl'
+        - type: object
+          properties: { type: { type: string, enum: [close] } }
