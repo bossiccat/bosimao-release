@@ -27,6 +27,9 @@ pub struct SidecarSpec {
     pub integrity: IntegritySpec,
     /// 固定参数列表（含 stub 模式标记），由构建期/测试夹具锁定。
     pub args: Vec<String>,
+    /// 自签 CA 公钥路径（resource_dir/certs/ca.crt），spawn 时经
+    /// NODE_EXTRA_CA_CERTS 注入子进程 env（ADR-020 A1）。
+    pub ca_cert_path: PathBuf,
     /// 优雅停止等待窗口。
     pub graceful_timeout: Duration,
     /// 强制终止后等待窗口。
@@ -158,6 +161,7 @@ impl SidecarSupervisor {
         let child = cmd
             .args(&self.spec.args)
             .env(SIDECAR_CREDENTIAL_ENV, launch.expose())
+            .env("NODE_EXTRA_CA_CERTS", &self.spec.ca_cert_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

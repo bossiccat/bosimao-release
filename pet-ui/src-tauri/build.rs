@@ -31,6 +31,9 @@ fn emit_rerun_rules(manifest_dir: &Path) {
         "../../sidecar/rtc-startup.js",
         "../../sidecar/rtc.js",
         "../../sidecar/security.js",
+        // TLS 信任锚（ADR-020 A1/A2）：打包进 resource_dir/certs/ca.crt 的
+        // 自签 CA 公钥，是从项目根 certs/ca.crt 拷贝的分发副本（换 CA 时同步替换）。
+        "certs/ca.crt",
         "binaries/jax-rtc-sidecar-x86_64-pc-windows-msvc.exe",
         "binaries/jax-rtc-sidecar-runtime",
         "binaries/jax-rtc-sidecar-runtime/jax-rtc-sidecar.exe.sha256",

@@ -11,6 +11,9 @@ pub mod credential_windows;
 mod credential_windows_backend;
 #[cfg(windows)]
 mod credential_windows_lock;
+pub mod ca_trust;
+#[cfg(windows)]
+mod ca_trust_windows;
 #[cfg(all(windows, feature = "credential-test-support"))]
 pub mod o020_controller;
 #[cfg(all(windows, feature = "credential-test-support"))]

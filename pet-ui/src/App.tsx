@@ -7,6 +7,8 @@
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useActor } from "@xstate/react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Settings as SettingsIcon } from "lucide-react";
 import { Pet } from "./components/Pet";
 import { VoiceOrb, type VoicePhase } from "./components/VoiceOrb";
@@ -15,6 +17,7 @@ import { ReminderToast, type AlertData } from "./components/ReminderToast";
 import { Settings as SettingsPanel, type MonitorTarget } from "./components/Settings";
 import { ConnectionBadge, toVoicePhase } from "./components/ConnectionBadge";
 import { ErrorBanner, type Fault } from "./components/ErrorBanner";
+import { CaConfirm } from "./components/CaConfirm";
 import { petMachine, type PetState } from "./state/petMachine";
 import { wsClient } from "./state/wsClient";
 import "./styles/global.css";
@@ -26,7 +29,33 @@ export default function App() {
   const [showPanel, setShowPanel] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [fault, setFault] = useState<Fault | null>(null);
+  const [showCaConfirm, setShowCaConfirm] = useState(false);
   const wsFaultedRef = useRef(false);
+
+  // CA 安装明示确认（ADR-020 A2）：绝不静默装自签根 CA。
+  // 后端 setup 若未装会 emit ca-confirm-required；因 setup 在 webview 加载前运行，
+  // 事件可能被错过，故 mount 时再用 is_ca_install_required 拉取兜底。
+  useEffect(() => {
+    if (!isTauri()) return; // vite dev 浏览器环境无 Tauri IPC，跳过
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const show = () => {
+      if (!disposed) setShowCaConfirm(true);
+    };
+    listen("ca-confirm-required", show).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    invoke<boolean>("is_ca_install_required")
+      .then((required) => {
+        if (required) show();
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     const off = wsClient.on((evt) => {
@@ -224,6 +253,8 @@ export default function App() {
           onDismiss={() => setFault(null)}
         />
       )}
+
+      {showCaConfirm && <CaConfirm onClose={() => setShowCaConfirm(false)} />}
 
       <style>{`
         .app-root { height: 100vh; position: relative; }

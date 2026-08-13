@@ -29,7 +29,7 @@ const THRESHOLDS = [
 
 type PushState = "idle" | "sending" | "ok" | "fail";
 
-const PUSH_API = "http://127.0.0.1:8000/api/v1/control/test-push";
+const PUSH_API = "https://127.0.0.1:8000/api/v1/control/test-push";
 
 export function Settings({ targets, onToggleTarget, onClose }: SettingsProps) {
   const [enabledMap, setEnabledMap] = useState<Record<string, boolean>>(() =>

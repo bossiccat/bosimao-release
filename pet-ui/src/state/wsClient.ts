@@ -15,7 +15,7 @@ export type WsConnState = "connecting" | "open" | "reconnecting";
 type Listener = (evt: WsEvent) => void;
 type ConnListener = (state: WsConnState) => void;
 
-const WS_URL = "ws://127.0.0.1:8000/ws/pet";
+const WS_URL = "wss://127.0.0.1:8000/ws/pet";
 
 export class WsClient {
   private ws: WebSocket | null = null;

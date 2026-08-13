@@ -14,7 +14,7 @@ use jax_pet::sidecar_credential::SidecarCredentialService;
 use jax_pet::watchdog::{
     drive_restart_policy, HealthWindow, Watchdog, WatchdogAction, WatchdogConfig,
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 const SIDECAR_BIN: &str = "jax-rtc-sidecar.exe";
 const SIDECAR_SHA_FILE: &str = "jax-rtc-sidecar.exe.sha256";
@@ -27,6 +27,15 @@ const COMPILED_MANIFEST_SHA256: &str = env!("JAX_SIDECAR_MANIFEST_SHA256");
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            // 受信面扩张红线（ADR-020 A2 + 总监裁决）：绝不静默装自签根 CA。
+            // 已安装 → 幂等跳过（不装不弹）；未安装 → emit ca-confirm-required 通知前端
+            // 弹明示确认界面，等用户同意后经 install_trusted_ca 命令才真正安装。
+            // setup 在 webview 加载前运行，事件可能被错过，故前端 mount 时还会用
+            // is_ca_install_required 拉取一次（见 App.tsx）。
+            if !jax_pet::ca_trust::is_ca_installed() {
+                let _ = app.emit("ca-confirm-required", ());
+            }
+
             let spec = resolve_sidecar_spec(app);
             let mut supervisor = SidecarSupervisor::new(spec);
             let mut service = SidecarCredentialService::new(WindowsCredentialStore::sidecar());
@@ -47,9 +56,26 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             window::set_ignore_cursor_events,
             window::get_sidecar_status,
+            install_trusted_ca,
+            is_ca_install_required,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// 用户确认后安装自签根 CA（明示用户流程的落地动作，ADR-020 A2）。
+/// 只有前端用户点击「同意并安装」后才会被调用；setup 绝不静默安装。
+#[tauri::command]
+fn install_trusted_ca(app: tauri::AppHandle) -> Result<String, String> {
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    jax_pet::ca_trust::install_current_user_root_ca(&resource_dir)
+}
+
+/// 前端 mount 时拉取：是否还需弹 CA 确认（未安装 = true）。
+/// 用于兜底 setup 阶段 emit 事件在 webview 加载前可能被错过的情况。
+#[tauri::command]
+fn is_ca_install_required() -> bool {
+    !jax_pet::ca_trust::is_ca_installed()
 }
 
 /// 解析 externalBin 产物路径与哈希文件。
@@ -75,6 +101,7 @@ fn resolve_sidecar_spec(app: &tauri::App) -> SidecarSpec {
             runtime_dir,
         },
         args: SIDECAR_ARGS.iter().map(|s| s.to_string()).collect(),
+        ca_cert_path: dir.join("certs").join("ca.crt"),
         graceful_timeout: Duration::from_secs(5),
         kill_timeout: Duration::from_secs(3),
     }

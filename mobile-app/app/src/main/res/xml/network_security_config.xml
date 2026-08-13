@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ADR-020 A3：默认禁明文（cleartextTrafficPermitted=false），
+  同时信任系统根（system，覆盖 CloudBase 云函数正式 CA）与本应用自带自签 CA（@raw/ca）。
+  必须保留 system 源，否则会覆盖系统信任、导致云函数正式 CA 校验失败。
+  换正式 CA = 替换 raw/ca.crt 重新打包，零代码。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/ca" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
