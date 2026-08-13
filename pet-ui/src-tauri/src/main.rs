@@ -2,6 +2,7 @@
 // 2026-08-13 弹窗修复：release 构建使用 GUI 子系统（禁止黑色命令窗）；
 // debug 保留 console 便于日志。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod crash_report;
 mod tray;
 mod window;
 
@@ -26,8 +27,17 @@ const WATCHDOG_HEALTHY_AFTER: Duration = Duration::from_secs(30);
 const COMPILED_MANIFEST_SHA256: &str = env!("JAX_SIDECAR_MANIFEST_SHA256");
 
 fn main() {
+    // E-1：尽早注册全局 panic hook，任何后续 panic 都先落盘崩溃现场再走默认 hook。
+    // 日志目录 setup 阶段注入 app_log_dir；注册时机早于 app 构建，故此处先用兜底目录。
+    crash_report::install_panic_hook();
+
     tauri::Builder::default()
         .setup(|app| {
+            // 注入真实日志目录：app_log_dir()/crash，后续运行时 panic 落盘于此。
+            if let Ok(log_dir) = app.path().app_log_dir() {
+                crash_report::set_log_dir(log_dir.join("crash"));
+            }
+
             // 受信面扩张红线（ADR-020 A2 + 总监裁决）：绝不静默装自签根 CA。
             // 已安装 → 幂等跳过（不装不弹）；未安装 → emit ca-confirm-required 通知前端
             // 弹明示确认界面，等用户同意后经 install_trusted_ca 命令才真正安装。

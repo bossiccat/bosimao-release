@@ -179,6 +179,9 @@ class Settings(BaseSettings):
 
     backend_port: int = 8000
 
+    # 应用版本号（崩溃诊断落盘用，可经 .env APP_VERSION 覆盖）
+    app_version: str = "1.0.0"
+
     # TLS 商业级安全底座（2026-08-13）：证书路径由 .env 注入，空 = 明文（开发态）
     # 生产（voice_production=true）必须同时配置 cert/key 并在 uvicorn 启用 HTTPS/WSS。
     tls_certfile: str = ""     # 服务端证书（如 certs/server.crt）

@@ -28,12 +28,19 @@ from .engine.llama_omni_client import LlamaOmniClient
 from .engine.vision_analyzer import VisionAnalyzer
 from .push.manager import PushManager
 from .services.reminder_service import ReminderService
+from .utils.crash_reporter import (
+    build_fastapi_exception_handler,
+    install_crash_hooks,
+)
 from .utils.logger import setup_logging
 from .voice.config import load_voice
 from .voice.privacy import privacy_runtime
 
 setup_logging(app_config.settings.log_level)
 logger = logging.getLogger(__name__)
+
+# 阶段 E-1：未捕获异常落盘（sys.excepthook / threading.excepthook + FastAPI 全局兜底）
+install_crash_hooks(app_config.settings.app_version)
 
 
 def _build_secured_session_router():
@@ -174,8 +181,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="贾克斯模式 - AI 智能体监控中枢",
-    version="1.0.0",
+    version=app_config.settings.app_version,
     lifespan=lifespan,
+)
+
+# 阶段 E-1：全局未捕获异常兜底（路由内未 try/except 的异常 → 落盘 + 统一 500）
+app.add_exception_handler(
+    Exception, build_fastapi_exception_handler(app_config.settings.app_version)
 )
 
 app.include_router(routes_status.router)

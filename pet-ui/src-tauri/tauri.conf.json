@@ -48,5 +48,17 @@
       "binaries/jax-rtc-sidecar-runtime/": "jax-rtc-sidecar-runtime/",
       "certs/ca.crt": "certs/ca.crt"
     }
+  },
+  "plugins": {
+    "updater": {
+      "active": false,
+      "endpoints": [
+        "https://updates.example.com/jax-pet/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "pubkey": "REPLACE_WITH_MINISIGN_PUBKEY_AFTER_SIGNING_CERT",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
