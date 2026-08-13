@@ -215,7 +215,8 @@ function Start-BackendService {
 function Start-RelayService {
     Load-Env
     $relayUrl = "wss://jax-relay-283963-7-1436773060.sh.run.tcloudbase.com/relay/ws"
-    $gwUrl    = "ws://127.0.0.1:8000/ws/voice"
+    $gwUrl    = "wss://127.0.0.1:8000/ws/voice"
+    $gwCa     = Join-Path $Root "certs\ca.crt"
     $pairCode = "JAX2026"
     $token    = $env:RELAY_TOKEN
     $e2eeKey  = $env:RELAY_E2EE_KEY
@@ -236,7 +237,7 @@ function Start-RelayService {
     if ($oldProcId -and -not (Test-ProcessAlive $oldProcId)) { Clear-PidFile "relay" }
     $log = Join-Path $LogDir "relay_client.log"
     $relayArgs = @("-m","backend.relay.relay_client",
-        "--relay", $relayUrl, "--gateway", $gwUrl,
+        "--relay", $relayUrl, "--gateway", $gwUrl, "--gateway-ca", $gwCa,
         "--pairing-code", $pairCode, "--token", $token, "--e2ee-key", $e2eeKey)
     Write-Host "[relay] 启动 $PyW $($relayArgs -join ' ')"
     $p = Start-Process -FilePath $PyW -ArgumentList $relayArgs -WorkingDirectory $Root `

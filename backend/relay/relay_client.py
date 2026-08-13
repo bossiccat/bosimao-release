@@ -19,6 +19,7 @@ import logging
 import time
 from typing import Any
 
+import ssl
 import websockets
 
 from .relay_protocol import (
@@ -53,6 +54,7 @@ class RelayClient:
         device_id: str,
         pairing_code: str,
         gateway_url: str = "ws://127.0.0.1:8000/ws/voice",
+        gateway_ca: str | None = None,
         e2ee: RelayE2EE | None = None,
         gateway_heartbeat_interval_s: float = 15.0,
     ) -> None:
@@ -61,6 +63,7 @@ class RelayClient:
         self.device_id = device_id
         self.pairing_code = pairing_code
         self.gateway_url = gateway_url
+        self.gateway_ca = gateway_ca
         self.e2ee = e2ee
         # 网关保活：主动心跳间隔（对齐手机端 startHeartbeat 15s）。
         # 网关 heartbeat_timeout_s(60) 检查"距最后收帧"，只被动应答（收到 ping 才回）时
@@ -167,9 +170,13 @@ class RelayClient:
 
     async def _connect_gateway(self) -> None:
         backoff_idx = 0
+        # wss 网关（TLS 底座后 backend 切 https）需信任自签 CA；ca 路径由 --gateway-ca 传入。
+        ssl_ctx = None
+        if self.gateway_ca and self.gateway_url.startswith("wss://"):
+            ssl_ctx = ssl.create_default_context(cafile=self.gateway_ca)
         while not self._stop:
             try:
-                self._gw_ws = await websockets.connect(self.gateway_url, ping_interval=None, proxy=None)
+                self._gw_ws = await websockets.connect(self.gateway_url, ping_interval=None, proxy=None, ssl=ssl_ctx)
                 await self._gw_ws.send(json.dumps({
                     "type": "hello", "role": "pc", "device_id": self.device_id,
                     "app_version": "relay-client-0.1.0", "engine": "relay",
@@ -324,6 +331,8 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="PC 侧中继客户端（联调用）")
     parser.add_argument("--relay", default=os.environ.get("RELAY_URL", "ws://127.0.0.1:19090/relay/ws"))
     parser.add_argument("--gateway", default=os.environ.get("VOICE_GATEWAY_URL", "ws://127.0.0.1:8000/ws/voice"))
+    parser.add_argument("--gateway-ca", default=os.environ.get("VOICE_GATEWAY_CA", ""),
+                        help="wss 网关的自签 CA 证书路径（certs/ca.crt），信任它用于 TLS 校验")
     parser.add_argument("--pairing-code", required=True)
     parser.add_argument("--device-id", default="jax-pc-01")
     parser.add_argument("--token", default=os.environ.get("RELAY_TOKEN", ""))
@@ -334,7 +343,7 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     e2ee = RelayE2EE(load_e2ee_key(args.e2ee_key)) if args.e2ee_key else None
     client = RelayClient(args.relay, args.token, args.device_id, args.pairing_code,
-                         gateway_url=args.gateway, e2ee=e2ee)
+                         gateway_url=args.gateway, gateway_ca=args.gateway_ca or None, e2ee=e2ee)
     try:
         await client.start()
     except KeyboardInterrupt:
