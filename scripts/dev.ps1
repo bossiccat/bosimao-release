@@ -80,7 +80,7 @@ try {
             Write-Host "模型服务健康检查通过: http://127.0.0.1:$modelPort/health"
         } else {
             $ngl = if ($env:MODEL_NGL) { $env:MODEL_NGL } else { "99" }
-            $ctx = if ($env:MODEL_CTX_SIZE) { $env:MODEL_CTX_SIZE } else { "8192" }
+            $ctx = if ($env:MODEL_CTX_SIZE) { $env:MODEL_CTX_SIZE } else { "4096" }
             Write-Host "[提示] 模型服务未就绪（:$modelPort 健康检查失败）"
             Write-Host "  → 请启动 Comni 桌面版，或手动运行："
             Write-Host "    llama-omni-server --host 127.0.0.1 --port $modelPort --model `"$modelPath`" -ngl $ngl --ctx-size $ctx"

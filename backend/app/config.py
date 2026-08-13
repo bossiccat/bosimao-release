@@ -1,14 +1,15 @@
 """配置系统：统一加载 config/*.yaml + .env（pydantic-settings）"""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+from ._frozen_paths import project_root
+
+PROJECT_ROOT = project_root()
 CONFIG_DIR = PROJECT_ROOT / "config"
 
 

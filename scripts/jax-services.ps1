@@ -1,6 +1,6 @@
 ﻿# ============================================================
 # jax-services.ps1 — 贾克斯桌面端三件套统一服务管理（加固）
-# 三件套：model(:19080 llama-server) / backend(:8000 uvicorn) / relay_client(公网中继桥接)
+# 三件套：model(:19080 jax-model) / backend(:8000 jax-backend) / relay_client(公网中继桥接)
 # 用法:
 #   powershell -ExecutionPolicy Bypass -File scripts/jax-services.ps1 status
 #   powershell -ExecutionPolicy Bypass -File scripts/jax-services.ps1 start            # 全部
@@ -21,6 +21,9 @@ $Root    = Split-Path -Parent $PSScriptRoot
 $PidDir  = Join-Path $Root "data\pids"
 $LogDir  = Join-Path $Root "logs"
 $Py      = Join-Path $Root ".venv\Scripts\python.exe"
+# 阶段 D 品牌化：后端/模型进程不再以裸 python.exe / llama-server.exe 常驻，
+# 改为 jax-backend.exe / jax-model.exe（任务管理器显示品牌化进程名，消除杀毒误报面）。
+$BackendExe = Join-Path $Root "jax-backend.exe"
 New-Item -ItemType Directory -Force -Path $PidDir, $LogDir | Out-Null
 
 # ---------------- 基础工具函数 ----------------
@@ -125,10 +128,12 @@ function Invoke-SvcStart([string]$Name) {
 
 # ---------------- 模型服务 :19080 ----------------
 function Start-ModelService {
-    $ServerBin = "C:\Users\Administrator\AppData\Local\Comni\_internal\resources\build\bin\Release\llama-server.exe"
+    # 阶段 D 品牌化：llama-server.exe 重命名为 jax-model.exe（签名留阶段 G）。
+    # 注意：jax-model.exe 依赖同目录下的 CUDA/ggml/llama/omni DLL，必须与这些 DLL 保持同目录。
+    $ServerBin = "C:\Users\Administrator\AppData\Local\Comni\_internal\resources\build\bin\Release\jax-model.exe"
     $Model = "D:\models\MiniCPM-o-4_5-gguf\MiniCPM-o-4_5-Q4_K_M.gguf"
     $Port = 19080
-    $Log = Join-Path $LogDir "llama-server-$Port.log"
+    $Log = Join-Path $LogDir "jax-model-$Port.log"
     if (-not (Test-Path $ServerBin)) { Write-Host "[model][x] 引擎不存在: $ServerBin"; return $false }
     if (-not (Test-Path $Model))     { Write-Host "[model][x] 模型不存在: $Model";     return $false }
     # 幂等：已健康 → 跳过（采纳现有进程 PID，保持 PID 文件一致）
@@ -151,7 +156,7 @@ function Start-ModelService {
     # 主模型层对齐 Comni GUI（cpp_backend.py）：--device CUDA0 + --split-mode none（单卡）
     # 注意：token2wav/audio 子模型由 omni_init 请求体控制（token2wav_device=gpu:0），不在启动参数
     $env:LLAMA_ARG_DEVICE = "CUDA0"
-    $args = @("--host","127.0.0.1","--port","$Port","--model",$Model,"-ngl","99","--ctx-size","8192","--device","CUDA0","--split-mode","none")
+    $args = @("--host","127.0.0.1","--port","$Port","--model",$Model,"-ngl","99","--ctx-size","4096","--device","CUDA0","--split-mode","none")
     Write-Host "[model] 启动 $ServerBin ..."
     $p = Start-Process -FilePath $ServerBin -ArgumentList $args `
         -RedirectStandardOutput $Log -RedirectStandardError "$Log.err" -WindowStyle Hidden -PassThru
@@ -187,9 +192,10 @@ function Start-BackendService {
     }
     $oldProcId = Get-PidFile "backend"
     if ($oldProcId -and -not (Test-ProcessAlive $oldProcId)) { Clear-PidFile "backend" }
-    Write-Host "[backend] 启动 $Py -m uvicorn app.main:app --port $Port (cwd=backend)"
-    $p = Start-Process -FilePath $Py -ArgumentList "-m","uvicorn","app.main:app","--host","127.0.0.1","--port","$Port" `
-        -WorkingDirectory (Join-Path $Root "backend") `
+    if (-not (Test-Path $BackendExe)) { Write-Host "[backend][x] jax-backend.exe 不存在: $BackendExe（请先 cd backend/packaging 打包）"; return $false }
+    Write-Host "[backend] 启动 $BackendExe --host 127.0.0.1 --port $Port (cwd=项目根)"
+    $p = Start-Process -FilePath $BackendExe -ArgumentList "--host","127.0.0.1","--port","$Port" `
+        -WorkingDirectory $Root `
         -RedirectStandardOutput $Log -RedirectStandardError "$Log.err" -WindowStyle Hidden -PassThru
     Set-PidFile "backend" $p.Id
     Write-Host "[backend] PID=$($p.Id) 等待 /health（最多 90s）..."
@@ -203,6 +209,8 @@ function Start-BackendService {
 }
 
 # ---------------- relay_client（公网中继桥接） ----------------
+# 待 M2-D 后续（ADR-024 D3）：relay_client 与下方 rtc_bridge 将合并为单一 jax-bridge.exe
+# （共享 event loop + 统一健康检查）。本轮二者仍独立进程，不强行合并。
 function Start-RelayService {
     Load-Env
     $relayUrl = "wss://jax-relay-283963-7-1436773060.sh.run.tcloudbase.com/relay/ws"
@@ -316,23 +324,23 @@ function Stop-ServiceByName([string]$Name) {
         $procId = Get-PortPid 19080
         if ($procId) {
             $cmd = Get-PortProcCommandLine 19080
-            if ($cmd -match "llama-server") {
+            if ($cmd -match "jax-model") {
                 Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
-                Write-Host "[model] 按端口 19080 定位并停止 PID=$procId（命令行含 llama-server）"
+                Write-Host "[model] 按端口 19080 定位并停止 PID=$procId（命令行含 jax-model）"
                 Clear-PidFile "model"; return $true
             }
-            Write-Host "[model][!] 端口 19080 被非 llama-server 进程占用（PID $procId），不盲杀"; return $false
+            Write-Host "[model][!] 端口 19080 被非 jax-model 进程占用（PID $procId），不盲杀"; return $false
         }
     } elseif ($Name -eq "backend") {
         $procId = Get-PortPid 8000
         if ($procId) {
             $cmd = Get-PortProcCommandLine 8000
-            if ($cmd -match "uvicorn") {
+            if ($cmd -match "jax-backend") {
                 Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
-                Write-Host "[backend] 按端口 8000 定位并停止 PID=$procId（命令行含 uvicorn）"
+                Write-Host "[backend] 按端口 8000 定位并停止 PID=$procId（命令行含 jax-backend）"
                 Clear-PidFile "backend"; return $true
             }
-            Write-Host "[backend][!] 端口 8000 被非 uvicorn 进程占用（PID $procId），不盲杀"; return $false
+            Write-Host "[backend][!] 端口 8000 被非 jax-backend 进程占用（PID $procId），不盲杀"; return $false
         }
     } elseif ($Name -eq "rtc-bridge") {
         $rs = @(Get-RtcBridgeProcesses)

@@ -22,6 +22,12 @@ build/
 target/
 node_modules/
 
+# 后端品牌化打包产物（jax-backend.exe / 部署到项目根的临时副本）
+backend/packaging/dist/
+backend/packaging/build/
+/jax-backend.exe
+/jax-backend.exe.old
+
 # 日志与运行数据
 logs/
 *.log

@@ -6,9 +6,10 @@ import logging
 import sys
 import time
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
 
-_LOG_DIR = Path(__file__).resolve().parents[3] / "logs"
+from .._frozen_paths import project_root
+
+_LOG_DIR = project_root() / "logs"
 # ADR-010 文件堆积对策：单文件 5MB，保留 7 个备份（jax.log / jax.log.1..7）
 _LOG_MAX_BYTES = 5 * 1024 * 1024
 _LOG_BACKUP_COUNT = 7

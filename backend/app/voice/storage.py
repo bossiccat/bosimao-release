@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from .._frozen_paths import bundled_path
 from .repositories import audit as _audit
 from .repositories import device_credentials as _dc
 from .repositories import nonces as _nonces
@@ -29,7 +30,7 @@ PendingSessionRepository = _pending.PendingSessionRepository
 RateLimitRepository = _rl.RateLimitRepository
 SettingsRepository = _settings.SettingsRepository
 
-MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+MIGRATIONS_DIR = bundled_path("backend", "app", "voice", "migrations")
 MIGRATIONS = (
     "001_commercial_voice.sql",
     "002_pending_session_claims.sql",

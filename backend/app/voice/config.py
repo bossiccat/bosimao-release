@@ -15,9 +15,11 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field
 
+from .._frozen_paths import project_root
+
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = project_root()
 VOICE_YAML = PROJECT_ROOT / "config" / "voice.yaml"
 
 # 默认模型目录（scripts/download_sherpa_models.py 下载目标，与 .gitignore 对齐）

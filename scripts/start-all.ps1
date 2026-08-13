@@ -9,7 +9,8 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Py = Join-Path $Root ".venv\Scripts\python.exe"
-$PyW = Join-Path $Root ".venv\Scripts\pythonw.exe"   # GUI 子系统，无命令窗（后端/relay 用）
+$PyW = Join-Path $Root ".venv\Scripts\pythonw.exe"   # GUI 子系统，无命令窗（relay 用）
+$BackendExe = Join-Path $Root "jax-backend.exe"      # 阶段 D 品牌化：后端不再裸 pythonw -m uvicorn
 $LogDir = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -67,9 +68,10 @@ if ($listening -and -not $Restart) {
         Start-Sleep -Seconds 2
     }
     $log = Join-Path $LogDir "backend.log"
-    Write-Host "[backend] start: $PyW -m uvicorn app.main:app --host 127.0.0.1 --port 8000 (log $log)"
-    Start-Process -FilePath $PyW -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000" `
-        -WorkingDirectory (Join-Path $Root "backend") -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden
+    if (-not (Test-Path $BackendExe)) { Write-Error "[2/3] jax-backend.exe 不存在: $BackendExe（请先 cd backend/packaging 打包）"; exit 1 }
+    Write-Host "[backend] start: $BackendExe --host 127.0.0.1 --port 8000 (log $log)"
+    Start-Process -FilePath $BackendExe -ArgumentList "--host", "127.0.0.1", "--port", "8000" `
+        -WorkingDirectory $Root -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden
     $deadline = (Get-Date).AddSeconds(90)
     $ready = $false
     while ((Get-Date) -lt $deadline) {

@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .._frozen_paths import project_root
 from ..config import MonitorTarget
 from .dxgi_fallback import DxgiFallback
 from .wgc_capture import WgcCapturer, WgcTrialCapturer
@@ -31,7 +32,7 @@ REBUILD_COOLDOWN_SECONDS = 30.0
 
 AUTH_FILE_VERSION = 1
 # 授权持久化文件（backend/data/authorized_windows.json，仅存 app_id/window_title/authorized_at）
-DEFAULT_AUTH_FILE = Path(__file__).resolve().parents[3] / "backend" / "data" / "authorized_windows.json"
+DEFAULT_AUTH_FILE = project_root() / "backend" / "data" / "authorized_windows.json"
 
 
 def load_auth_file(path: Path) -> dict[str, dict]:
