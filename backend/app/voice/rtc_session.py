@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+import uuid
 
 from pydantic import BaseModel
 
@@ -26,8 +28,8 @@ logger = logging.getLogger(__name__)
 # device_id：字母/数字/下划线/连字符，1~64 字符（TRTC userId/房间字符串同字符集）
 _DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
-# 进房场景（纯语音通话）
-SCENE_AUDIO_CALL = "audio_call"
+# 进房场景（商业锁定契约：OpenAPI SessionData.scene 唯一允许值）
+SCENE_FULL_DUPLEX = "trtc_full_duplex"
 
 
 class RtcSessionConfig(BaseModel):
@@ -82,13 +84,7 @@ class RtcSessionService:
             expire_s=self.cfg.user_sig_expire_s,
         )
         logger.info("issue rtc session room=%s user_id=%s sdk_app_id=%s", room_id, device_id, self.cfg.sdk_app_id)
-        return {
-            "room_id": room_id,
-            "user_id": device_id,
-            "user_sig": user_sig,
-            "sdk_app_id": self.cfg.sdk_app_id,
-            "scene": SCENE_AUDIO_CALL,
-        }
+        return self._session_payload(room_id, device_id, user_sig)
 
     def sign(self, device_id: str, user_id: str) -> dict:
         """为指定 user_id 签同一房间凭证（PC sidecar 进房用，PC-INTEGRATION §2.3 sign 语义）
@@ -109,12 +105,18 @@ class RtcSessionService:
             expire_s=self.cfg.user_sig_expire_s,
         )
         logger.info("sign rtc session room=%s user_id=%s sdk_app_id=%s", room_id, user_id, self.cfg.sdk_app_id)
+        return self._session_payload(room_id, user_id, user_sig)
+
+    def _session_payload(self, room_id: str, user_id: str, user_sig: str) -> dict:
+        """组装 OpenAPI SessionData：session_id + expires_at + scene=trtc_full_duplex"""
         return {
+            "session_id": str(uuid.uuid4()),
             "room_id": room_id,
             "user_id": user_id,
             "user_sig": user_sig,
             "sdk_app_id": self.cfg.sdk_app_id,
-            "scene": SCENE_AUDIO_CALL,
+            "expires_at": time.time() + self.cfg.user_sig_expire_s,
+            "scene": SCENE_FULL_DUPLEX,
         }
 
     @staticmethod

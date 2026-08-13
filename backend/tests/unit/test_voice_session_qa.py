@@ -177,16 +177,18 @@ def test_usersig_device_id_mutual_exclusion():
 # ---------- 用例：路由契约 ----------
 
 def test_session_returns_contract_fields():
-    """契约：响应含 room_id/user_id/user_sig/sdk_app_id/scene；user_id==device_id"""
+    """契约（OpenAPI SessionResponse）：HTTP 201 + room_id/user_id/user_sig/sdk_app_id/scene/session_id/expires_at；user_id==device_id"""
     client = _client(_service())
     status, body = _post(client, DEVICE_ID)
-    assert status == 200
+    assert status == 201
     data = body["data"]
     assert data["room_id"].startswith(ROOM_PREFIX)
     assert data["user_id"] == DEVICE_ID
     assert data["user_sig"]
     assert data["sdk_app_id"] == FAKE_SDK_APP_ID
-    assert data["scene"] == "audio_call"
+    assert data["scene"] == "trtc_full_duplex"
+    assert data["session_id"]
+    assert data["expires_at"]
 
 
 def test_same_device_idempotent_room():

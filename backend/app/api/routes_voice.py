@@ -6,6 +6,9 @@
 - POST /api/v1/voice/pair        配对码 + token 签发（M1 stub，V2 中继扩展）
 - POST /api/v1/voice/session     TRTC 会话签发（ADR-012 / PC-INTEGRATION §2.3）
 
+商业安全路由（Bearer/nonce/限流/fail-closed）见 routes_voice_secured 模块，
+本模块只保留旧半双工网关与无状态签发装配（既有测试契约）。
+
 只编排不写业务：握手/帧分发在 app.voice.session，处理链路在 app.voice.half_duplex，
 TRTC 会话签发在 app.voice.rtc_session + app.voice.usersig。
 """
@@ -32,6 +35,9 @@ from ..voice.rtc_session import (
 from ..voice.session import VoiceSessionManager, handshake, run_session
 from ..voice.stt_sherpa import SttSherpa
 from ..voice.tts_edge import TtsEdge
+
+# 商业安全路由工厂（SPEC §5 认证/nonce/限流/fail-closed；生产装配使用它）
+from .routes_voice_secured import create_secured_voice_router  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +136,13 @@ def build_session_router(service: RtcSessionService | None = None) -> APIRouter:
     svc = service or build_session_service_from_settings(load_settings())
     router = APIRouter(tags=["voice"])
 
-    @router.post("/api/v1/voice/session")
+    @router.post("/api/v1/voice/session", status_code=201)
     async def voice_session(req: VoiceSessionRequest):
-        """签发 TRTC 进房凭证：{device_id} → {room_id, user_id(=device_id), user_sig, sdk_app_id, scene}"""
+        """签发 TRTC 进房凭证：{device_id} → {room_id, user_id(=device_id), user_sig, sdk_app_id, scene}
+
+        锁定契约（OpenAPI）：HTTP 201，scene=trtc_full_duplex，含 session_id/expires_at。
+        生产装配使用 create_secured_voice_router（本函数保留供既有测试注入 service）。
+        """
         try:
             data = svc.issue(req.device_id)
         except InvalidDeviceIdError as e:
@@ -151,7 +161,7 @@ def build_session_router(service: RtcSessionService | None = None) -> APIRouter:
             )
         return {"code": 0, "data": data, "message": ""}
 
-    @router.post("/api/v1/voice/session/sign")
+    @router.post("/api/v1/voice/session/sign", status_code=201)
     async def voice_session_sign(req: VoiceSignRequest):
         """PC sidecar 进房签发：{device_id, user_id} → 同一 room_id，userSig 签给 user_id
 

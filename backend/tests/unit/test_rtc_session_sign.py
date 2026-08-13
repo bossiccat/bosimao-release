@@ -31,13 +31,16 @@ def _client(service: RtcSessionService) -> TestClient:
 def test_sign_sidecar_success():
     client = _client(_service())
     resp = client.post("/api/v1/voice/session/sign", json={"device_id": "dev-001", "user_id": "jax-pc-sidecar"})
-    assert resp.status_code == 200
+    # 契约迁移（OpenAPI SessionResponse：HTTP 201 + scene=trtc_full_duplex + session_id/expires_at）
+    assert resp.status_code == 201
     body = resp.json()
     assert body["code"] == 0
     data = body["data"]
     assert data["room_id"] == "jax-dev-001"
     assert data["user_id"] == "jax-pc-sidecar"
-    assert data["scene"] == "audio_call"
+    assert data["scene"] == "trtc_full_duplex"
+    assert data["session_id"]
+    assert data["expires_at"]
     assert int(data["sdk_app_id"]) == FAKE_SDK_APP_ID
     assert parse_user_sig(data["user_sig"])["TLS.identifier"] == "jax-pc-sidecar"
 
@@ -45,7 +48,7 @@ def test_sign_sidecar_success():
 def test_sign_default_user_id_is_sidecar():
     client = _client(_service())
     resp = client.post("/api/v1/voice/session/sign", json={"device_id": "dev-001"})
-    assert resp.status_code == 200
+    assert resp.status_code == 201
     assert resp.json()["data"]["user_id"] == "jax-pc-sidecar"
 
 

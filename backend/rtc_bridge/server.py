@@ -1,6 +1,6 @@
 """BridgeServer —— localhost WS 服务端（127.0.0.1:19092，sidecar 是客户端）
 
-- 首个消息必须为 hello（注册 device/room）；随后 up_audio / peer_state 分发到 PeerVoiceSession
+- 首个消息必须为完整当前会话 hello；随后 up_audio / peer_state 分发到 PeerVoiceSession
 - 会话下行（down_audio / ctrl）经 _send_msg 回调写到当前 WS
 - MVP 单用户：新 sidecar 连接顶替旧连接（旧连接 close）
 """
@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from typing import Any
 
 import websockets
@@ -27,6 +26,7 @@ class BridgeServer:
         self.state = state                       # 指标/健康共享字典（health.py 读取）
         self._ws: Any = None
         self._session: PeerVoiceSession | None = None
+        self._session_id = ""
         self._send_lock = asyncio.Lock()
 
     @property
@@ -69,10 +69,18 @@ class BridgeServer:
             if hello.get("type") != "hello":
                 await self._send({"type": "ctrl", "action": "exit", "reason": "bad_hello"})
                 return
-            device_id = hello.get("device_id", "")
-            room_id = hello.get("room_id", "")
+            session_id = hello.get("session_id")
+            device_id = hello.get("device_id")
+            room_id = hello.get("room_id")
+            if not all(
+                isinstance(value, str) and bool(value.strip())
+                for value in (session_id, device_id, room_id)
+            ):
+                await self._send(
+                    {"type": "ctrl", "action": "exit", "reason": "invalid_session_hello"}
+                )
+                return
             sdk_version = hello.get("sdk_version", "")
-            logger.info("sidecar hello device=%s room=%s sdk=%s", device_id, room_id, sdk_version)
             self.state["sidecar_sdk_version"] = sdk_version
 
             self._session = PeerVoiceSession(
@@ -84,8 +92,15 @@ class BridgeServer:
                 apm_token=self.cfg.apm_token,
                 down_frame_ms=self.cfg.down_frame_ms,
                 sample_rate=self.cfg.sample_rate,
+                up_max_frames=self.cfg.up_max_frames,
+                up_max_bytes=self.cfg.up_max_bytes,
+                up_max_frame_age_ms=self.cfg.up_max_frame_age_ms,
+                down_max_frames=self.cfg.down_max_frames,
+                down_max_bytes=self.cfg.down_max_bytes,
+                down_max_frame_age_ms=self.cfg.down_max_frame_age_ms,
             )
             await self._session.start()
+            self._session_id = session_id
             self.state["room_id"] = room_id
             self.state["device_id"] = device_id
             self.state["sidecar_connected"] = True
@@ -147,6 +162,25 @@ class BridgeServer:
             await self._session.close()
             self._session = None
         self._ws = None
+        self._session_id = ""
+
+    async def terminate_device(self, device_id: str,
+                               session_ids: list[str]) -> list[str]:
+        """Close the matching live sidecar session and return confirmed session ids."""
+        ws = self._ws
+        session = self._session
+        if ws is None or session is None or session.device_id != device_id:
+            return []
+        if self._session_id not in session_ids:
+            return []
+        session_id = self._session_id
+        try:
+            await self._send({"type": "ctrl", "action": "exit", "reason": "device_revoked"})
+        except Exception:  # noqa: BLE001
+            pass
+        await ws.close(code=1008, reason="device revoked")
+        await self._cleanup(ws)
+        return [session_id]
 
     async def send_ctrl_exit(self, reason: str) -> None:
         """后端控制：通知 sidecar 退房（会话结束）"""
@@ -155,3 +189,17 @@ class BridgeServer:
                 await self._send({"type": "ctrl", "action": "exit", "reason": reason})
             except Exception:  # noqa: BLE001
                 logger.warning("send ctrl exit failed: %s", reason)
+
+    async def send_test_audio(self) -> bool:
+        """E2E 测试：通知 sidecar 向手机端注入 2s 测试音频（验证下行播放链路）。
+        返回是否已发送给在线 sidecar。"""
+        if self._ws is None:
+            logger.warning("test_audio ignored: sidecar not connected")
+            return False
+        try:
+            await self._send({"type": "ctrl", "action": "test_audio", "reason": "e2e"})
+            logger.info("test_audio ctrl sent to sidecar")
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("test_audio send failed")
+            return False

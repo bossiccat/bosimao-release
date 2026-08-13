@@ -32,7 +32,13 @@ async def main_async() -> None:
     }
 
     bridge = BridgeServer(cfg, state)
-    health = HealthServer(cfg.health_host, cfg.health_port, state)
+    health = HealthServer(
+        cfg.health_host,
+        cfg.health_port,
+        state,
+        on_test_audio=bridge.send_test_audio,
+        test_audio_enabled=cfg.test_audio_enabled,
+    )
 
     await health.start()
     logger.info("rtc_bridge starting: ws=127.0.0.1:%s health=127.0.0.1:%s",

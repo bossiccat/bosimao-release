@@ -1,30 +1,33 @@
 # 贾克斯模式 - 后端 Python 依赖
-# 版本锁定（M0 契约，见 docs/SPEC.md §3）
+# 精确版本来自项目 .venv 的实际已解析环境（2026-08-07），禁止范围版本。
 
-fastapi>=0.115
-uvicorn[standard]>=0.30
-pydantic>=2.8
-pydantic-settings>=2.4
-pyyaml>=6.0
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+pydantic==2.13.4
+pydantic-settings==2.14.2
+pyyaml==6.0.3
 
 # 窗口捕获
 windows-capture==2.0.0
-psutil>=6.0
-pywin32>=306
-pillow>=10.4
-numpy>=1.26
+psutil==7.2.2
+pywin32==312
+pillow==12.3.0
+numpy==2.4.6
 
 # 语音（V1.1）
 silero-vad==6.2.1
 sherpa-onnx==1.13.2
-edge-tts>=6.1
-sounddevice>=0.4.6
-soundfile>=0.12
+edge-tts==7.2.8
+sounddevice==0.5.5
+soundfile==0.14.0
 
 # 模型客户端
-httpx>=0.27
-websockets>=12.0
+httpx==0.28.1
+websockets==17.0.1
+
+# 中继端到端加密
+cryptography==50.0.0
 
 # 测试
-pytest>=8.2
-pytest-asyncio>=0.23
+pytest==9.1.1
+pytest-asyncio==1.4.0

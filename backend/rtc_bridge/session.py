@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable
 from app.voice.apm_bridge import ApmBridge
 from app.voice.end_detect import EndDetectFeeder
 
+from .bounded_audio_queue import BoundedAudioQueue
 from .shaper import DownlinkShaper
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,11 @@ MSG_UP_AUDIO = "up_audio"
 MSG_DOWN_AUDIO = "down_audio"
 MSG_PEER_STATE = "peer_state"
 MSG_CTRL = "ctrl"
+
+# 默认上行预算（AC-10；压力测试后可调）
+DEFAULT_UP_MAX_FRAMES = 100
+DEFAULT_UP_MAX_BYTES = 100 * 640
+DEFAULT_UP_MAX_FRAME_AGE_MS = 1000
 
 
 class PeerVoiceSession:
@@ -40,6 +46,13 @@ class PeerVoiceSession:
         apm_token: str = "",
         down_frame_ms: int = 20,
         sample_rate: int = 16000,
+        *,
+        up_max_frames: int = DEFAULT_UP_MAX_FRAMES,
+        up_max_bytes: int = DEFAULT_UP_MAX_BYTES,
+        up_max_frame_age_ms: int = DEFAULT_UP_MAX_FRAME_AGE_MS,
+        down_max_frames: int = 200,
+        down_max_bytes: int = 200 * 640,
+        down_max_frame_age_ms: int = 1000,
     ) -> None:
         self.device_id = device_id
         self.room_id = room_id
@@ -53,8 +66,21 @@ class PeerVoiceSession:
             token=apm_token,
         )
         self.feeder = EndDetectFeeder(feed=self.apm.feed_pcm, sample_rate=sample_rate)
-        self.shaper = DownlinkShaper(send_frame=self._send_frame, frame_ms=down_frame_ms, sample_rate=sample_rate)
-        self._up_q: asyncio.Queue[bytes] = asyncio.Queue()
+        self.shaper = DownlinkShaper(
+            send_frame=self._send_frame,
+            frame_ms=down_frame_ms,
+            sample_rate=sample_rate,
+            max_frames=down_max_frames,
+            max_bytes=down_max_bytes,
+            max_frame_age_ms=down_max_frame_age_ms,
+        )
+        # 上行：有界队列（AC-10：帧数/字节/帧龄三约束，丢旧保新）
+        self._up_q = BoundedAudioQueue(
+            max_frames=up_max_frames,
+            max_bytes=up_max_bytes,
+            max_frame_age_ms=up_max_frame_age_ms,
+        )
+        self._up_wake = asyncio.Event()
         self._consumer: asyncio.Task | None = None
         self._peer_entered = False
         self._peer_user_id = ""
@@ -69,6 +95,11 @@ class PeerVoiceSession:
             "last_peer_ts": 0.0,
             "apm_session_state": "idle",
             "reconnects": 0,
+            "up_queue_depth": 0,
+            "down_queue_depth": 0,
+            "queue_high_watermark": 0,
+            "queue_drops": 0,
+            "backpressure_events": 0,
         }
         self.last_activity_ts = time.time()
 
@@ -83,21 +114,38 @@ class PeerVoiceSession:
 
     # ---------- 上行 ----------
     async def on_up_audio(self, pcm: bytes) -> None:
-        """sidecar 推来的手机 16k s16 → 入队（不阻塞 WS 回调）"""
+        """sidecar 推来的手机 16k s16 → 有界入队（不阻塞 WS 回调）"""
         if self._closed:
             return
         self.last_activity_ts = time.time()
         self.stats["up_frames"] += 1
         self.stats["up_bytes"] += len(pcm)
-        self._up_q.put_nowait(pcm)
+        self._up_q.push(pcm)
+        self._sync_queue_metrics()
+        self._up_wake.set()
 
     async def _consume_up(self) -> None:
         while not self._closed:
-            pcm = await self._up_q.get()
+            entry = self._up_q.pop()
+            if entry is None:
+                self._up_wake.clear()
+                await self._up_wake.wait()
+                continue
+            self._sync_queue_metrics()
             try:
-                await self.feeder.feed(pcm)
+                await self.feeder.feed(entry.payload)
             except Exception as e:  # noqa: BLE001
                 logger.warning("feed apm failed: %s", e)
+
+    def _sync_queue_metrics(self) -> None:
+        up = self._up_q.metrics()
+        down = self.shaper.metrics()
+        self.stats["up_queue_depth"] = up["queue_depth"]
+        self.stats["down_queue_depth"] = down["queue_depth"]
+        self.stats["queue_high_watermark"] = max(up["queue_high_watermark"],
+                                                 down["queue_high_watermark"])
+        self.stats["queue_drops"] = up["queue_drops"] + down["queue_drops"]
+        self.stats["backpressure_events"] = up["backpressure_events"] + down["backpressure_events"]
 
     # ---------- 下行 ----------
     async def _on_audio_out(self, pcm: bytes) -> None:

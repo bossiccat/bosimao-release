@@ -35,6 +35,79 @@ setup_logging(app_config.settings.log_level)
 logger = logging.getLogger(__name__)
 
 
+def _build_secured_session_router():
+    """商业语音安全签发路由（ADR-014 fail-closed）
+
+    production=True 且缺 TLS/owner/sidecar/nonce/限流/TRTC 任一 → 拒绝启动；
+    非生产也绝不装配匿名签发（缺凭据时端点运行时返回 50300）。
+    """
+    from pathlib import Path
+
+    from .voice.auth import CredentialValidator
+    from .voice.config import (
+        ProductionGateError,
+        SidecarCredentialConfigError,
+        SidecarCredentialHashSet,
+        VoiceSecurityConfig,
+        build_sidecar_credential_hashes,
+    )
+    from .voice.devices import DeviceService
+    from .voice.nonce import NonceService
+    from .voice.rate_limit import RateLimitConfig, RateLimiter
+    from .voice.rtc_session import RtcSessionConfig, RtcSessionService
+    from .voice.storage import VoiceStore
+
+    settings = app_config.settings
+    sidecar_credentials: SidecarCredentialHashSet | None = None
+    sidecar_hash = ""
+    try:
+        sidecar_credentials = build_sidecar_credential_hashes(
+            current_secret=settings.voice_sidecar_credential,
+            next_secret=settings.voice_sidecar_credential_next,
+            next_enabled_at=settings.voice_sidecar_next_enabled_at,
+            next_expires_at=settings.voice_sidecar_next_expires_at,
+            config_revision=settings.voice_sidecar_config_revision,
+        )
+        sidecar_hash = sidecar_credentials.current_hash
+    except SidecarCredentialConfigError as exc:
+        if settings.voice_production:
+            raise ProductionGateError("生产安全能力缺失: sidecar credential configuration") from exc
+    security = VoiceSecurityConfig(
+        production=settings.voice_production,
+        tls_enabled=settings.voice_tls_enabled,
+        owner_credential_hash=(
+            CredentialValidator.hash_credential(settings.voice_owner_credential)
+            if settings.voice_owner_credential else ""
+        ),
+        sidecar_credential_hash=sidecar_hash,
+        nonce_enabled=True,
+        rate_limit_enabled=True,
+        trtc_sdk_app_id=settings.trtc_sdkappid,
+        trtc_secret_key=settings.trtc_secretkey,
+    )
+    store = VoiceStore(Path(settings.voice_db_path))
+    store.initialize()
+    service = RtcSessionService(
+        RtcSessionConfig(
+            sdk_app_id=settings.trtc_sdkappid,
+            secret_key=settings.trtc_secretkey,
+            room_prefix=settings.trtc_room_prefix or "jax-",
+        )
+    )
+    validator = CredentialValidator(
+        store, security.owner_credential_hash, sidecar_credentials
+    )
+    return routes_voice.create_secured_voice_router(
+        store=store,
+        service=service,
+        validator=validator,
+        nonces=NonceService(store),
+        limiter=RateLimiter(store, RateLimitConfig()),
+        security=security,
+        devices=DeviceService(store),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """启动：构建各服务并挂载 WS 路由；停止：清理资源"""
@@ -67,9 +140,12 @@ async def lifespan(app: FastAPI):
     app.include_router(ws_router)
 
     # voice 网关（mobile-voice-spec §8）：WS /ws/voice + 控制面（半双工 M2 / 全双工 M3 占位）
-    voice_cfg = load_voice(app_config.settings.voice_token, app_config.settings.voice_e2ee_key)
-    voice_router, _voice_mgr = routes_voice.build_voice_gateway(voice_cfg)
-    app.include_router(voice_router)
+    # 生产模式（VOICE_PRODUCTION=true）不注册 legacy 半双工网关：匿名 /pair、/ws/voice、
+    # 旧匿名 /status 不可达（ADR-014 fail-closed；安全端点由 secured router 提供）
+    if not app_config.settings.voice_production:
+        voice_cfg = load_voice(app_config.settings.voice_token, app_config.settings.voice_e2ee_key)
+        voice_router, _voice_mgr = routes_voice.build_voice_gateway(voice_cfg)
+        app.include_router(voice_router)
 
     # 飞书事件订阅回调（O-014 语音对话预留，P2 骨架）
     feishu_router = routes_feishu.create_feishu_router(bus, app_config.push.feishu)
@@ -99,8 +175,9 @@ app.include_router(routes_control.router)
 app.include_router(routes_capture.router)
 app.include_router(routes_brain.router)
 
-# TRTC 会话签发（ADR-012 / PC-INTEGRATION §2.3）：仅依赖 .env，可独立于 lifespan 装配
-app.include_router(routes_voice.build_session_router())
+# 商业语音安全签发（ADR-012/014 + SPEC §5）：Bearer/nonce/限流/fail-closed，
+# 不装配匿名 /session 与 /session/sign；production 缺必需能力时拒绝启动
+app.include_router(_build_secured_session_router())
 
 
 @app.get("/health")

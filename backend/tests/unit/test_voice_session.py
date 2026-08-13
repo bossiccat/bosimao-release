@@ -99,7 +99,9 @@ def test_issue_same_device_idempotent_room():
     r2 = svc.issue("dev-001")
     assert r1["room_id"] == "jax-dev-001"
     assert r2["room_id"] == r1["room_id"]
-    assert r1["scene"] == "audio_call"
+    assert r1["scene"] == "trtc_full_duplex"  # 契约迁移：OpenAPI SessionData.scene
+    assert r1["session_id"]
+    assert r1["expires_at"]
     assert int(r1["sdk_app_id"]) == FAKE_SDK_APP_ID
     # userSig 短时效且可解析
     assert int(parse_user_sig(r1["user_sig"])["TLS.expire"]) <= 600
@@ -144,13 +146,16 @@ def test_issue_config_missing():
 def test_route_session_success():
     client = _client(_service())
     resp = client.post("/api/v1/voice/session", json={"device_id": "dev-001"})
-    assert resp.status_code == 200
+    # 契约迁移（OpenAPI SessionResponse：HTTP 201 + scene=trtc_full_duplex + session_id/expires_at）
+    assert resp.status_code == 201
     body = resp.json()
     assert body["code"] == 0
     data = body["data"]
     assert data["room_id"] == "jax-dev-001"
     assert data["user_id"] == "dev-001"
-    assert data["scene"] == "audio_call"
+    assert data["scene"] == "trtc_full_duplex"
+    assert data["session_id"]
+    assert data["expires_at"]
     assert int(data["sdk_app_id"]) == FAKE_SDK_APP_ID
     # userSig 签给 device_id（手机用自己的 device_id 进房）
     assert parse_user_sig(data["user_sig"])["TLS.identifier"] == "dev-001"

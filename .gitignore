@@ -71,3 +71,8 @@ data/pids/.watchdog_state.json
 # 审计临时输出（一次性产物）
 audit-*.stderr.txt
 audit-*.stdout.txt
+
+# 运行时数据库（含凭据/会话/nonce，绝密，禁止提交）
+backend/data/*.db
+backend/data/*.db-wal
+backend/data/*.db-shm
