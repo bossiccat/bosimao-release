@@ -21,6 +21,7 @@ $Root    = Split-Path -Parent $PSScriptRoot
 $PidDir  = Join-Path $Root "data\pids"
 $LogDir  = Join-Path $Root "logs"
 $Py      = Join-Path $Root ".venv\Scripts\python.exe"
+$PyW     = Join-Path $Root ".venv\Scripts\pythonw.exe"
 # 阶段 D 品牌化：后端/模型进程不再以裸 python.exe / llama-server.exe 常驻，
 # 改为 jax-backend.exe / jax-model.exe（任务管理器显示品牌化进程名，消除杀毒误报面）。
 $BackendExe = Join-Path $Root "jax-backend.exe"
@@ -100,7 +101,7 @@ function Invoke-OwnerCredentialProvision {
     return $true
 }
 function Get-RelayProcesses {
-    Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match "relay_client" }
 }
 function Get-RelayTopLevel {
@@ -237,8 +238,8 @@ function Start-RelayService {
     $relayArgs = @("-m","backend.relay.relay_client",
         "--relay", $relayUrl, "--gateway", $gwUrl,
         "--pairing-code", $pairCode, "--token", $token, "--e2ee-key", $e2eeKey)
-    Write-Host "[relay] 启动 $Py $($relayArgs -join ' ')"
-    $p = Start-Process -FilePath $Py -ArgumentList $relayArgs -WorkingDirectory $Root `
+    Write-Host "[relay] 启动 $PyW $($relayArgs -join ' ')"
+    $p = Start-Process -FilePath $PyW -ArgumentList $relayArgs -WorkingDirectory $Root `
         -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden -PassThru
     Set-PidFile "relay" $p.Id
     Write-Host "[relay] PID=$($p.Id) 等待注册/配对确认（最多 25s）..."
@@ -257,7 +258,7 @@ function Start-RelayService {
 
 # ---------------- rtc-bridge（TRTC sidecar ↔ apm_bridge 本地桥，RTC 通话承载） ----------------
 function Get-RtcBridgeProcesses {
-    Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match "rtc_bridge" }
 }
 function Start-RtcBridgeService {
@@ -281,8 +282,8 @@ function Start-RtcBridgeService {
     $oldProcId = Get-PidFile "rtc-bridge"
     if ($oldProcId -and -not (Test-ProcessAlive $oldProcId)) { Clear-PidFile "rtc-bridge" }
     $bridgeArgs = @("-m","rtc_bridge.main")
-    Write-Host "[rtc-bridge] 启动 $Py $($bridgeArgs -join ' ')"
-    $p = Start-Process -FilePath $Py -ArgumentList $bridgeArgs -WorkingDirectory (Join-Path $Root "backend") `
+    Write-Host "[rtc-bridge] 启动 $PyW $($bridgeArgs -join ' ')"
+    $p = Start-Process -FilePath $PyW -ArgumentList $bridgeArgs -WorkingDirectory (Join-Path $Root "backend") `
         -RedirectStandardOutput $Log -RedirectStandardError "$Log.err" -WindowStyle Hidden -PassThru
     Set-PidFile "rtc-bridge" $p.Id
     Write-Host "[rtc-bridge] PID=$($p.Id) 等待 /health（最多 30s）..."

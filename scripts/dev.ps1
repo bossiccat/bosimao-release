@@ -94,7 +94,7 @@ try {
     Write-Host "==> 启动后端 (uvicorn :8000)"
     # owner credential 首启 provision（ADR-022）：backend 之前，失败即中止（fail-closed）
     if (-not (Invoke-OwnerCredentialProvision)) { throw "[owner-credential] provision 失败，中止启动" }
-    $backendProc = Start-Process -FilePath (Join-Path $Root ".venv/Scripts/python.exe") `
+    $backendProc = Start-Process -FilePath (Join-Path $Root ".venv/Scripts/pythonw.exe") `
         -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000" `
         -WorkingDirectory (Join-Path $Root "backend") -PassThru -NoNewWindow
     Write-Host "后端 PID: $($backendProc.Id)"

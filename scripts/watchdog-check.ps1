@@ -1,11 +1,11 @@
-# watchdog-check.ps1 —— 单次检查：rtc_bridge + sidecar 双看门（由计划任务每分钟调用）
+﻿# watchdog-check.ps1 —— 单次检查：rtc_bridge + sidecar 双看门（由计划任务每分钟调用）
 # 由 watchdog-register.ps1 注册为计划任务 "jax-watchdog"，系统级常驻，不依赖任何会话。
 $ErrorActionPreference = 'SilentlyContinue'
 
 $Root      = Split-Path -Parent $PSScriptRoot
 $LogDir    = Join-Path $Root "logs"
 $WatchLog  = Join-Path $LogDir "watchdog.log"
-$Py        = Join-Path $Root ".venv\Scripts\python.exe"
+$Py        = Join-Path $Root ".venv\Scripts\pythonw.exe"
 $SidecarDir = Join-Path $Root "sidecar"
 $Electron  = Join-Path $SidecarDir "node_modules\.bin\electron.cmd"
 $SignUrl   = "https://jinhong-d2g55ycl591208475-1436773060.ap-shanghai.app.tcloudbase.com"
