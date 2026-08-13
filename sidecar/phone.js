@@ -6,6 +6,7 @@
 const config = require('./config');
 const { frameToS16Mono16k, splitIntoFrames, writeWav16k, readWav16k } = require('./audio');
 const { TRTCParams, TRTCAppScene } = require('trtc-electron-sdk');
+const { requestRendererExit } = require('./exit-protocol');
 
 const { ARGS } = config;
 const SIDECAR_USER_ID = 'jax-pc-sidecar';
@@ -107,7 +108,8 @@ function runPhone(cloud, log) {
     try {
       cred = await fetchPhoneSig();
     } catch (e) {
-      log('PHONE', `手机签发失败: ${e.message}`);
+      log('PHONE', 'PHONE_SESSION_SIGN_FAILED');
+      requestRendererExit('fatal');
       return;
     }
     try { cloud.stopLocalAudio(); } catch (e) { /* ignore */ }
@@ -159,22 +161,20 @@ function runPhone(cloud, log) {
     }
     log('PHONE', `上行 ${stats.upFrames}帧 / 回复 ${stats.replyFrames}帧`);
     try { cloud.exitRoom(); } catch (e) { /* ignore */ }
-    setTimeout(() => window.close(), 400);
+    setTimeout(() => requestRendererExit('controlled'), 400);
   }
 
-  main().catch((e) => log('PHONE', `异常: ${e.message}`));
+  main().catch(() => {
+    log('PHONE', 'PHONE_RUNTIME_FATAL');
+    requestRendererExit('fatal');
+  });
 }
 
 function makePhoneFrame(buf) {
-  const { TRTCAudioFrame } = require('trtc-electron-sdk');
-  const frame = new TRTCAudioFrame();
-  frame.audioFormat = 1; // PCM
-  frame.data = buf;
-  frame.length = buf.length;
-  frame.sampleRate = 16000;
-  frame.channel = 1;
-  frame.timestamp = Date.now();
-  return frame;
+  // Task 9：TRTCAudioFrame 构造只允许在 audio.js（SPEC §4.3 唯一格式 adapter）；
+  // 实际 SDK 契约支持 sampleRate=16000（d.ts 实测），16k 直接注入
+  const { makeAudioFrame16k } = require('./audio');
+  return makeAudioFrame16k(buf);
 }
 
 function sleep(ms) {

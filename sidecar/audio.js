@@ -1,13 +1,23 @@
-// audio.js —— PCM 工具（16k s16 mono 全链路对齐；48k→16k 3:1 抽取；下行帧构造）
-const { TRTCAudioFrame } = require('trtc-electron-sdk');
+// audio.js —— PCM 工具（16k s16 mono 全链路对齐；TRTCAudioFrame 唯一构造点）
+//
+// 注入契约来源（Task 9，实测 sidecar/node_modules/trtc-electron-sdk/liteav/trtc.d.ts）：
+//   sendCustomAudioData(frame: TRTCAudioFrame)：
+//   - audioFormat 仅支持 TRTCAudioFrameFormatPCM
+//   - data 仅支持 PCM，帧长 [5ms~100ms]，推荐 20ms
+//   - sampleRate 支持：16000、24000、32000、44100、48000（16k 为模型侧契约，直接注入）
+//   - channel：1（mono）/ 2
+//   - timestamp：毫秒
+// 模型侧固定 16k/mono/PCM16/20ms/640B（SPEC §4.1 / AC-08），16k 注入无需重采样。
+// 注意：SDK 主入口 require 需 DOM（Electron renderer），故 TRTCAudioFrame 惰性加载——
+// 只有 makeAudioFrame16k 构造帧时才 require（仍保证 audio.js 是唯一构造点，Task 9）。
 
 // 目标格式：16k 单声道 s16
 const TARGET_RATE = 16000;
 
 /**
  * TRTC 远端音频帧 → 16k 单声道 s16 Buffer
- * SDK 回调默认 48k（可 1/2 声道）；s16 数据按声道交叉存储。
- * 转换：多声道取平均 → 按采样率 3:1 抽取到 16k。
+ * SDK 回调可能 48k/多声道；s16 数据按声道交叉存储。
+ * 转换：多声道取平均 → 按采样率线性抽取到 16k。
  * @param {{data: Buffer|ArrayBuffer, sampleRate: number, channel: number, length: number}} frame
  * @returns {Buffer|null}
  */
@@ -40,10 +50,12 @@ function frameToS16Mono16k(frame) {
 }
 
 /**
- * 构造下行 TRTCAudioFrame（16k 单声道 s16，20ms 帧）
- * 官方 d.ts 确认 sendCustomAudioData 支持 sampleRate=16000、channel=1、PCM。
+ * 构造下行 TRTCAudioFrame（16k 单声道 s16，20ms = 640B）
+ * 实际 SDK d.ts 契约：sampleRate 支持 16000；20ms 帧长推荐；PCM 格式。
+ * TRTCAudioFrame 惰性 require：仅 Electron renderer（生产/探测）调用时加载。
  */
 function makeAudioFrame16k(buf) {
+  const { TRTCAudioFrame } = require('trtc-electron-sdk');
   const frame = new TRTCAudioFrame();
   frame.audioFormat = 1; // TRTCAudioFrameFormatPCM
   frame.data = buf;

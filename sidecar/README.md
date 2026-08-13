@@ -1,4 +1,4 @@
-# jax-rtc-sidecar — TRTC 无头对端（Electron + trtc-electron-sdk 13.3.801）
+# jax-rtc-sidecar — TRTC 无头对端（Electron + trtc-electron-sdk 13.4.802-beta.3）
 
 PC 端 RTC 对端（PC-INTEGRATION §2.2 / ARCHITECTURE §5.2）：进房收手机音频 → localhost WS 推
 `rtc_bridge`（Python）→ `apm_bridge`（MiniCPM-o）回复音频 → `sendCustomAudioData` 回传手机。
@@ -8,15 +8,15 @@ PC 端 RTC 对端（PC-INTEGRATION §2.2 / ARCHITECTURE §5.2）：进房收手�
 
 ```
 sidecar/
-├── package.json     # trtc-electron-sdk 精确版本 13.3.801 + electron 31.7.7（禁 latest）
+├── package.json     # trtc-electron-sdk 精确版本 13.4.802-beta.3 + electron 31.7.7（禁 latest）
 ├── main.js          # 隐藏窗口 + 生命周期 + 参数透传
 ├── index.html       # 渲染进程入口（加载 rtc.js）
 ├── rtc.js           # 主逻辑：拉 userSig → 进房 → 音频双向桥接（sidecar 角色）
 ├── phone.js         # 联调用手机模拟器（TRTC 对端，推 wav / 收回复写 wav）
 ├── bridge.js        # localhost WS 客户端（连 rtc_bridge :19092）
 ├── audio.js         # PCM 工具：48k→16k 3:1 抽取 / 下行帧构造 / wav 读写
-├── config.js        # 命令行参数 + .env 兜底
-├── usersig.js       # TLSSigAPIv2（本地冒烟兜底签发，生产由签发端点下发）
+├── config.js        # 命令行参数 + 受保护宿主运行时注入的控制面凭证
+├── security.js      # Bearer 控制面认证 + 单请求随机 nonce
 └── logs/            # sidecar-<role>.log
 ```
 
@@ -52,10 +52,13 @@ node_modules/electron/dist/electron.exe --no-sandbox --disable-gpu . \
 
 - 无头环境：`--no-sandbox --disable-gpu`；`ELECTRON_RUN_AS_NODE` 若置 1 会按纯 Node 运行（报
   `document is not defined`），需 `unset ELECTRON_RUN_AS_NODE`。
-- `--sign-url`：生产为云函数 trtc-sign；本地联调为 backend `http://127.0.0.1:8000`
+- `--sign-url`：生产为受保护的签发服务；本地联调为 backend `http://127.0.0.1:8000`
   （`POST /api/v1/voice/session` 手机 / `POST /api/v1/voice/session/sign` PC）。
-- 签发端点不可用且 `.env` 有 `TRTC_SECRETKEY` 时，自动回退本地签发（仅限冒烟/联调；
-  生产 PC `.env` 置空，userSig 一律云端下发）。
+- 生产 sidecar 仅接受受保护宿主运行时注入的 `VOICE_SIDECAR_CREDENTIAL`，并以 Bearer
+  凭证访问控制面；凭证缺失或签发失败时 fail-closed，不从 `.env` 读取控制面凭证，也不持有或
+  派生 TRTC SecretKey。
+- Tauri 的 OS-bound credential provider 与受保护注入链尚未完成，属于商业发布 P0 阻断项；
+  完成前不得把凭证放入命令行、普通文件或源码。
 
 ## 音频格式
 
@@ -68,5 +71,5 @@ node_modules/electron/dist/electron.exe --no-sandbox --disable-gpu . \
 
 | 依赖 | 锁定 |
 |---|---|
-| `trtc-electron-sdk` | `13.3.801`（对应原生 13.3 线；13.4 线发布后升对应 13.4.x） |
+| `trtc-electron-sdk` | `13.4.802-beta.3` |
 | `electron` | `31.7.7`（≥22 LTS 线） |

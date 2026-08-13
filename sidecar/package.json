@@ -10,7 +10,7 @@
     "phone": "electron . --role=phone"
   },
   "dependencies": {
-    "trtc-electron-sdk": "13.3.801"
+    "trtc-electron-sdk": "13.4.802-beta.3"
   },
   "devDependencies": {
     "electron": "31.7.7"
