@@ -146,7 +146,7 @@ export function Settings({ targets, onToggleTarget, onClose }: SettingsProps) {
           border-radius: 12px;
           width: 300px;
           font-size: 13px;
-          box-shadow: var(--shadow-pop);
+          box-shadow: var(--elev-modal);
           overflow: hidden;
         }
         .st-head {
@@ -154,17 +154,17 @@ export function Settings({ targets, onToggleTarget, onClose }: SettingsProps) {
           padding: 10px 14px;
           border-bottom: 1px solid var(--border-soft);
           font-family: var(--font-display);
-          font-weight: 590;
+          font-weight: var(--weight-announce);
           font-size: 14px;
         }
         .st-close {
           display: inline-flex; align-items: center; justify-content: center;
-          width: 22px; height: 22px;
+          width: var(--target-min); height: var(--target-min); /* 44x44 触达目标 */
           border: none; border-radius: 6px;
           background: transparent; color: var(--muted); cursor: pointer;
-          transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease;
+          transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
         }
-        .st-close:hover { background: var(--surface-2); color: var(--fg); }
+        .st-close:hover { background: var(--surface-raised); color: var(--fg); }
         .st-close:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
         .st-section { padding: 10px 14px; border-bottom: 1px solid var(--border-soft); }
         .st-section:last-child { border-bottom: none; }
@@ -187,14 +187,14 @@ export function Settings({ targets, onToggleTarget, onClose }: SettingsProps) {
         }
         .st-target:hover .st-target-name { color: var(--accent); }
         .st-target:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 6px; }
-        .st-target-name { transition: color var(--motion-fast) ease; }
+        .st-target-name { transition: color var(--motion-fast) var(--ease-standard); }
         .st-switch {
           width: 30px; height: 16px;
           border-radius: 999px;
-          background: var(--surface-2);
+          background: var(--surface-raised);
           border: 1px solid var(--border);
           position: relative;
-          transition: background-color var(--motion-fast) ease;
+          transition: background-color var(--motion-fast) var(--ease-standard);
         }
         .st-switch::after {
           content: "";
@@ -202,7 +202,7 @@ export function Settings({ targets, onToggleTarget, onClose }: SettingsProps) {
           width: 10px; height: 10px;
           border-radius: 50%;
           background: var(--muted);
-          transition: transform var(--motion-fast) ease, background-color var(--motion-fast) ease;
+          transition: transform var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
         }
         .st-switch.on { background: var(--accent); border-color: var(--accent); }
         .st-switch.on::after { transform: translateX(14px); background: #fff; }
@@ -222,9 +222,9 @@ export function Settings({ targets, onToggleTarget, onClose }: SettingsProps) {
           background: transparent;
           color: var(--fg); cursor: pointer;
           font-size: 13px; font-family: var(--font-body);
-          transition: background-color var(--motion-fast) ease;
+          transition: background-color var(--motion-fast) var(--ease-standard);
         }
-        .st-row-btn:hover:not(:disabled) { background: var(--surface-2); }
+        .st-row-btn:hover:not(:disabled) { background: var(--surface-raised); }
         .st-row-btn:disabled { opacity: 0.6; cursor: default; }
         .st-row-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
         .st-push-msg { margin-left: auto; font-size: 12px; color: var(--muted); }

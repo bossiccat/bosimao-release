@@ -3,10 +3,11 @@
   "productName": "贾克斯·星核",
   "version": "1.0.0",
   "identifier": "com.jax.pet",
+  "mainBinaryName": "jax-pet",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:bundle",
     "frontendDist": "../dist"
   },
   "app": {
@@ -36,7 +37,15 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
-    "icon": ["icons/icon.ico"]
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "externalBin": [
+      "binaries/jax-rtc-sidecar",
+      "binaries/provision_sidecar_credential",
+      "binaries/provision_sidecar_credential_launcher"
+    ],
+    "resources": {
+      "binaries/jax-rtc-sidecar-runtime/": "jax-rtc-sidecar-runtime/"
+    }
   }
 }

@@ -1,29 +1,32 @@
 /**
- * 宠物六态状态机（XState v5）— 与 docs/DESIGN.md §4 契约一致
+ * 宠物语音体验状态机（XState v5）— 跨端一致 10 态（Task 8 / SPEC §4.2）
  *
- * 状态：Idle / Monitoring / Listening / Thinking / Speaking / Alerting
- * 事件：WAKE / SPEECH_START / SPEECH_END / RESPONSE_START / RESPONSE_END /
- *       ALERT / ALERT_DISMISS / BARGE_IN / TIMEOUT
+ * 体验状态与 Android VoiceUiModel.ExperienceState 同名枚举严格一致：
+ * idle / requesting_permission / connecting / listening / endpointing /
+ * thinking / speaking / interrupted / recovering / error
  *
  * 事件来源（App.tsx 由 WS /ws/pet 映射）：
- * - SPEECH_START  ← pet_state=listening（voice_wake 唤醒）
- * - SPEECH_END    ← pet_state=thinking（输入结束进入思考）
+ * - SPEECH_START  ← pet_state=listening（用户说话中）
+ * - SPEECH_END    ← pet_state=thinking（输入结束）
  * - RESPONSE_START← pet_state=speaking（响应开始）
- * - RESPONSE_END  ← pet_state=monitoring / idle（响应结束回落）
- * - ALERT         ← alert 且 level >= 3（四级打扰，低级别不动声色）
- * - ALERT_DISMISS ← 提醒气泡手动关闭 / 8s 自动消失
- * - BARGE_IN      ← 打断（后端重发 pet_state=listening 或显式打断）
- * - TIMEOUT       ← 静默超时回落 Monitoring
+ * - RESPONSE_END  ← pet_state=monitoring（响应结束回落 listening）
+ * - TIMEOUT       ← pet_state=idle（静默超时回落 idle）
+ * - BARGE_IN      ← 打断（speaking → interrupted → listening）
+ * - ALERT / ALERT_DISMISS ← 四级打扰提醒（独立维度，不改变语音状态机主流转）
  */
 import { createMachine, assign } from "xstate";
 
 export type PetState =
   | "idle"
-  | "monitoring"
+  | "requesting_permission"
+  | "connecting"
   | "listening"
+  | "endpointing"
   | "thinking"
   | "speaking"
-  | "alerting";
+  | "interrupted"
+  | "recovering"
+  | "error";
 
 interface PetContext {
   alertLevel: number;
@@ -34,7 +37,7 @@ interface PetContext {
 export const petMachine = createMachine(
   {
     id: "pet",
-    initial: "monitoring",
+    initial: "idle",
     // 通过 types 消费 PetContext（避免 TS6196 未使用接口）
     types: {} as { context: PetContext },
     context: {
@@ -45,46 +48,99 @@ export const petMachine = createMachine(
     states: {
       idle: {
         on: {
-          WAKE: { target: "listening" },
-          ALERT: { target: "alerting", actions: "setAlert" },
+          START: { target: "connecting" },
+          PERMISSION_DENIED: { target: "requesting_permission" },
+          ERROR: { target: "error" },
+          ALERT: { target: "idle", actions: "setAlert" },
+          ALERT_DISMISS: { target: "idle" },
         },
       },
-      monitoring: {
-        entry: "clearAlert",
+      requesting_permission: {
         on: {
-          WAKE: { target: "listening" },
-          SPEECH_START: { target: "listening" },
-          ALERT: { target: "alerting", actions: "setAlert" },
+          PERMISSION_GRANTED: { target: "idle" },
+          OPEN_SETTINGS: { target: "requesting_permission" },
+          ALERT_DISMISS: { target: "requesting_permission" },
+        },
+      },
+      connecting: {
+        on: {
+          CONNECTED: { target: "listening" },
+          CANCEL: { target: "idle" },
+          ERROR: { target: "error" },
+          TIMEOUT: { target: "error" },
+          ALERT: { target: "connecting", actions: "setAlert" },
+          ALERT_DISMISS: { target: "connecting" },
         },
       },
       listening: {
         on: {
-          SPEECH_END: { target: "thinking" },
-          BARGE_IN: { target: "listening" }, // 打断 = 变形不重置（留在本态）
-          ALERT: { target: "alerting", actions: "setAlert" },
-          TIMEOUT: { target: "monitoring" }, // 静默超时回落
+          SPEECH_END: { target: "endpointing" },
+          SPEECH_START: { target: "listening" }, // 连续说话不重置
+          RESPONSE_START: { target: "speaking" },
+          BARGE_IN: { target: "listening" },
+          TIMEOUT: { target: "idle" }, // 静默超时回落
+          CANCEL: { target: "idle" },
+          ERROR: { target: "error" },
+          ALERT: { target: "listening", actions: "setAlert" },
+          ALERT_DISMISS: { target: "listening" },
+        },
+      },
+      endpointing: {
+        on: {
+          RESPONSE_START: { target: "thinking" },
+          SPEECH_START: { target: "listening" },
+          BARGE_IN: { target: "listening" },
+          TIMEOUT: { target: "idle" },
+          ALERT: { target: "endpointing", actions: "setAlert" },
+          ALERT_DISMISS: { target: "endpointing" },
         },
       },
       thinking: {
         on: {
           RESPONSE_START: { target: "speaking" },
-          SPEECH_START: { target: "listening" }, // barge-in：后端重发 listening
+          SPEECH_START: { target: "listening" }, // barge-in：打断响应重新收听
           BARGE_IN: { target: "listening" },
-          ALERT: { target: "alerting", actions: "setAlert" },
+          CANCEL: { target: "idle" },
+          ERROR: { target: "error" },
+          ALERT: { target: "thinking", actions: "setAlert" },
+          ALERT_DISMISS: { target: "thinking" },
         },
       },
       speaking: {
         on: {
-          RESPONSE_END: { target: "monitoring" },
-          SPEECH_START: { target: "listening" }, // barge-in：打断响应重新收听
-          BARGE_IN: { target: "listening" },
-          ALERT: { target: "alerting", actions: "setAlert" },
+          RESPONSE_END: { target: "listening" }, // 正常回复结束回 listening（订阅长期有效）
+          SPEECH_START: { target: "listening" },
+          BARGE_IN: { target: "interrupted" }, // 显式打断先入 interrupted
+          CANCEL: { target: "idle" },
+          ERROR: { target: "error" },
+          ALERT: { target: "speaking", actions: "setAlert" },
+          ALERT_DISMISS: { target: "speaking" },
         },
       },
-      alerting: {
+      interrupted: {
         on: {
-          ALERT_DISMISS: { target: "monitoring" },
-          WAKE: { target: "listening" },
+          RESUME: { target: "listening" }, // 打断后自动回 listening（外部/上层驱动）
+          SPEECH_START: { target: "listening" },
+          ERROR: { target: "error" },
+          ALERT: { target: "interrupted", actions: "setAlert" },
+          ALERT_DISMISS: { target: "interrupted" },
+        },
+      },
+      recovering: {
+        on: {
+          RETRY: { target: "connecting" },
+          RECOVERED: { target: "listening" },
+          ERROR: { target: "error" },
+          ALERT: { target: "recovering", actions: "setAlert" },
+          ALERT_DISMISS: { target: "recovering" },
+        },
+      },
+      error: {
+        on: {
+          RETRY: { target: "connecting" },
+          DISMISS: { target: "idle" },
+          ALERT_DISMISS: { target: "error" },
+          ALERT: { target: "error", actions: "setAlert" },
         },
       },
     },
@@ -94,10 +150,6 @@ export const petMachine = createMachine(
       setAlert: assign({
         alertLevel: ({ event }) => (event as { data?: { level?: number } }).data?.level ?? 1,
         alertAppId: ({ event }) => (event as { data?: { app_id?: string } }).data?.app_id ?? "",
-      }),
-      clearAlert: assign({
-        alertLevel: 0,
-        alertAppId: "",
       }),
     },
   }

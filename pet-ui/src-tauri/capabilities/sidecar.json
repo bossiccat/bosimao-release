@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "sidecar-supervisor",
+  "description": "最小 capability：仅允许查询 sidecar 状态与触发受限控制；不授予任意 shell 执行权限（ADR-017）",
+  "windows": ["pet"],
+  "permissions": [
+    "core:default"
+  ]
+}

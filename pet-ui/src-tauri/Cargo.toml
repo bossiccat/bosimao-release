@@ -4,16 +4,59 @@ version = "1.0.0"
 description = "贾克斯模式 - AI 智能体监控中枢桌宠"
 edition = "2021"
 
+[lib]
+name = "jax_pet"
+path = "src/lib.rs"
+
+[[bin]]
+name = "o018_transport_test_helper"
+path = "src/bin/o018_transport_test_helper.rs"
+required-features = ["credential-test-support"]
+
+[[bin]]
+name = "o020_credential_probe"
+path = "src/bin/o020_credential_probe.rs"
+required-features = ["credential-test-support"]
+
+[[bin]]
+name = "o020_credential_controller"
+path = "src/bin/o020_credential_controller.rs"
+required-features = ["credential-test-support"]
+
+# O-018 provision 双二进制：默认构建不编译（tauri main binary 查找会与
+# auto-discovery bin 混淆，曾导致 release/jax-pet.exe 被硬链接成 provision 内容）。
+# 安装器产物由 externalBin 提供（binaries/provision_sidecar_credential-<triple>.exe，
+# 已由独立 cargo build --bins 编译后复制）。feature 构建时按需编译。
+[[bin]]
+name = "provision_sidecar_credential"
+path = "src/bin/provision_sidecar_credential.rs"
+required-features = ["credential-test-support"]
+
+[[bin]]
+name = "provision_sidecar_credential_launcher"
+path = "src/bin/provision_sidecar_credential_launcher.rs"
+required-features = ["credential-test-support"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+sha2 = "=0.10.9"
 
 [dependencies]
 tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10.9"
+zeroize = "1.8.1"
+
+[dev-dependencies]
+sha2 = "0.10"
 
 [features]
 default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+credential-test-support = []
 
 # Tauri v2 Windows 需要
 [target.'cfg(windows)'.dependencies]
+winreg = "0.52.0"
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Shell"] }

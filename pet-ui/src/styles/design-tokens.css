@@ -1,0 +1,151 @@
+/* Source: commercial-upgrade-SPEC.md v1.1 + commercial-upgrade-DESIGN.md */
+:root {
+  /* A1 identity */
+  --bg: #0b1118;
+  --surface: #121b24;
+  --surface-raised: #182530;
+  --fg: #f3f7fa;
+  --muted: #9eb0be;
+  --accent: #2ba8e0;
+  --border: #2a3b48;
+  --font-display: "Noto Sans SC", "Segoe UI", sans-serif;
+  --font-body: "Noto Sans SC", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Consolas", monospace;
+
+  /* A1 structure */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 2rem;
+  --text-4xl: 2.5rem;
+  --weight-read: 400;
+  --weight-emphasize: 510;
+  --weight-announce: 590;
+  --leading-tight: 1.2;
+  --leading-compact: 1.4;
+  --leading-body: 1.6;
+  --tracking-display: -0.015em;
+  --tracking-body: 0;
+  --tracking-label: 0.02em;
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --radius-none: 0;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+  --border-width: 1px;
+  --container-compact: 384px;
+  --container-settings: 720px;
+  --container-diagnostic: 960px;
+  --gutter-phone: 16px;
+  --gutter-desktop: 24px;
+  --section-phone: 32px;
+  --section-desktop: 48px;
+  --target-min: 44px;
+  --voice-control-size: 56px;
+  --floating-orb-size: 56px;
+  --icon-inline: 16px;
+  --icon-button: 20px;
+  --icon-standalone: 24px;
+
+  /* A2 semantic */
+  --success: #2fbf8f;
+  --warn: #e3a93b;
+  --danger: #e05a62;
+  --info: #6ec7ed;
+  --focus: #78d3f5;
+  --motion-instant: 80ms;
+  --motion-fast: 150ms;
+  --motion-base: 200ms;
+  --motion-enter: 250ms;
+  --motion-cross-screen: 300ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
+  /* B slot */
+  --fg-2: var(--muted);
+  --accent-on: #061117;
+  --surface-subtle: #0f1820;
+  --surface-interactive: var(--surface-raised);
+  --border-soft: #20303c;
+  --border-strong: #3a5161;
+  --accent-hover: #43b5e5;
+  --accent-active: #2295c8;
+  --disabled-bg: #18222b;
+  --disabled-fg: #6f808d;
+  --overlay: #071017cc;
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: 0 8px 24px #050a0f52;
+  --elev-modal: 0 16px 40px #050a0f73;
+  --focus-ring: 0 0 0 3px #78d3f559;
+  --button-primary-bg: var(--accent);
+  --button-primary-fg: var(--accent-on);
+  --button-primary-hover: var(--accent-hover);
+  --button-primary-active: var(--accent-active);
+  --button-secondary-bg: var(--surface-raised);
+  --button-secondary-fg: var(--fg);
+  --button-danger-bg: var(--danger);
+  --input-bg: var(--surface);
+  --input-fg: var(--fg);
+  --input-border: var(--border);
+  --input-focus-border: var(--accent);
+  --input-error-border: var(--danger);
+  --panel-bg: var(--surface);
+  --panel-border: var(--border);
+  --panel-radius: var(--radius-lg);
+  --panel-padding: var(--space-5);
+
+  /* C extension: product-specific voice status */
+  --voice-idle: var(--muted);
+  --voice-connecting: var(--info);
+  --voice-listening: var(--accent);
+  --voice-endpointing: #60b6da;
+  --voice-thinking: #79a9d7;
+  --voice-speaking: var(--success);
+  --voice-interrupted: var(--warn);
+  --voice-recovering: var(--info);
+  --voice-error: var(--danger);
+
+  --z-dropdown: 1000;
+  --z-sticky: 1100;
+  --z-modal: 1200;
+  --z-toast: 1300;
+}
+
+:where(button, [role="button"], a, input, select, textarea):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  box-shadow: var(--focus-ring);
+}
+
+:where(button, [role="button"], a, input, select, textarea) {
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}

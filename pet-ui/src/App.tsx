@@ -13,6 +13,8 @@ import { VoiceOrb, type VoicePhase } from "./components/VoiceOrb";
 import { MonitorPanel, type SessionData } from "./components/MonitorPanel";
 import { ReminderToast, type AlertData } from "./components/ReminderToast";
 import { Settings as SettingsPanel, type MonitorTarget } from "./components/Settings";
+import { ConnectionBadge, toVoicePhase } from "./components/ConnectionBadge";
+import { ErrorBanner, type Fault } from "./components/ErrorBanner";
 import { petMachine, type PetState } from "./state/petMachine";
 import { wsClient } from "./state/wsClient";
 import "./styles/global.css";
@@ -23,8 +25,8 @@ export default function App() {
   const [alert, setAlert] = useState<AlertData | null>(null);
   const [showPanel, setShowPanel] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [wsConnected, setWsConnected] = useState(false);
-  const lastPingRef = useRef(0);
+  const [fault, setFault] = useState<Fault | null>(null);
+  const wsFaultedRef = useRef(false);
 
   useEffect(() => {
     const off = wsClient.on((evt) => {
@@ -65,32 +67,70 @@ export default function App() {
             case "idle":
               send({ type: "TIMEOUT" });
               break;
+            // 2026-08-13 UI 商业化升级：补 connecting/error/recovering 映射（AC-20）
+            case "connecting":
+              send({ type: "START" });
+              break;
+            case "error":
+              send({ type: "ERROR" });
+              setFault({
+                category: "voice",
+                reason: "语音链路异常，请检查网络或模型服务后重试",
+                actionLabel: "重启语音",
+                action: "restart-voice",
+              });
+              break;
+            case "recovering":
+              send({ type: "RETRY" });
+              break;
             default:
               break;
           }
         }
       } else if (evt.type === "pong") {
-        lastPingRef.current = Date.now();
-        setWsConnected(true);
+        if (wsFaultedRef.current) {
+          wsFaultedRef.current = false;
+          setFault(null);
+        }
+      }
+    });
+    // 控制面断线 → AC-20 分类故障提示（2 秒内可感知）
+    const offConn = wsClient.onConn((state) => {
+      if (state === "reconnecting" && !wsFaultedRef.current) {
+        wsFaultedRef.current = true;
+        setFault({
+          category: "ws",
+          reason: "与后端控制面断开，正在自动重连",
+          actionLabel: "立即重连",
+          action: "reconnect",
+        });
+      }
+      if (state === "open") {
+        wsFaultedRef.current = false;
+        setFault(null);
       }
     });
     wsClient.connect();
-    const alive = setInterval(() => {
-      if (Date.now() - lastPingRef.current > 45000) setWsConnected(false);
-    }, 10000);
     return () => {
       off();
+      offConn();
       wsClient.close();
-      clearInterval(alive);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const handleFaultAction = (action: Fault["action"]) => {
+    if (action === "reconnect") wsClient.connect();
+    if (action === "open-settings") setShowSettings(true);
+    if (action === "restart-voice") wsClient.control("restart_voice");
+    setFault(null);
+  };
+
   const machineState = snapshot.value as PetState;
   const isVoice =
     machineState === "listening" || machineState === "thinking" || machineState === "speaking";
-  // 状态机进入 alerting 仅因 level≥3 的 ALERT 事件；再显式兜底一次
-  const isAlerting = machineState === "alerting" && (alert?.level ?? 0) >= 3;
+  // 提醒为独立维度（Task 8：语音状态机收紧为 10 体验态，alerting 不再作为机器状态）
+  const isAlerting = (alert?.level ?? 0) >= 3;
   const tone = alert?.state === "off_track" ? "danger" : alert?.state === "stuck" ? "warn" : "neutral";
 
   // 监控目标：与 config/monitors.yaml 对齐（session 到达后以实际 app_name 为准）
@@ -173,7 +213,17 @@ export default function App() {
         </div>
       )}
 
-      {!wsConnected && <div className="ws-badge">后端未连接</div>}
+      <div className="conn-badge-slot">
+        <ConnectionBadge voicePhase={toVoicePhase(machineState)} />
+      </div>
+
+      {fault && (
+        <ErrorBanner
+          fault={fault}
+          onAction={handleFaultAction}
+          onDismiss={() => setFault(null)}
+        />
+      )}
 
       <style>{`
         .app-root { height: 100vh; position: relative; }
@@ -183,15 +233,18 @@ export default function App() {
         .settings-trigger {
           position: fixed; left: 10px; bottom: 10px; z-index: 30;
           display: inline-flex; align-items: center; justify-content: center;
-          width: 30px; height: 30px;
+          width: var(--target-min); height: var(--target-min); /* 44x44 触达目标 */
           border: 1px solid var(--border); border-radius: 8px;
           background: var(--surface); color: var(--fg-2);
           cursor: pointer;
-          transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease;
+          transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
         }
-        .settings-trigger:hover { background: var(--surface-2); color: var(--fg); }
+        .settings-trigger:hover { background: var(--surface-raised); color: var(--fg); }
         .settings-trigger:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
         .settings-slot { position: fixed; left: 10px; bottom: 48px; z-index: 40; }
+        .conn-badge-slot {
+          position: fixed; left: 10px; top: 10px; z-index: 40;
+        }
         .ws-badge {
           position: fixed; left: 10px; top: 10px; z-index: 40;
           background: var(--danger); color: #fff;

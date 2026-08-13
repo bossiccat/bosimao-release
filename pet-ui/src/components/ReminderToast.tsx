@@ -3,7 +3,7 @@
  * - role="alert" + aria-live="assertive"（屏幕阅读器即时播报）
  * - 手动关闭钮 + 可配置自动消失（默认 8s）
  * - 状态点表达语义色（不采用 border-left 彩色条反模式）
- * - 阴影走 --shadow-card token
+ * - 阴影走 --elev-raised token（Task 12 design-tokens）
  */
 import { useEffect } from "react";
 import { X } from "lucide-react";
@@ -67,13 +67,13 @@ export function ReminderToast({ alert, onDismiss, autoDismissMs = 8000 }: Remind
           border-radius: 12px;
           padding: 12px 14px;
           font-size: 13px;
-          box-shadow: var(--shadow-card);
-          animation: toast-in 0.25s ease-out;
+          box-shadow: var(--elev-raised);
+          animation: toast-in var(--motion-enter) var(--ease-standard);
         }
         .rt-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
         .rt-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
         .rt-title {
-          font-weight: 590;
+          font-weight: var(--weight-announce);
           font-family: var(--font-mono);
           font-size: 12px;
           color: var(--fg-2);
@@ -81,16 +81,16 @@ export function ReminderToast({ alert, onDismiss, autoDismissMs = 8000 }: Remind
         .rt-close {
           margin-left: auto;
           display: inline-flex; align-items: center; justify-content: center;
-          width: 22px; height: 22px;
+          width: var(--target-min); height: var(--target-min); /* 44x44 触达目标 */
           border: none; border-radius: 6px;
           background: transparent;
           color: var(--muted);
           cursor: pointer;
           transition:
-            background-color var(--motion-fast) ease,
-            color var(--motion-fast) ease;
+            background-color var(--motion-fast) var(--ease-standard),
+            color var(--motion-fast) var(--ease-standard);
         }
-        .rt-close:hover { background: var(--surface-2); color: var(--fg); }
+        .rt-close:hover { background: var(--surface-raised); color: var(--fg); }
         .rt-close:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
         .rt-body { color: var(--fg); }
         .rt-sug { margin-top: 6px; color: var(--fg-2); font-size: 12px; }

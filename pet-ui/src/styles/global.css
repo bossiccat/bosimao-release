@@ -1,5 +1,5 @@
-/* 全局样式（深色开发者环境） */
-@import "./tokens.css";
+/* 全局样式（深色开发者环境）— Phase 2 设计 Token（Task 12：切换 design-tokens.css，弃用旧 tokens.css） */
+@import "./design-tokens.css";
 
 * {
   margin: 0;

@@ -34,6 +34,15 @@ logs/
 # Tauri
 pet-ui/src-tauri/target/
 
+# Windows Electron/TRTC sidecar generated bundle inputs
+sidecar/node_modules.prebuild-*/
+sidecar/node_modules.failed-*/
+sidecar/node_modules.failed-cache-*/
+.workbuddy/npm-cache-*/
+pet-ui/src-tauri/binaries/jax-rtc-sidecar-x86_64-pc-windows-msvc.exe
+pet-ui/src-tauri/binaries/jax-rtc-sidecar-x86_64-pc-windows-msvc.pdb
+pet-ui/src-tauri/binaries/jax-rtc-sidecar-runtime/
+
 # 审计临时目录
 backend/.audit_tmp/
 
@@ -42,3 +51,10 @@ backend/.audit_tmp/
 
 # 旧 venv 备份（可手动删除）
 .venv_old/
+
+# Tauri 构建产物（2026-08-13 补充：provision 双二进制 + 备份 + 生成 schema + 临时文件）
+pet-ui/src-tauri/binaries/provision_sidecar_credential-x86_64-pc-windows-msvc.exe
+pet-ui/src-tauri/binaries/provision_sidecar_credential_launcher-x86_64-pc-windows-msvc.exe
+pet-ui/src-tauri/binaries/*.bak-*/
+pet-ui/src-tauri/gen/
+*.tmp
