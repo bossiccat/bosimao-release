@@ -178,6 +178,12 @@ class Settings(BaseSettings):
 
     backend_port: int = 8000
 
+    # TLS 商业级安全底座（2026-08-13）：证书路径由 .env 注入，空 = 明文（开发态）
+    # 生产（voice_production=true）必须同时配置 cert/key 并在 uvicorn 启用 HTTPS/WSS。
+    tls_certfile: str = ""     # 服务端证书（如 certs/server.crt）
+    tls_keyfile: str = ""      # 服务端私钥（如 certs/server.key）
+    tls_ca_certfile: str = ""  # CA 根证书（四端信任分发用，如 certs/ca.crt）
+
     wecom_webhook_url: str = ""
     ntfy_server: str = "https://ntfy.sh"
     ntfy_topic: str = ""
@@ -201,6 +207,17 @@ class Settings(BaseSettings):
     trtc_sdkappid: int = 0
     trtc_secretkey: str = ""
     trtc_room_prefix: str = "jax-"
+
+    # 商业语音安全（ADR-014 fail-closed）：仅存 .env，禁止入库/日志
+    voice_db_path: str = str(PROJECT_ROOT / "backend" / "data" / "voice.db")
+    voice_owner_credential: str = ""      # 本机 owner 凭证（配对码生成用）
+    voice_sidecar_credential: str = ""    # 独立 sidecar 当前凭证（不得与 device 复用）
+    voice_sidecar_credential_next: str = ""
+    voice_sidecar_next_enabled_at: str = ""
+    voice_sidecar_next_expires_at: str = ""
+    voice_sidecar_config_revision: str = ""
+    voice_production: bool = False        # 生产模式：缺 TLS/validator/限流/TRTC 任一拒绝启动
+    voice_tls_enabled: bool = False       # 生产必须 TLS；http/ws 明文端点视为缺失
 
     log_level: str = "INFO"
 

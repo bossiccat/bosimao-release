@@ -58,3 +58,8 @@ pet-ui/src-tauri/binaries/provision_sidecar_credential_launcher-x86_64-pc-window
 pet-ui/src-tauri/binaries/*.bak-*/
 pet-ui/src-tauri/gen/
 *.tmp
+
+# TLS 证书私钥与中间产物（绝密，禁止提交；ca.crt/server.crt 公钥证书可提交）
+certs/*.key
+certs/*.csr
+certs/*.srl
