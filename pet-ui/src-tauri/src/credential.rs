@@ -6,6 +6,11 @@ pub const SIDECAR_CREDENTIAL_ENV: &str = "VOICE_SIDECAR_CREDENTIAL";
 pub const SIDECAR_CREDENTIAL_MIN_BYTES: usize = 32;
 pub const SIDECAR_CREDENTIAL_MAX_BYTES: usize = 512;
 
+// owner 是「桌宠 → 后端」的管理员身份，与 sidecar（桌宠 → 本地 sidecar）语义分离，
+// 使用独立 CM target 前缀（ADR-022 D3）。owner 凭证复用 SIDECAR 的 32–512 bytes 校验。
+pub const OWNER_CREDENTIAL_TARGET: &str = "JaxPet/com.jax.pet/voice-owner/v1";
+pub const OWNER_CREDENTIAL_ENV: &str = "VOICE_OWNER_CREDENTIAL";
+
 pub struct SecretString(Zeroizing<String>);
 
 impl SecretString {

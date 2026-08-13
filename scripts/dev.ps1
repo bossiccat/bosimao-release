@@ -7,6 +7,27 @@ $Root = Split-Path $PSScriptRoot -Parent
 
 $backendProc = $null
 
+function Invoke-OwnerCredentialProvision {
+    # owner credential 首启 provision（ADR-022）：backend 启动前调用，非零退出即中止（fail-closed）
+    $exe = $null
+    $release = Join-Path $Root "pet-ui\src-tauri\target\release\provision_owner_credential.exe"
+    $debug   = Join-Path $Root "pet-ui\src-tauri\target\debug\provision_owner_credential.exe"
+    if (Test-Path $release) { $exe = $release }
+    elseif (Test-Path $debug) { $exe = $debug }
+    else {
+        Write-Warning "[owner-credential] provisioner 未编译；请先: cd pet-ui/src-tauri; cargo build --bin provision_owner_credential"
+        return $false
+    }
+    # GUI 子系统二进制——不带 -WindowStyle（避免冲突），-Wait 等退出码
+    $p = Start-Process -FilePath $exe -Wait -PassThru
+    if ($p.ExitCode -ne 0) {
+        Write-Error "[owner-credential] provision 失败（退出码 $($p.ExitCode)），中止启动（fail-closed）"
+        return $false
+    }
+    Write-Host "[owner-credential][ok] owner credential 已就绪"
+    return $true
+}
+
 function Stop-Backend {
     if ($backendProc -and -not $backendProc.HasExited) {
         Write-Host "==> 清理后端进程 PID $($backendProc.Id)"
@@ -71,6 +92,8 @@ try {
 
     # 3. 启动后端 uvicorn :8000
     Write-Host "==> 启动后端 (uvicorn :8000)"
+    # owner credential 首启 provision（ADR-022）：backend 之前，失败即中止（fail-closed）
+    if (-not (Invoke-OwnerCredentialProvision)) { throw "[owner-credential] provision 失败，中止启动" }
     $backendProc = Start-Process -FilePath (Join-Path $Root ".venv/Scripts/python.exe") `
         -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000" `
         -WorkingDirectory (Join-Path $Root "backend") -PassThru -NoNewWindow

@@ -11,8 +11,13 @@ pub const SIDECAR_CREDENTIAL_STAGING_TARGET: &str =
 pub const SIDECAR_CREDENTIAL_BACKUP_TARGET: &str = "JaxPet/com.jax.pet/voice-sidecar/v1/txn/backup";
 pub const SIDECAR_CREDENTIAL_MUTEX_PREFIX: &str = "Global\\JaxPet.VoiceSidecarCredential.v1";
 
+// owner 三槽 target 与 named mutex 前缀（ADR-022 D3，与 sidecar 语义分离，不复用 target）。
+pub const OWNER_CREDENTIAL_STAGING_TARGET: &str = "JaxPet/com.jax.pet/voice-owner/v1/txn/staging";
+pub const OWNER_CREDENTIAL_BACKUP_TARGET: &str = "JaxPet/com.jax.pet/voice-owner/v1/txn/backup";
+pub const OWNER_CREDENTIAL_MUTEX_PREFIX: &str = "Global\\JaxPet.VoiceOwnerCredential.v1";
+
 #[cfg(windows)]
-use crate::credential::SIDECAR_CREDENTIAL_TARGET;
+use crate::credential::{OWNER_CREDENTIAL_TARGET, SIDECAR_CREDENTIAL_TARGET};
 #[cfg(windows)]
 use crate::credential_windows_backend::{CredentialTargets, Win32CredentialBackend};
 #[cfg(windows)]
@@ -20,6 +25,32 @@ use crate::credential_windows_lock::Win32TransactionLock;
 
 #[cfg(windows)]
 type ProductionStore = TransactionalCredentialStore<Win32CredentialBackend, Win32TransactionLock>;
+
+/// 一套凭证的「active/staging/backup target + named mutex 前缀」命名空间。
+/// `build_inner` 据此参数化，sidecar 与 owner 各传自己那套（不复制三槽代码，ADR-022 D2）。
+#[cfg(windows)]
+struct CredentialNamespace {
+    active_target: &'static str,
+    staging_target: &'static str,
+    backup_target: &'static str,
+    mutex_prefix: &'static str,
+}
+
+#[cfg(windows)]
+const SIDECAR_NAMESPACE: CredentialNamespace = CredentialNamespace {
+    active_target: SIDECAR_CREDENTIAL_TARGET,
+    staging_target: SIDECAR_CREDENTIAL_STAGING_TARGET,
+    backup_target: SIDECAR_CREDENTIAL_BACKUP_TARGET,
+    mutex_prefix: SIDECAR_CREDENTIAL_MUTEX_PREFIX,
+};
+
+#[cfg(windows)]
+const OWNER_NAMESPACE: CredentialNamespace = CredentialNamespace {
+    active_target: OWNER_CREDENTIAL_TARGET,
+    staging_target: OWNER_CREDENTIAL_STAGING_TARGET,
+    backup_target: OWNER_CREDENTIAL_BACKUP_TARGET,
+    mutex_prefix: OWNER_CREDENTIAL_MUTEX_PREFIX,
+};
 
 pub struct WindowsCredentialStore {
     #[cfg(windows)]
@@ -30,7 +61,7 @@ impl WindowsCredentialStore {
     #[cfg(windows)]
     pub fn sidecar() -> Self {
         Self {
-            inner: Self::build_inner(None),
+            inner: Self::build_inner(&SIDECAR_NAMESPACE, None),
         }
     }
 
@@ -39,29 +70,46 @@ impl WindowsCredentialStore {
         Self {}
     }
 
+    /// owner credential store（ADR-022 D2/D3）：与 sidecar 并列，构建 owner target 的
+    /// 事务三槽 store。与 sidecar 语义/target 严格分离，不复用 sidecar target。
     #[cfg(windows)]
-    fn build_inner(suffix: Option<&str>) -> Result<ProductionStore, CredentialError> {
+    pub fn owner() -> Self {
+        Self {
+            inner: Self::build_inner(&OWNER_NAMESPACE, None),
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub const fn owner() -> Self {
+        Self {}
+    }
+
+    #[cfg(windows)]
+    fn build_inner(
+        namespace: &CredentialNamespace,
+        suffix: Option<&str>,
+    ) -> Result<ProductionStore, CredentialError> {
         let targets = match suffix {
             Some(suffix) => CredentialTargets::new(
-                format!("{SIDECAR_CREDENTIAL_TARGET}/{suffix}"),
-                format!("{SIDECAR_CREDENTIAL_STAGING_TARGET}/{suffix}"),
-                format!("{SIDECAR_CREDENTIAL_BACKUP_TARGET}/{suffix}"),
+                format!("{}/{suffix}", namespace.active_target),
+                format!("{}/{suffix}", namespace.staging_target),
+                format!("{}/{suffix}", namespace.backup_target),
             ),
             None => CredentialTargets::new(
-                SIDECAR_CREDENTIAL_TARGET.to_owned(),
-                SIDECAR_CREDENTIAL_STAGING_TARGET.to_owned(),
-                SIDECAR_CREDENTIAL_BACKUP_TARGET.to_owned(),
+                namespace.active_target.to_owned(),
+                namespace.staging_target.to_owned(),
+                namespace.backup_target.to_owned(),
             ),
         };
         let backend = Win32CredentialBackend::new(targets);
-        let lock = Win32TransactionLock::current_user(SIDECAR_CREDENTIAL_MUTEX_PREFIX, suffix)?;
+        let lock = Win32TransactionLock::current_user(namespace.mutex_prefix, suffix)?;
         Ok(TransactionalCredentialStore::new(backend, lock))
     }
 
     #[cfg(all(windows, feature = "credential-test-support"))]
     pub fn for_test_suffix(suffix: &str) -> Result<Self, CredentialError> {
         Ok(Self {
-            inner: Ok(Self::build_inner(Some(suffix))?),
+            inner: Ok(Self::build_inner(&SIDECAR_NAMESPACE, Some(suffix))?),
         })
     }
 

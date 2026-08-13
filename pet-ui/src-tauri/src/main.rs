@@ -8,6 +8,7 @@ mod window;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use jax_pet::credential::CredentialProvider;
 use jax_pet::credential_windows::WindowsCredentialStore;
 use jax_pet::sidecar::{IntegritySpec, SidecarSpec, SidecarSupervisor};
 use jax_pet::sidecar_credential::SidecarCredentialService;
@@ -58,6 +59,7 @@ fn main() {
             window::get_sidecar_status,
             install_trusted_ca,
             is_ca_install_required,
+            get_owner_credential,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -76,6 +78,17 @@ fn install_trusted_ca(app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 fn is_ca_install_required() -> bool {
     !jax_pet::ca_trust::is_ca_installed()
+}
+
+/// 读取 owner credential（owner-only 隐私开关的 Bearer，ADR-022 D2/D6）。
+/// fail-closed：CM 读失败/缺失一律 Err，绝不返回空串/降级。前端 privacy.ts 的
+/// getOwnerToken() 捕获异常返回 null → 请求不带 Authorization → 后端 40101 禁用开关。
+#[tauri::command]
+fn get_owner_credential() -> Result<String, String> {
+    WindowsCredentialStore::owner()
+        .load_active()
+        .map(|secret| secret.expose().to_string())
+        .map_err(|error| format!("owner credential unavailable: {}", error.code.stable_code()))
 }
 
 /// 解析 externalBin 产物路径与哈希文件。

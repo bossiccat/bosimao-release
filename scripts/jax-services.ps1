@@ -76,6 +76,26 @@ function Load-Env {
         }
     }
 }
+function Invoke-OwnerCredentialProvision {
+    # owner credential 首启 provision（ADR-022）：backend 启动前调用，非零退出即中止（fail-closed）
+    $exe = $null
+    $release = Join-Path $Root "pet-ui\src-tauri\target\release\provision_owner_credential.exe"
+    $debug   = Join-Path $Root "pet-ui\src-tauri\target\debug\provision_owner_credential.exe"
+    if (Test-Path $release) { $exe = $release }
+    elseif (Test-Path $debug) { $exe = $debug }
+    else {
+        Write-Host "[owner-credential][!] provisioner 未编译；请先: cd pet-ui/src-tauri; cargo build --bin provision_owner_credential"
+        return $false
+    }
+    # GUI 子系统二进制——不带 -WindowStyle（避免冲突），-Wait 等退出码
+    $p = Start-Process -FilePath $exe -Wait -PassThru
+    if ($p.ExitCode -ne 0) {
+        Write-Host "[owner-credential][x] provision 失败（退出码 $($p.ExitCode)），中止启动（fail-closed）"
+        return $false
+    }
+    Write-Host "[owner-credential][ok] owner credential 已就绪"
+    return $true
+}
 function Get-RelayProcesses {
     Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match "relay_client" }
@@ -150,6 +170,8 @@ function Start-ModelService {
 function Start-BackendService {
     $Port = 8000
     $Log = Join-Path $LogDir "backend.log"
+    # owner credential 首启 provision（ADR-022）：backend 启动前，失败即中止（fail-closed）
+    if (-not (Invoke-OwnerCredentialProvision)) { return $false }
     if (Test-PortListen $Port) {
         # 端口已监听：健康则幂等跳过（采纳 PID）；不健康则报告（不盲杀）
         if (Test-Health "http://127.0.0.1:$Port/health") {

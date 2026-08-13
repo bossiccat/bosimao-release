@@ -13,6 +13,28 @@ $PyW = Join-Path $Root ".venv\Scripts\pythonw.exe"   # GUI 子系统，无命令
 $LogDir = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+# ---------- owner credential 首启 provision（ADR-022：backend 之前、Load-Env 之前，fail-closed） ----------
+function Invoke-OwnerCredentialProvision {
+    $exe = $null
+    $release = Join-Path $Root "pet-ui\src-tauri\target\release\provision_owner_credential.exe"
+    $debug   = Join-Path $Root "pet-ui\src-tauri\target\debug\provision_owner_credential.exe"
+    if (Test-Path $release) { $exe = $release }
+    elseif (Test-Path $debug) { $exe = $debug }
+    else {
+        Write-Warning "[owner-credential] provisioner 未编译；请先: cd pet-ui/src-tauri; cargo build --bin provision_owner_credential"
+        return $false
+    }
+    # GUI 子系统二进制（windows_subsystem="windows"）——不带 -WindowStyle（避免冲突），-Wait 等退出码
+    $p = Start-Process -FilePath $exe -Wait -PassThru
+    if ($p.ExitCode -ne 0) {
+        Write-Error "[owner-credential] provision 失败（退出码 $($p.ExitCode)），中止启动（fail-closed）"
+        return $false
+    }
+    Write-Host "[owner-credential][ok] owner credential 已就绪"
+    return $true
+}
+if (-not (Invoke-OwnerCredentialProvision)) { exit 1 }
+
 # 0) Load .env into process env (RELAY_TOKEN / RELAY_E2EE_KEY / VOICE_TOKEN etc.)
 $envFile = Join-Path $Root ".env"
 if (Test-Path $envFile) {

@@ -37,6 +37,12 @@ name = "provision_sidecar_credential_launcher"
 path = "src/bin/provision_sidecar_credential_launcher.rs"
 required-features = ["credential-test-support"]
 
+# O-022 owner provisioner：生产路径，默认构建必须编译（故不加 required-features）。
+# owner 由本机首启自生成（CSPRNG），不走 sidecar 的受保护安装通道，无 externalBin 混淆。
+[[bin]]
+name = "provision_owner_credential"
+path = "src/bin/provision_owner_credential.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 sha2 = "=0.10.9"
@@ -47,6 +53,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10.9"
 zeroize = "1.8.1"
+getrandom = "0.2"
 
 [dev-dependencies]
 sha2 = "0.10"
