@@ -33,9 +33,19 @@ $args = @(
     "--ctx-size", "$Ctx"
 )
 Write-Host "==> 启动: $ServerBin $($args -join ' ')"
-$p = Start-Process -FilePath $ServerBin -ArgumentList $args `
-    -RedirectStandardOutput $Log -RedirectStandardError "$Log.err" `
-    -WindowStyle Hidden -PassThru
+# 2026-08-13 无窗口修复：llama-server 是 console 子系统，-WindowStyle Hidden 不可靠，
+# 改用 .NET ProcessStartInfo.CreateNoWindow（等价 CREATE_NO_WINDOW）真正无窗口启动。
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = $ServerBin
+$psi.Arguments = ($args -join ' ')
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$p = [System.Diagnostics.Process]::Start($psi)
+# 后台异步写出 stdout/stderr 到日志，避免管道缓冲阻塞模型加载
+Start-Job -ScriptBlock { param($r, $path) while ($null -ne ($line = $r.ReadLine())) { Add-Content -Path $path -Value $line } } -ArgumentList $p.StandardOutput, $Log | Out-Null
+Start-Job -ScriptBlock { param($r, $path) while ($null -ne ($line = $r.ReadLine())) { Add-Content -Path $path -Value $line } } -ArgumentList $p.StandardError, "$Log.err" | Out-Null
 Write-Host "PID=$($p.Id) 日志=$Log"
 Write-Host "==> 等待 /health (模型加载约 20s-5min) ..."
 $deadline = (Get-Date).AddMinutes(5)

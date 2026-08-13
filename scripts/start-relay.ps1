@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Port = 19090
 $Py = Join-Path $Root ".venv\Scripts\python.exe"
+$PyW = Join-Path $Root ".venv\Scripts\pythonw.exe"   # GUI 子系统，无命令窗
 
 # 1) 幂等检查：端口已监听则跳过
 $listening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
@@ -38,8 +39,8 @@ if (Test-Path $envFile) {
 $logDir = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $log = Join-Path $logDir "relay.log"
-Write-Host "[relay] 启动中继: $Py -m backend.relay.relay_server（日志 $log）"
-Start-Process -FilePath $Py -ArgumentList "-m", "backend.relay.relay_server" `
+Write-Host "[relay] 启动中继: $PyW -m backend.relay.relay_server（日志 $log）"
+Start-Process -FilePath $PyW -ArgumentList "-m", "backend.relay.relay_server" `
     -WorkingDirectory $Root -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden
 
 # 4) 健康轮询（最多 30s）

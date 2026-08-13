@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Py = Join-Path $Root ".venv\Scripts\python.exe"
+$PyW = Join-Path $Root ".venv\Scripts\pythonw.exe"   # GUI 子系统，无命令窗（后端/relay 用）
 $LogDir = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -27,7 +28,8 @@ if (Test-Path $envFile) {
 
 # ---------- 1) Model service :19080 (start-model.ps1 logic: idempotent + health wait) ----------
 Write-Host "==> [1/3] model http://127.0.0.1:19080/health"
-& powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "start-model.ps1")
+# 2026-08-13 无窗口修复：隐藏窗口调用 start-model.ps1（不再 & powershell 弹窗）
+Start-Process -FilePath "powershell" -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File",(Join-Path $PSScriptRoot "start-model.ps1") -WindowStyle Hidden -Wait
 if ($LASTEXITCODE -ne 0) { Write-Error "[1/3] model start failed"; exit 1 }
 Write-Host "[ok] model ready (start-model.ps1 waited for /health)"
 
@@ -43,8 +45,8 @@ if ($listening -and -not $Restart) {
         Start-Sleep -Seconds 2
     }
     $log = Join-Path $LogDir "backend.log"
-    Write-Host "[backend] start: $Py -m uvicorn app.main:app --host 127.0.0.1 --port 8000 (log $log)"
-    Start-Process -FilePath $Py -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000" `
+    Write-Host "[backend] start: $PyW -m uvicorn app.main:app --host 127.0.0.1 --port 8000 (log $log)"
+    Start-Process -FilePath $PyW -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000" `
         -WorkingDirectory (Join-Path $Root "backend") -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden
     $deadline = (Get-Date).AddSeconds(90)
     $ready = $false
@@ -85,8 +87,8 @@ if ($existing -and -not $Restart) {
         "--pairing-code", $pairCode,
         "--token", $token,
         "--e2ee-key", $e2eeKey)
-    Write-Host ("[relay_client] start: $Py " + ($relayArgs -join " ") + " (log $log)")
-    Start-Process -FilePath $Py -ArgumentList $relayArgs -WorkingDirectory $Root `
+    Write-Host ("[relay_client] start: $PyW " + ($relayArgs -join " ") + " (log $log)")
+    Start-Process -FilePath $PyW -ArgumentList $relayArgs -WorkingDirectory $Root `
         -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden
     # Verify pairing via log (connect + pair takes a few seconds)
     $deadline = (Get-Date).AddSeconds(25)
