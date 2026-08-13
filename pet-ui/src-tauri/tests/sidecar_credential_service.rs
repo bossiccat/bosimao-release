@@ -125,6 +125,7 @@ fn supervisor(tag: &str, hash: String, stopped: Option<&PathBuf>) -> (SidecarSup
             expected_sha256,
             integrity: fixture.integrity,
             args,
+            ca_cert_path: PathBuf::from("certs/ca.crt"),
             graceful_timeout: Duration::from_secs(5),
             kill_timeout: Duration::from_secs(1),
         }),
@@ -160,6 +161,7 @@ fn invalid_binary_never_reads_credential() {
         expected_sha256: String::new(),
         integrity: fixture.integrity,
         args: vec!["--role=sidecar".into()],
+        ca_cert_path: PathBuf::from("certs/ca.crt"),
         graceful_timeout: Duration::from_millis(1),
         kill_timeout: Duration::from_millis(1),
     });

@@ -76,3 +76,35 @@ audit-*.stdout.txt
 backend/data/*.db
 backend/data/*.db-wal
 backend/data/*.db-shm
+
+# QA/任务临时输出（一次性产物，禁止提交）
+qa-*/
+qa_*.txt
+qa_*.py
+qa_*.bat
+task*.out
+task*.txt
+t11fix_*.txt
+node_*.txt
+pytest_*.txt
+*.exit
+
+# 构建临时目录
+.cargo-target-*/
+gradle-home*/
+META-INF/
+net/
+
+# 审计临时
+audit-*.json
+audit-*.txt
+
+# 工作产物/输出目录
+outputs/
+overview.md
+
+# 构建产物
+*.apk
+
+# 根目录空 lockfile（误生成，非项目依赖）
+/package-lock.json

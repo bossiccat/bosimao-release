@@ -24,6 +24,7 @@ fn supervisor(fixture: support::SidecarFixture) -> SidecarSupervisor {
         expected_sha256: sha256_of(&fixture.binary_path),
         integrity: fixture.integrity,
         args: vec![],
+        ca_cert_path: std::path::PathBuf::from("certs/ca.crt"),
         graceful_timeout: Duration::from_secs(1),
         kill_timeout: Duration::from_secs(1),
     })
@@ -87,6 +88,7 @@ fn shrunken_electron_runtime_file_fails_closed() {
             runtime_dir,
         },
         args: vec![],
+        ca_cert_path: std::path::PathBuf::from("certs/ca.crt"),
         graceful_timeout: Duration::from_secs(1),
         kill_timeout: Duration::from_secs(1),
     };

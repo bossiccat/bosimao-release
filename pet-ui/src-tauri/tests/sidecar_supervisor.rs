@@ -53,6 +53,8 @@ fn spec(mode: &str, expected_sha256: String, mut args: Vec<String>) -> SidecarSp
         },
         integrity: fixture.integrity,
         args,
+        // TLS 信任锚路径（ADR-020 A1）：stub 测试不读该文件，用占位路径即可。
+        ca_cert_path: PathBuf::from("certs/ca.crt"),
         // stub 为 test harness 二进制，启动初始化较慢；5s 确保完整测试负载下也能完成
         graceful_timeout: Duration::from_secs(5),
         kill_timeout: Duration::from_secs(10),

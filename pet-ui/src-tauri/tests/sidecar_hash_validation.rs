@@ -11,6 +11,7 @@ fn supervisor(expected_sha256: &str) -> SidecarSupervisor {
         expected_sha256: expected_sha256.to_string(),
         integrity: fixture.integrity,
         args: vec![],
+        ca_cert_path: std::path::PathBuf::from("certs/ca.crt"),
         graceful_timeout: Duration::from_secs(1),
         kill_timeout: Duration::from_secs(1),
     })
