@@ -14,8 +14,21 @@ import java.util.UUID
  *   room_id + userSig 进房。
  * - 保留：设备 ID（进房关联）、唤醒词 / KWS 灵敏度 / 悬浮窗（本地交互配置）。
  */
+data class DeviceSessionCredential(
+    val deviceId: String,
+    val wireCredential: String
+)
+
 object VoiceConfig {
     private const val PREFS = "jax_voice_config"
+
+    @Volatile
+    private var credentialVaultFactory: (Context) -> DeviceCredentialVault = { context ->
+        DeviceCredentialVault(
+            SharedPreferencesCredentialStorage(context),
+            AndroidKeystoreCredentialCipher()
+        )
+    }
 
     // ---------- 配置迁移（v0.4.6 新增；v0.6.0 TRTC 重构后连接配置废弃） ----------
     // 说明：旧版 prefs 残留（conn_mode/relay_url/server_url/pairing_code/e2ee_*）在新版已不再读取，
@@ -23,16 +36,31 @@ object VoiceConfig {
     private const val KEY_CONFIG_VERSION = "config_version"
     private const val CONFIG_VERSION = 3
 
-    /** 版本升级时自动迁移：初始化保留项为开发态出厂默认（零配置即可用） */
+    /** 纯迁移规则：只补缺失键，绝不覆盖用户已保存的地址或唤醒开关。 */
+    @JvmStatic
+    fun migratedValues(values: MutableMap<String, Any?>): MutableMap<String, Any?> {
+        val version = values[KEY_CONFIG_VERSION] as? Int ?: 0
+        if (version >= CONFIG_VERSION) return values
+        values.putIfAbsent("wake_enabled", WAKE_DEFAULT_ENABLED)
+        values.putIfAbsent("session_base_url", "")
+        values[KEY_CONFIG_VERSION] = CONFIG_VERSION
+        return values
+    }
+
+    /** 版本升级时自动迁移：初始化保留项为开发态出厂默认（零配置即可用）。 */
     fun migrateIfNeeded(context: Context) {
         val p = prefs(context)
-        if (p.getInt(KEY_CONFIG_VERSION, 0) >= CONFIG_VERSION) return
-        p.edit()
-            .putBoolean("wake_enabled", WAKE_DEFAULT_ENABLED)
-            // v0.6.0：TRTC 重构，会话签发接口地址默认留空（设置页填写提示）
-            .putString("session_base_url", "")
-            .putInt(KEY_CONFIG_VERSION, CONFIG_VERSION)
-            .apply()
+        val before = p.all.toMutableMap()
+        if ((before[KEY_CONFIG_VERSION] as? Int ?: 0) >= CONFIG_VERSION) return
+        val migrated = migratedValues(before)
+        val editor = p.edit()
+        if (!p.contains("wake_enabled")) {
+            editor.putBoolean("wake_enabled", migrated["wake_enabled"] as Boolean)
+        }
+        if (!p.contains("session_base_url")) {
+            editor.putString("session_base_url", migrated["session_base_url"] as String)
+        }
+        editor.putInt(KEY_CONFIG_VERSION, CONFIG_VERSION).apply()
     }
 
     const val DEFAULT_THRESHOLD = 0.25f
@@ -57,6 +85,7 @@ object VoiceConfig {
 
     // ---------- 设备 ID（生成后持久化；进房用户标识/会话关联，spec §7.1） ----------
     fun deviceId(context: Context): String {
+        credentialVaultFactory(context).deviceId()?.let { return it }
         val prefs = prefs(context)
         prefs.getString("device_id", null)?.let { if (it.isNotBlank()) return it }
         val id = newDeviceId()
@@ -65,9 +94,41 @@ object VoiceConfig {
     }
 
     fun regenerateDeviceId(context: Context): String {
+        clearDeviceCredential(context)
         val id = newDeviceId()
         prefs(context).edit().putString("device_id", id).apply()
         return id
+    }
+
+    /** 原子接收配对注册响应中的 device_id 与一次性 credential_secret。 */
+    fun saveRegisteredDevice(context: Context, deviceId: String, credentialSecret: String) {
+        credentialVaultFactory(context).save(deviceId, credentialSecret)
+    }
+
+    fun deviceCredential(context: Context): String =
+        deviceSessionCredential(context).wireCredential
+
+    fun deviceCredential(vault: DeviceCredentialVault): String =
+        deviceSessionCredential(vault).wireCredential
+
+    fun deviceSessionCredential(context: Context): DeviceSessionCredential =
+        deviceSessionCredential(credentialVaultFactory(context))
+
+    fun deviceSessionCredential(vault: DeviceCredentialVault): DeviceSessionCredential {
+        val snapshot = vault.snapshot()
+            ?: throw IllegalStateException("设备尚未安全配对或凭证不可用")
+        val deviceId = snapshot.deviceId.takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException("设备尚未安全配对或凭证不可用")
+        val credentialSecret = snapshot.credential.takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException("设备尚未安全配对或凭证不可用")
+        return DeviceSessionCredential(
+            deviceId = deviceId,
+            wireCredential = "$deviceId.$credentialSecret"
+        )
+    }
+
+    fun clearDeviceCredential(context: Context) {
+        credentialVaultFactory(context).clear()
     }
 
     private fun newDeviceId(): String = "jax-" + UUID.randomUUID().toString().replace("-", "").take(8)
@@ -93,7 +154,7 @@ object VoiceConfig {
     }
 
     // ---------- 唤醒词 / KWS 灵敏度 / 悬浮窗 ----------
-    // ⚠️ v0.4.4：唤醒词默认关闭（sherpa JNI 是原生崩溃最大嫌疑；默认禁用 = 完全不加载模型，
+    // [!] v0.4.4：唤醒词默认关闭（sherpa JNI 是原生崩溃最大嫌疑；默认禁用 = 完全不加载模型，
     //    用悬浮球轻触/通知按钮触发对话。设置页可开——开启后若闪退 = 100% 实锤 sherpa 崩溃源）
     const val WAKE_DEFAULT_ENABLED = false
 

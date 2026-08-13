@@ -10,6 +10,9 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.jax.voice.config.VoiceConfig
+import com.jax.voice.net.DevicePairingWorkflow
+import com.jax.voice.net.DeviceRegistrationApi
+import java.util.concurrent.Executors
 
 /**
  * 设置页（v0.6.0 TRTC）：会话服务器（TRTC userSig 签发 base URL）/ 设备 ID / 唤醒词 /
@@ -24,11 +27,16 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private lateinit var etSessionUrl: EditText
+    private lateinit var pairingCodeInput: EditText
+    private lateinit var deviceNameInput: EditText
+    private lateinit var pairButton: Button
     private lateinit var tvDeviceId: TextView
     private lateinit var swWake: Switch
     private lateinit var sbThreshold: SeekBar
     private lateinit var tvThreshold: TextView
     private lateinit var swOverlay: Switch
+    private val pairingExecutor = Executors.newSingleThreadExecutor()
+    private val registrationApi = DeviceRegistrationApi()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,6 +61,9 @@ class SettingsActivity : AppCompatActivity() {
         setTitle(R.string.settings_title)
 
         etSessionUrl = findViewById(R.id.etSessionUrl)
+        pairingCodeInput = findViewById(R.id.etPairingCode)
+        deviceNameInput = findViewById(R.id.etDeviceName)
+        pairButton = findViewById(R.id.btnPairDevice)
         tvDeviceId = findViewById(R.id.tvDeviceId)
         swWake = findViewById(R.id.swWake)
         sbThreshold = findViewById(R.id.sbThreshold)
@@ -69,6 +80,7 @@ class SettingsActivity : AppCompatActivity() {
         val threshold = VoiceConfig.threshold(this)
         sbThreshold.progress = ((threshold - VoiceConfig.THRESHOLD_MIN) / 0.01f).toInt().coerceIn(0, 40)
         tvThreshold.text = getString(R.string.settings_threshold_label) + "：%.2f".format(threshold)
+        pairButton.setOnClickListener { pairDevice() }
         sbThreshold.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 val value = VoiceConfig.THRESHOLD_MIN + progress * 0.01f
@@ -102,5 +114,43 @@ class SettingsActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun pairDevice() {
+        val baseUrl = etSessionUrl.text.toString().trim()
+        val pairingCode = pairingCodeInput.text.toString().trim()
+        val deviceName = deviceNameInput.text.toString().trim()
+        if (baseUrl.isBlank() || pairingCode.isBlank() || deviceName.isBlank()) {
+            Toast.makeText(this, R.string.settings_pairing_required, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        pairButton.isEnabled = false
+        pairingExecutor.execute {
+            val outcome = runCatching {
+                DevicePairingWorkflow(
+                    register = registrationApi::register,
+                    saveRegisteredDevice = { deviceId, credentialSecret ->
+                        VoiceConfig.saveRegisteredDevice(this, deviceId, credentialSecret)
+                    }
+                ).pair(baseUrl, pairingCode, deviceName)
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                pairButton.isEnabled = true
+                outcome.onSuccess { registered ->
+                    pairingCodeInput.text?.clear()
+                    tvDeviceId.text = registered.deviceId
+                    Toast.makeText(this, R.string.settings_pairing_success, Toast.LENGTH_SHORT).show()
+                }.onFailure {
+                    Toast.makeText(this, R.string.settings_pairing_failed, Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        pairingExecutor.shutdownNow()
+        super.onDestroy()
     }
 }

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Task 12 / DESIGN-DETAIL §7.2：尺寸 Token（唯一来源 design-tokens.json）
+  jax_space_* 4px 网格；jax_touch_target_min=44dp（WCAG 2.5.5）；
+  jax_voice_control_size / jax_floating_orb_size = 56dp；图标 16/20/24dp。
+-->
+<resources>
+    <!-- space.*（4px 网格，以 design-tokens.json 的 key 为准） -->
+    <dimen name="jax_space_0">0dp</dimen>
+    <dimen name="jax_space_1">4dp</dimen>
+    <dimen name="jax_space_2">8dp</dimen>
+    <dimen name="jax_space_3">12dp</dimen>
+    <dimen name="jax_space_4">16dp</dimen>
+    <dimen name="jax_space_5">20dp</dimen>
+    <dimen name="jax_space_6">24dp</dimen>
+    <dimen name="jax_space_8">32dp</dimen>
+    <dimen name="jax_space_10">40dp</dimen>
+    <dimen name="jax_space_12">48dp</dimen>
+    <dimen name="jax_space_16">64dp</dimen>
+    <dimen name="jax_space_20">80dp</dimen>
+
+    <!-- radius.* -->
+    <dimen name="jax_radius_sm">4dp</dimen>
+    <dimen name="jax_radius_md">8dp</dimen>
+    <dimen name="jax_radius_lg">12dp</dimen>
+    <dimen name="jax_radius_xl">16dp</dimen>
+
+    <!-- size.* -->
+    <dimen name="jax_touch_target_min">44dp</dimen>
+    <dimen name="jax_voice_control_size">56dp</dimen>
+    <dimen name="jax_floating_orb_size">56dp</dimen>
+    <dimen name="jax_icon_inline">16dp</dimen>
+    <dimen name="jax_icon_button">20dp</dimen>
+    <dimen name="jax_icon_standalone">24dp</dimen>
+
+    <!-- layout.gutterPhone（手机横向边距） -->
+    <dimen name="jax_gutter_phone">16dp</dimen>
+    <dimen name="jax_gutter_desktop">24dp</dimen>
+</resources>

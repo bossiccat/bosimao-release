@@ -14,6 +14,7 @@
     <string name="conn_disconnected">未连接</string>
     <string name="conn_connecting">连接中…</string>
     <string name="conn_connected">已连接</string>
+    <string name="conn_listening">监听中</string>
 
     <!-- 主界面 -->
     <string name="status_title">状态</string>
@@ -46,6 +47,13 @@
     <string name="settings_session_label">会话服务器（TRTC 签发）</string>
     <string name="settings_session_hint">https://&lt;云函数域名&gt;（不带 /api/v1/voice/session）</string>
     <string name="settings_session_sub">手机唤醒后从此接口拉取 TRTC 进房凭证（room_id/user_sig），客户端自动拼接 /api/v1/voice/session；SecretKey 不在 App 内</string>
+    <string name="settings_pairing_title">配对 Android 设备</string>
+    <string name="settings_pairing_code_hint">输入 Windows 端生成的一次性配对码</string>
+    <string name="settings_device_name_hint">设备名称，例如 工作手机</string>
+    <string name="settings_pairing_action">配对设备</string>
+    <string name="settings_pairing_required">请填写会话服务器、配对码和设备名称</string>
+    <string name="settings_pairing_success">设备已安全配对</string>
+    <string name="settings_pairing_failed">配对失败，请检查配对码和网络后重试</string>
     <string name="settings_device_id_label">设备 ID</string>
     <string name="settings_wake_label">唤醒词</string>
     <string name="settings_wake_sub">说"波斯猫"唤醒（sherpa-onnx KWS）</string>

@@ -11,8 +11,8 @@ android {
         applicationId = "com.jax.voice"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.6.0"
+        versionCode = 11
+        versionName = "0.6.5"
 
         // TRTC 官方要求指定 CPU 架构（缩包体；ADR-012 R2 版本锁定）
         ndk {
@@ -69,6 +69,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0") // REST client（会话签发接口）
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
     // RtcClient 状态机 L0 单测（RTC-CLIENT-TEST-DESIGN §2）：mock TRTCCloud，不连真实 RTC 云
     testImplementation("io.mockk:mockk:1.13.5")
 }

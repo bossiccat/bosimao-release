@@ -6,33 +6,24 @@ import android.util.Log
 import com.jax.voice.voice.ConnectionState
 import com.jax.voice.voice.VoiceController
 import com.jax.voice.voice.VoicePhase
+import com.jax.voice.util.DiagLog
 import com.tencent.trtc.TRTCCloud
 import com.tencent.trtc.TRTCCloudDef
 import com.tencent.trtc.TRTCCloudListener
 
 /**
  * TRTC 通话客户端 —— 纯音频 1v1 通话；替代 VoiceWsClient（WS+配对）。
+ * 依据：docs/rtc-rebuild/MOBILE-INTEGRATION.md §2/§3.4 / ARCHITECTURE.md §5.1 / ADR-012；
+ * API 签名对照官方 TRTC Android SDK 13.4.0.20477 实际 jar（javap 核对，非记忆）。
  *
- * 依据：docs/rtc-rebuild/MOBILE-INTEGRATION.md §2/§3.4（实施基准）/ ARCHITECTURE.md §5.1 / ADR-012。
- * API 签名对照官方 TRTC Android SDK 13.4.0.20477 实际 jar（javap 核对，非记忆）：
- * - TRTCCloud.sharedInstance(ctx) / addListener / enterRoom(TRTCParams, scene) / exitRoom / startLocalAudio
- * - 回调：onEnterRoom(long)（>0 成功=耗时ms）、onExitRoom(int)、onRemoteUserEnterRoom/LeaveRoom、
- *   onUserVoiceVolume(ArrayList<TRTCVolumeInfo>, totalVolume)、onConnectionLost/onTryToReconnect/onConnectionRecovery、
- *   onRemoteAudioStatusUpdated（13.4 名，非旧文档 onRemoteUserAudioStatus）、onError(int,String,Bundle)、onMicDidReady。
+ * 职责边界（Task 7 拆分）：
+ * - 会话核心：进房/退房/断线重连映射/错误/对端离开超时退房（本类）。
+ * - 远端播放订阅与打断：[RtcPlaybackSubscription]（正常停止只发 UI 事件，绝不 mute，AC-12/13/14）。
+ * - 采集波形：[RtcAudioFrameRms]（本地帧 RMS 与 onUserVoiceVolume 双源互补）。
  *
- * 设计要点：
- * - 仅会话期进房（KWS 唤醒 → 拉 roomId+userSig → enterRoom；对话结束 exitRoom），常驻监听不耗 RTC 分钟。
- * - mic handoff：enterRoom 前调用方必须已停 MicRecorder（Android 不允许双 AudioRecord 同时采集）；
- *   exitRoom 需等 onExitRoom 回调后再重启 MicRecorder（ADR-012 手机端细节 3），由 onExited 回调通知；
- *   **兜底**：exitRoom 后 3s 未收到 onExitRoom → 强制触发 onExited（防回调丢失永不恢复，P2-2）。
- * - 对端离开：60s 未重进 → 自动退房（防持续耗 RTC 分钟，P2-3）。
- * - 断线重连 SDK 内置（无限重连），应用层只把 onConnectionLost/Recovery 映射到六态 UI；
- *   onConnectionLost 先置 DISCONNECTED 中间态再 CONNECTING（QA-PLAN §2 A，P2-4）。
- * - 打断状态机（QA-PLAN §3.3 / MOBILE-INTEGRATION §3.4，P1-1）：会话期本地 VAD 不参与（mic 被 TRTC 独占），
- *   onRemoteAudioStatusUpdated 驱动六态：远端说话 → SPEAKING；远端静音/停止（回复结束/打断）→
- *   停播下行（muteRemoteAudio 兜底）+ 切 LISTENING，保证「UI 状态与音频停止一致」。
- * - 播放：MVP 走 SDK 自动播放（自动订阅，远端音频自动解码播放），不注册 onAudioFrame 接管。
- * - 加密：默认 DTLS-SRTP 传输加密（SecretKey 唯一存云函数环境变量，userSig 短时效，App 不持有密钥）。
+ * 要点：仅会话期进房（常驻监听不耗 RTC 分钟）；mic handoff 由调用方停 MicRecorder、等 onExitRoom
+ * （3s 超时兜底）；对端离开 60s 未重进自动退房；断线重连 SDK 内置，应用层只映射连接状态；
+ * 播放走 SDK 自动订阅（不注册 onAudioFrame 接管）；DTLS-SRTP 加密，App 不持有 SecretKey。
  */
 class RtcClient(
     private val appContext: Context,
@@ -42,67 +33,60 @@ class RtcClient(
     private val onError: (code: String, msg: String) -> Unit,
     /** 退房完成回调（onExitRoom 触发；超时兜底也会触发）：调用方在此重启 MicRecorder 恢复"一直在听" */
     private val onExited: () -> Unit,
-    /**
-     * 引擎工厂（测试注入，QA L0 RTC-CLIENT-TEST-DESIGN §2）：默认 TRTCCloud.sharedInstance(appContext)
-     * 生产单例；qa 测试传 FakeRtcEngine（extends TRTCCloud 覆盖同签名方法，不连真实 RTC 云）。
-     */
+    /** 远端播放 UI 事件（Task 7：正常停止 = RemoteAudioStopped，Task 8 接入 BargeInController） */
+    private val onRemoteAudioEvent: (RtcPlaybackSubscription.RemoteAudioEvent) -> Unit = {},
+    /** 引擎工厂（测试注入，QA L0 RTC-CLIENT-TEST-DESIGN §2）：默认 TRTCCloud.sharedInstance(appContext) */
     private val engineFactory: (Context) -> TRTCCloud = { ctx -> TRTCCloud.sharedInstance(ctx) }
 ) {
     companion object {
         private const val TAG = "RtcClient"
-        /** 音量回调间隔 300ms（MOBILE-INTEGRATION §1.3）；第二参 enableVad=false（波形需要连续音量） */
-        private const val VOLUME_INTERVAL_MS = 300
-        /** 退房回调超时兜底：exitRoom 后 3s 内未收到 onExitRoom → 强制恢复 MicRecorder（P2-2） */
-        private const val EXIT_TIMEOUT_MS = 3_000L
-        /** 对端离开超时退房：60s 内未重进 → 自动退房（防持续耗 RTC 分钟，P2-3） */
-        private const val REMOTE_LEAVE_TIMEOUT_MS = 60_000L
-        /**
-         * TRTC onRemoteAudioStatusUpdated 的 audioStatus 取值（SDK 13.4 语义，QA-PLAN §3.3）：
-         * 1=远端有音频（说话中 / TRTCAudioStatusSpeaking）；2=远端静音/停止（打断结束 / TRTCAudioStatusListening）。
-         */
-        private const val AUDIO_STATUS_SPEAKING = 1
-        private const val AUDIO_STATUS_LISTENING = 2
+        // 常量（MOBILE-INTEGRATION §1.3 / P2-2 / v0.6.2 / P2-3）
+        private const val VOLUME_INTERVAL_MS = 300 // 音量回调间隔
+        private const val EXIT_TIMEOUT_MS = 3_000L // 退房回调超时兜底
+        private const val ENTER_TIMEOUT_MS = 15_000L // 进房回调超时兜底
+        private const val REMOTE_LEAVE_TIMEOUT_MS = 60_000L // 对端离开超时退房
     }
 
-    /** 是否已在房（本地维护；13.4 SDK 无 isInRoom 公开方法） */
-    @Volatile
-    private var inRoom = false
+    @Volatile private var inRoom = false // 本地维护；13.4 SDK 无 isInRoom 公开方法
+    @Volatile private var exitHandled = false // 防「超时兜底 + 真实回调」双触发
+    @Volatile private var exitTimeoutThread: Thread? = null
+    @Volatile private var enterTimeoutThread: Thread? = null
+    @Volatile private var leaveTimeoutThread: Thread? = null
+    @Volatile private var lastVolLogTs = 0L // 非零音量降频记录（3s 一条）
+    @Volatile private var remoteUserId: String? = null // 最近远端用户（打断 flush 目标）
 
-    /** 本次退房是否已触发过 onExited（防「超时兜底 + 真实回调」双触发） */
-    @Volatile
-    private var exitHandled = false
-
-    /** 退房超时兜底线程（onExitRoom 到达或新一次退房/释放时取消） */
-    @Volatile
-    private var exitTimeoutThread: Thread? = null
-
-    /** 对端离开超时退房线程（对端重进或退房/释放时取消） */
-    @Volatile
-    private var leaveTimeoutThread: Thread? = null
+    private val audioRms = RtcAudioFrameRms(onRms = { onRms(it) }) // 本地采集帧 RMS（波形兜底源）
 
     /** TRTC 引擎（默认 App 进程级单例 sharedInstance）；懒加载：首次 enterRoom 才创建实例 */
     private val cloud: TRTCCloud by lazy {
         engineFactory(appContext).also { it.addListener(listener) }
     }
 
-    private val listener = object : TRTCCloudListener() {
+    /** 远端播放订阅与打断（Task 7：正常停止只发 UI 事件，显式打断走本地 stop/flush + generation） */
+    private val playback = RtcPlaybackSubscription(
+        cloud = { cloud },
+        onPhase = { onPhase(it) },
+        onUiEvent = { onRemoteAudioEvent(it) }
+    )
 
+    /** 播放代数（Task 7）：显式打断递增，旧 generation 下行帧失效（AC-14） */
+    val playbackGeneration: Int get() = playback.playbackGeneration
+
+    private val listener = object : TRTCCloudListener() {
         override fun onEnterRoom(result: Long) {
-            // 判成功：真实 SDK result>0=成功（耗时ms）、result<0=失败（错误码）；result==0 为测试 mock
-            // 的成功哨兵（RTC-CLIENT-TEST-DESIGN §2.1 S1，真实 SDK 成功必>0，0 不会出现），统一按 >=0 判成功。
+            cancelEnterTimeout()
+            DiagLog.log("Rtc", "onEnterRoom result=$result")
+            // 判成功：真实 SDK result>0=成功（耗时ms）、result<0=失败；result==0 为测试 mock 成功哨兵
             if (result >= 0) {
-                // 进房成功 → CONNECTED，清错误
                 inRoom = true
                 VoiceController.setLastError("")
                 onState(ConnectionState.CONNECTED)
             } else {
-                // 进房失败（result < 0 = 错误码）→ DISCONNECTED + 错误
                 inRoom = false
                 onState(ConnectionState.DISCONNECTED)
                 onError("enter_room", "进房失败: $result")
             }
         }
-
         override fun onExitRoom(reason: Int) {
             Log.i(TAG, "onExitRoom reason=$reason (0主动退出/1被踢/2房间解散)")
             cancelExitTimeout()
@@ -114,84 +98,60 @@ class RtcClient(
                 onExited()
             }
         }
-
         override fun onRemoteUserEnterRoom(userId: String) {
-            // 远端（PC sidecar）进房 = 可通话；清除"对端已退出"提示
             cancelLeaveTimeout()
+            remoteUserId = userId
             VoiceController.setLastError("")
             onState(ConnectionState.CONNECTED)
-            onPhase(VoicePhase.LISTENING)
+            playback.onRemoteUserEnterRoom(userId)
         }
-
         override fun onRemoteUserLeaveRoom(userId: String, reason: Int) {
-            // 对端退出：提示 + 保持房间等对端重进；60s 未重进 → 自动退房（P2-3，防持续耗 RTC 分钟）
+            DiagLog.log("Rtc", "remoteLeave user=$userId reason=$reason")
             VoiceController.setLastError("对端已退出")
             onPhase(VoicePhase.LISTENING)
             scheduleRemoteLeaveTimeout()
         }
-
         override fun onFirstAudioFrame(userId: String) {
-            // 远端首帧音频 = 已可播放
-            onPhase(VoicePhase.LISTENING)
+            remoteUserId = userId
+            playback.onFirstAudioFrame(userId)
         }
-
         override fun onUserVoiceVolume(userVolumes: ArrayList<TRTCCloudDef.TRTCVolumeInfo>, totalVolume: Int) {
-            // totalVolume 0~100 → 归一化 0~1 驱动悬浮窗波形（本地+远端合计音量）
-            onRms(totalVolume / 100f)
+            onRms(totalVolume / 100f) // 0~100 → 0~1 归一化驱动悬浮窗波形（本地+远端合计音量）
+            val now = System.currentTimeMillis()
+            if (totalVolume > 0 && now - lastVolLogTs > 3000) {
+                lastVolLogTs = now
+                DiagLog.log("Rtc", "voiceVolume total=$totalVolume")
+            }
         }
-
         override fun onConnectionLost() {
             // 断连（约连续 8s 未连上）→ 先 DISCONNECTED 中间态，再 CONNECTING（QA-PLAN §2 A，P2-4）
             VoiceController.setLastError("网络中断，重连中…")
             onState(ConnectionState.DISCONNECTED)
             onState(ConnectionState.CONNECTING)
         }
-
         override fun onTryToReconnect() {
-            // 断连 3s 后开始尝试（之后每 24s 重试）→ CONNECTING
-            onState(ConnectionState.CONNECTING)
+            onState(ConnectionState.CONNECTING) // 断连 3s 后开始尝试（之后每 24s 重试）
         }
-
         override fun onConnectionRecovery() {
-            // 重连成功 → CONNECTED，清错误
             VoiceController.setLastError("")
             onState(ConnectionState.CONNECTED)
         }
-
-        override fun onRemoteAudioStatusUpdated(userId: String, audioStatus: Int, reason: Int, extraInfo: Bundle?) {
-            // P1-1 打断状态机（QA-PLAN §3.3 / MOBILE-INTEGRATION §3.4）：
-            // 会话期 mic 被 TRTC 独占、本地 VAD 不参与打断，打断判定来源 = 本回调。
-            // 远端说话 → 六态 SPEAKING（对话中）；远端静音/停止（回复结束/打断）→ 停播下行 + 切 LISTENING，
-            // 保证「UI 状态与音频停止一致」（不允许音频已停但 UI 还停在 Speaking）。
-            Log.d(TAG, "remote audio status userId=$userId audioStatus=$audioStatus reason=$reason")
-            when (audioStatus) {
-                AUDIO_STATUS_SPEAKING -> onPhase(VoicePhase.SPEAKING)
-
-                AUDIO_STATUS_LISTENING -> {
-                    // 下行停播兜底（SDK 自动播放时 muteRemoteAudio 停掉对端音频，不依赖 playGen）
-                    try {
-                        cloud.muteRemoteAudio(userId, true)
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "muteRemoteAudio failed: ${t.message}", t)
-                    }
-                    onPhase(VoicePhase.LISTENING)
-                }
-
-                else -> Log.d(TAG, "unknown audio status=$audioStatus")
+        override fun onUserAudioAvailable(userId: String, available: Boolean) {
+            DiagLog.log("Rtc", "userAudioAvailable user=$userId available=$available")
+            if (available) {
+                remoteUserId = userId
+                playback.ensureUnmuted(userId) // 兜底：确保订阅未被任何静音状态挡住
             }
         }
-
-        override fun onMicDidReady() {
-            Log.i(TAG, "mic ready")
+        override fun onRemoteAudioStatusUpdated(userId: String, audioStatus: Int, reason: Int, extraInfo: Bundle?) {
+            remoteUserId = userId
+            // Task 7：正常远端停止只发 UI 事件，绝不 muteRemoteAudio(true)（订阅长期有效，AC-12）
+            playback.onRemoteAudioStatusUpdated(userId, audioStatus, reason)
         }
-
         override fun onError(errCode: Int, errMsg: String, extraInfo: Bundle?) {
             Log.e(TAG, "TRTC error: $errCode $errMsg")
             onError("$errCode", errMsg)
-            if (inRoom) {
-                // 进房后错误：置 DISCONNECTED（SDK 会自行处理重连；错误码如 -3317 等）
-                onState(ConnectionState.DISCONNECTED)
-            }
+            if (inRoom) onState(ConnectionState.DISCONNECTED) // 进房后错误（SDK 自行重连）
         }
     }
 
@@ -206,18 +166,13 @@ class RtcClient(
             sdkAppId = session.sdkAppId
             userId = session.userId
             userSig = session.userSig
-            // P2-1：显式置 0（用 strRoomId 时 int 房间号必须为 0；SDK 字段名是 roomId，非 ADR 旧称 intRoomId）
-            roomId = 0
-            // 字符串房间号（≤64 字节）；用 strRoomId 时 roomId 必须为 0（ADR-012 实施补充）
-            strRoomId = session.roomId
+            roomId = 0 // 用 strRoomId 时 int 房间号必须为 0（P2-1）
+            strRoomId = session.roomId // 字符串房间号（≤64 字节）
         }
-        // 进房 = 会话开始：手机处于"已唤醒，在听"（对端说话后再由音频状态切 SPEAKING）
         onPhase(VoicePhase.LISTENING)
         onState(ConnectionState.CONNECTING)
         cloud.enterRoom(params, TRTCCloudDef.TRTC_APP_SCENE_AUDIOCALL)
-        // 语音档（16k）与现有 16k 采集链路一致；不调用 startLocalPreview = 纯音频
-        cloud.startLocalAudio(TRTCCloudDef.TRTC_AUDIO_QUALITY_SPEECH)
-        // 音量回调（13.4 签名：enable + TRTCAudioVolumeEvaluateParams{interval, enableVadDetection}）
+        cloud.startLocalAudio(TRTCCloudDef.TRTC_AUDIO_QUALITY_SPEECH) // 语音档（16k），纯音频不预览
         cloud.enableAudioVolumeEvaluation(
             true,
             TRTCCloudDef.TRTCAudioVolumeEvaluateParams().apply {
@@ -225,21 +180,42 @@ class RtcClient(
                 enableVadDetection = false
             }
         )
-        // 扬声器外放
-        cloud.setAudioRoute(TRTCCloudDef.TRTC_AUDIO_ROUTE_SPEAKER)
-        Log.i(TAG, "enterRoom room=${session.roomId} userId=${session.userId} scene=${session.scene}")
+        cloud.setAudioRoute(TRTCCloudDef.TRTC_AUDIO_ROUTE_SPEAKER) // 扬声器外放
+        cloud.setAudioFrameListener(audioRms.listener()) // 本地采集帧回调（波形兜底源）
+        try { cloud.muteAllRemoteAudio(false) } catch (t: Throwable) { // 进房即取消全部远端静音（防 mute 残留）
+            Log.w(TAG, "muteAllRemoteAudio(false) failed: ${t.message}", t)
+        }
+        scheduleEnterTimeout() // 15s 无 onEnterRoom → 强制失败恢复（防 SDK 吞掉 enterRoom）
+        DiagLog.log("Rtc", "enterRoom room=${session.roomId} userId=${session.userId} scene=${session.scene}")
     }
 
-    /** 退房（异步：等 onExitRoom 回调，调用方在 onExited 中重启 MicRecorder；3s 超时兜底强制恢复） */
+    /** 退房（异步：等 onExitRoom 回调；3s 超时兜底强制恢复）。进房进行中也可退房（取消在途 enter，Task 6）。 */
     fun exitRoom() {
-        if (!inRoom) {
-            Log.w(TAG, "exitRoom ignored: not in room")
+        val pendingEnter = enterTimeoutThread != null
+        if (!inRoom && !pendingEnter) {
+            Log.w(TAG, "exitRoom ignored: not in room / no pending enter")
             return
         }
         inRoom = false
+        cancelEnterTimeout()
         onState(ConnectionState.DISCONNECTED)
         cloud.exitRoom()
+        try { cloud.setAudioFrameListener(null) } catch (t: Throwable) {
+            Log.w(TAG, "clear audio frame listener failed: ${t.message}", t)
+        }
         scheduleExitTimeout()
+    }
+
+    /** 是否有在途进房（enterRoom 已调用、onEnterRoom 未回）：coordinator 据此决定是否等待退房回调 */
+    fun hasPendingEnter(): Boolean = enterTimeoutThread != null
+
+    /** 显式打断（用户开口/点击，AC-13）：本地播放 stop/flush + generation 失效，长期订阅不变 */
+    fun interruptRemotePlayback() {
+        val userId = remoteUserId ?: run {
+            Log.w(TAG, "interruptRemotePlayback ignored: no remote user")
+            return
+        }
+        playback.interruptPlayback(userId)
     }
 
     /** 静音/恢复本地上行（继续发静音包）；true=静音 */
@@ -253,8 +229,10 @@ class RtcClient(
     fun release() {
         try {
             cancelExitTimeout()
+            cancelEnterTimeout()
             cancelLeaveTimeout()
             cloud.removeListener(listener)
+            cloud.setAudioFrameListener(null)
             if (inRoom) {
                 inRoom = false
                 cloud.exitRoom()
@@ -265,46 +243,57 @@ class RtcClient(
         }
     }
 
-    /** P2-2：退房后 3s 未收到 onExitRoom → 强制恢复 MicRecorder（防回调丢失永不恢复） */
     private fun scheduleExitTimeout() {
         cancelExitTimeout()
-        val t = Thread {
-            try {
-                Thread.sleep(EXIT_TIMEOUT_MS)
-                if (!exitHandled) {
-                    exitHandled = true
-                    Log.w(TAG, "onExitRoom timeout (${EXIT_TIMEOUT_MS}ms): forcing onExited")
-                    onExited()
-                }
-            } catch (_: InterruptedException) {
-                // 正常 onExitRoom 先到 → 兜底已取消
+        exitTimeoutThread = daemonDelay(EXIT_TIMEOUT_MS) {
+            if (!exitHandled) {
+                exitHandled = true
+                Log.w(TAG, "onExitRoom timeout (${EXIT_TIMEOUT_MS}ms): forcing onExited")
+                onExited()
             }
-        }.apply { isDaemon = true; start() }
-        exitTimeoutThread = t
+        }
     }
-
     private fun cancelExitTimeout() {
         exitTimeoutThread?.interrupt()
         exitTimeoutThread = null
     }
-
-    /** P2-3：对端离开后 60s 未重进 → 自动退房（防持续耗 RTC 分钟） */
+    private fun scheduleEnterTimeout() {
+        cancelEnterTimeout()
+        enterTimeoutThread = daemonDelay(ENTER_TIMEOUT_MS) {
+            if (!exitHandled && !inRoom) {
+                exitHandled = true
+                inRoom = false
+                Log.e(TAG, "onEnterRoom timeout (${ENTER_TIMEOUT_MS}ms): forcing enter failure recovery")
+                onState(ConnectionState.DISCONNECTED)
+                onError("enter_timeout", "进房超时（${ENTER_TIMEOUT_MS / 1000}s 无回调）")
+            }
+        }
+    }
+    private fun cancelEnterTimeout() {
+        enterTimeoutThread?.interrupt()
+        enterTimeoutThread = null
+    }
     private fun scheduleRemoteLeaveTimeout() {
         cancelLeaveTimeout()
-        val t = Thread {
-            try {
-                Thread.sleep(REMOTE_LEAVE_TIMEOUT_MS)
-                Log.w(TAG, "remote leave timeout (${REMOTE_LEAVE_TIMEOUT_MS}ms): auto exitRoom")
-                if (inRoom) exitRoom()
-            } catch (_: InterruptedException) {
-                // 对端已重进 / 已退房 → 取消
-            }
-        }.apply { isDaemon = true; start() }
-        leaveTimeoutThread = t
+        leaveTimeoutThread = daemonDelay(REMOTE_LEAVE_TIMEOUT_MS) {
+            Log.w(TAG, "remote leave timeout (${REMOTE_LEAVE_TIMEOUT_MS}ms): auto exitRoom")
+            if (inRoom) exitRoom()
+        }
     }
-
     private fun cancelLeaveTimeout() {
         leaveTimeoutThread?.interrupt()
         leaveTimeoutThread = null
+    }
+
+    /** 通用守护线程延时兜底：取消 = interrupt（sleep 抛 InterruptedException 后静默退出） */
+    private fun daemonDelay(ms: Long, onTimeout: () -> Unit): Thread {
+        return Thread {
+            try {
+                Thread.sleep(ms)
+                onTimeout()
+            } catch (_: InterruptedException) {
+                // 正常回调先到 → 兜底已取消
+            }
+        }.apply { isDaemon = true; start() }
     }
 }

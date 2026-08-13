@@ -30,6 +30,12 @@ class JaxApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // v0.6.4 诊断日志初始化（无线定位手机端问题）
+        try {
+            com.jax.voice.util.DiagLog.init(this)
+            com.jax.voice.util.DiagLog.log("App", "diag log initialized")
+        } catch (_: Throwable) {
+        }
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try {
@@ -93,6 +99,10 @@ class JaxApp : Application() {
             externalCrashLogFile()?.delete()
         } catch (_: Throwable) {
         }
+        try {
+            CrashLogMirror(MediaStoreCrashLogMirrorStore(contentResolver)).clear()
+        } catch (_: Throwable) {
+        }
     }
 
     private fun writeCrash(thread: Thread, throwable: Throwable) {
@@ -126,24 +136,10 @@ class JaxApp : Application() {
         return sb.toString()
     }
 
-    /** MediaStore Downloads 镜像：文件管理器"下载/波斯猫/"可见（Android 11+ 私有目录受保护，用户取不到日志） */
+    /** MediaStore Downloads 镜像：稳定替换同一记录，避免每次崩溃产生重复文件。 */
     private fun mirrorToDownloads(content: String) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         try {
-            val values = android.content.ContentValues().apply {
-                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, "crash_log.txt")
-                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
-                put(
-                    android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
-                    android.os.Environment.DIRECTORY_DOWNLOADS + "/波斯猫"
-                )
-            }
-            val uri = contentResolver.insert(
-                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
-            ) ?: return
-            contentResolver.openOutputStream(uri)?.use { os ->
-                os.write(content.toByteArray(Charsets.UTF_8))
-            }
+            CrashLogMirror(MediaStoreCrashLogMirrorStore(contentResolver)).write(content)
         } catch (t: Throwable) {
             Log.e(TAG, "mirror downloads failed: ${t.message}")
         }

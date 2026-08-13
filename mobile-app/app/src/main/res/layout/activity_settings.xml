@@ -48,6 +48,44 @@
             android:textColor="@color/jax_muted"
             android:textSize="12sp" />
 
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/jax_space_5"
+            android:text="@string/settings_pairing_title"
+            android:textColor="@color/jax_fg2"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/etPairingCode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/jax_space_2"
+            android:hint="@string/settings_pairing_code_hint"
+            android:inputType="textVisiblePassword"
+            android:maxLines="1"
+            android:textColor="@color/jax_fg"
+            android:textColorHint="@color/jax_muted" />
+
+        <EditText
+            android:id="@+id/etDeviceName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/jax_space_2"
+            android:hint="@string/settings_device_name_hint"
+            android:inputType="textCapWords"
+            android:maxLength="80"
+            android:maxLines="1"
+            android:textColor="@color/jax_fg"
+            android:textColorHint="@color/jax_muted" />
+
+        <Button
+            android:id="@+id/btnPairDevice"
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/jax_touch_target_min"
+            android:layout_marginTop="@dimen/jax_space_3"
+            android:text="@string/settings_pairing_action" />
+
         <!-- 设备 ID（生成后持久化，spec §7.1；TRTC 进房用户标识） -->
         <TextView
             android:layout_width="wrap_content"

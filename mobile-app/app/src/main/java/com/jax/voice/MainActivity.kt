@@ -25,6 +25,7 @@ import com.jax.voice.ui.WaveformView
 import com.jax.voice.voice.ConnectionState
 import com.jax.voice.voice.ServiceState
 import com.jax.voice.voice.VoiceController
+import com.jax.voice.voice.VoiceEntry
 import com.jax.voice.voice.VoiceForegroundService
 import com.jax.voice.voice.VoicePhase
 import kotlinx.coroutines.launch
@@ -39,9 +40,21 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
+
+        /**
+         * 悬浮球全局单例（v0.6.2 修复"悬浮球变 2 个"）：overlay 持有 WindowManager 视图，
+         * 若随 Activity 重建（旋转/切后台/内存回收）会重复 addView。改用 applicationContext +
+         * 进程级单例，Activity 重建复用同一实例，视图不重复。FloatingOverlay 内部所有操作
+         * （addView/removeView/startForegroundService/canDrawOverlays）均可用 app context。
+         */
+        @Volatile
+        private var overlaySingleton: FloatingOverlay? = null
     }
 
-    private val overlay by lazy { FloatingOverlay(this) }
+    private val overlay: FloatingOverlay
+        get() = overlaySingleton ?: FloatingOverlay(applicationContext).also {
+            overlaySingleton = it
+        }
 
     private lateinit var tvServiceState: TextView
     private lateinit var dotPhase: android.view.View
@@ -107,12 +120,15 @@ class MainActivity : AppCompatActivity() {
                 startListening()
             }
         }
+        // v0.6.4 诊断：长按连接状态区 → 查看/复制手机端诊断日志（无线定位问题用）
+        tvConnection.setOnLongClickListener {
+            showDiagLogDialog()
+            true
+        }
         btnTalk.setOnClickListener {
             try {
-                startForegroundService(
-                    Intent(this, VoiceForegroundService::class.java)
-                        .setAction(VoiceForegroundService.ACTION_TALK)
-                )
+                // Task 8：主页面入口走统一 startConversation（同一 coordinator.Start 命令）
+                VoiceEntry.startConversation(this, "main")
             } catch (e: Exception) {
                 // Android 14 后台启动 mic 前台服务受限：引导用户先打开 App（spec §11-1）
                 Toast.makeText(this, "请先打开 App 再使用", Toast.LENGTH_SHORT).show()
@@ -144,9 +160,21 @@ class MainActivity : AppCompatActivity() {
                                 }
                             }
                         }
-                        tvConnection.text = connectionLabel(state.connection)
+                        // 监听中（服务运行、未通话）显示"监听中"而非"未连接"——TRTC 连接状态
+                        // 只在会话期有意义；监听阶段未进房是正常态，误导用户以为坏了（v0.6.1 修复）
+                        val monitoring = state.service == ServiceState.RUNNING &&
+                            state.phase == VoicePhase.MONITORING &&
+                            state.connection == ConnectionState.DISCONNECTED
+                        tvConnection.text = if (monitoring) {
+                            getString(R.string.conn_listening)
+                        } else {
+                            connectionLabel(state.connection)
+                        }
                         tvConnection.setTextColor(
-                            ContextCompat.getColor(this@MainActivity, connectionColor(state.connection))
+                            ContextCompat.getColor(
+                                this@MainActivity,
+                                if (monitoring) R.color.state_monitoring else connectionColor(state.connection)
+                            )
                         )
                         tvWakeCount.text = state.wakeCount.toString()
                         // v0.6.0 TRTC：显示会话服务器（签发接口）地址
@@ -210,6 +238,45 @@ class MainActivity : AppCompatActivity() {
         } catch (t: Throwable) {
             // 弹窗失败绝不能崩
             Log.e(TAG, "crash dialog failed: ${t.message}", t)
+        }
+    }
+
+    /** v0.6.4 诊断：长按连接状态区弹出手机端诊断日志（最近 80 条）+ 复制/分享/清空 */
+    private fun showDiagLogDialog() {
+        try {
+            val content = com.jax.voice.util.DiagLog.readRecent(80)
+            val dialog = AlertDialog.Builder(this)
+                .setTitle("诊断日志（长按状态区可再次打开）")
+                .setMessage(content.ifBlank { "(空 — 请先进行一轮对话操作再查看)" })
+                .setPositiveButton("复制") { _, _ ->
+                    try {
+                        val cm = getSystemService(android.content.ClipboardManager::class.java)
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("diag_log", content))
+                        Toast.makeText(this, "已复制，可粘贴发给开发", Toast.LENGTH_SHORT).show()
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "copy diag failed: ${t.message}", t)
+                    }
+                }
+                .setNegativeButton("分享") { _, _ ->
+                    try {
+                        val send = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "波斯猫诊断日志")
+                            putExtra(Intent.EXTRA_TEXT, content)
+                        }
+                        startActivity(Intent.createChooser(send, "分享诊断日志"))
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "share diag failed: ${t.message}", t)
+                    }
+                }
+                .setNeutralButton("清空") { _, _ ->
+                    com.jax.voice.util.DiagLog.clear()
+                    Toast.makeText(this, "日志已清空", Toast.LENGTH_SHORT).show()
+                }
+                .create()
+            dialog.show()
+        } catch (t: Throwable) {
+            Log.e(TAG, "diag dialog failed: ${t.message}", t)
         }
     }
 

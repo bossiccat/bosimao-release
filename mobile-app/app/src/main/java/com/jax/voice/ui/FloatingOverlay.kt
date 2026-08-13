@@ -1,7 +1,6 @@
 package com.jax.voice.ui
 
 import android.content.Context
-import android.content.Intent
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -13,7 +12,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import com.jax.voice.R
-import com.jax.voice.voice.VoiceForegroundService
+import com.jax.voice.voice.VoiceEntry
 import com.jax.voice.voice.VoicePhase
 import kotlin.math.abs
 
@@ -145,12 +144,9 @@ class FloatingOverlay(private val context: Context) {
                 if (!dragging) {
                     val elapsed = System.currentTimeMillis() - touchDownTime
                     if (elapsed < 400) {
-                        // 轻触 = 唤醒（spec §5.3 交互兜底）
+                        // 轻触 = 发起对话（spec §5.3 交互兜底；Task 8 统一 startConversation 命令）
                         try {
-                            context.startForegroundService(
-                                Intent(context, VoiceForegroundService::class.java)
-                                    .setAction(VoiceForegroundService.ACTION_TALK)
-                            )
+                            VoiceEntry.startConversation(context, "overlay")
                         } catch (e: Exception) {
                             // Android 14 后台启动 mic 前台服务受限（spec §11-1）：引导打开 App
                             Log.w(TAG, "start foreground service failed: ${e.message}")

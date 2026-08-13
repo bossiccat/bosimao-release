@@ -66,7 +66,7 @@ class WakeWordEngine(
             try {
                 val spot = buildSpotter(assetManager)
                 val s = try {
-                    spot.createStream(VoiceConfig.WAKEWORD_PINYIN)
+                    spot.createStream()
                 } catch (t: Throwable) {
                     Log.e(TAG, "createStream threw: ${t.message}")
                     null
@@ -109,7 +109,10 @@ class WakeWordEngine(
         val config = KeywordSpotterConfig(
             featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
             modelConfig = modelConfig,
-            keywordsFile = "",
+            // v0.6.2：关键词改用 keywordsFile（与官方所有示例一致：nodejs/Flutter/Android 均用文件方式）。
+            // 原 createStream(PINYIN) 传 "b ō s ī m āo @波斯猫" 是 Android 特有 JNI 路径，
+            // 解析行为与 keywordsFile 不同（疑似 v0.6.1 仍闪退的根因），已弃用。
+            keywordsFile = "$MODEL_DIR/keywords_jax.txt",
             keywordsThreshold = threshold
         )
         return KeywordSpotter(assetManager = assetManager, config = config)

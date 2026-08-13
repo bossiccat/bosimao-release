@@ -22,6 +22,10 @@ import android.util.Log
  */
 class MicRecorder(private val onFrame: (FloatArray) -> Unit) {
 
+    internal interface StopControl {
+        fun release()
+    }
+
     companion object {
         private const val TAG = "MicRecorder"
         const val SAMPLE_RATE = 16000
@@ -152,7 +156,33 @@ class MicRecorder(private val onFrame: (FloatArray) -> Unit) {
 
     fun stop() {
         running = false
-        thread?.interrupt()
+        val worker = thread
+        val record = audioRecord
+        stopAndJoin(worker, object : StopControl {
+            override fun release() {
+                try {
+                    record?.stop()
+                } catch (_: Exception) {
+                }
+                try {
+                    record?.release()
+                } catch (_: Exception) {
+                }
+            }
+        })
         thread = null
+        audioRecord = null
+    }
+
+    private fun stopAndJoin(worker: Thread?, control: StopControl) {
+        control.release()
+        worker?.interrupt()
+        if (worker != null && worker !== Thread.currentThread()) {
+            try {
+                worker.join(2_000)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
     }
 }

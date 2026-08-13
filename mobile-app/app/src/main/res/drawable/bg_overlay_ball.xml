@@ -5,5 +5,5 @@
     <solid android:color="@color/state_monitoring" />
     <stroke
         android:width="2dp"
-        android:color="#33000000" />
+        android:color="@color/jax_color_overlay_stroke" />
 </shape>

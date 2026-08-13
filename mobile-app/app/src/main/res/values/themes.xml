@@ -1,17 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Task 12 / DESIGN-DETAIL §7.3：基于 Material 3 深色无 ActionBar 主题。
+  colorPrimary=accent、colorOnPrimary=accent-on；系统栏使用背景/表面 Token；
+  不得在主题或控件覆盖中引入裸色（唯一例外 #fff/#000 也不允许出现在主题内）。
+  动效收敛 150ms + 标准缓动；遵循系统 Animator duration scale 与移除动画偏好。
+-->
 <resources>
-    <!-- 波斯猫 v0.4：浅色主题（白底深字）。windowLightStatusBar 让状态栏图标深色（API 23+）；forceDarkAllowed 关闭系统强制深色 -->
-    <style name="Theme.JaxVoice" parent="Theme.Material3.Light.NoActionBar">
-        <item name="colorPrimary">@color/jax_accent</item>
-        <item name="colorOnPrimary">#FFFFFF</item>
-        <item name="colorSurface">@color/jax_bg</item>
-        <item name="colorOnSurface">@color/jax_fg</item>
-        <item name="colorSurfaceVariant">@color/jax_surface2</item>
-        <item name="colorOnSurfaceVariant">@color/jax_fg2</item>
-        <item name="android:colorBackground">@color/jax_bg</item>
-        <item name="android:statusBarColor">@color/jax_bg</item>
-        <item name="android:navigationBarColor">@color/jax_bg</item>
-        <item name="android:windowLightStatusBar">true</item>
+    <style name="Theme.JaxVoice" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/jax_color_accent</item>
+        <item name="colorOnPrimary">@color/jax_color_on_accent</item>
+        <item name="colorSurface">@color/jax_color_surface</item>
+        <item name="colorOnSurface">@color/jax_color_on_surface</item>
+        <item name="colorSurfaceVariant">@color/jax_color_surface_raised</item>
+        <item name="colorOnSurfaceVariant">@color/jax_color_on_surface_muted</item>
+        <item name="colorOutline">@color/jax_color_border</item>
+        <item name="colorError">@color/jax_color_error</item>
+        <item name="android:colorBackground">@color/jax_color_bg</item>
+        <item name="android:statusBarColor">@color/jax_color_bg</item>
+        <item name="android:navigationBarColor">@color/jax_color_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
         <item name="android:forceDarkAllowed">false</item>
+        <item name="android:windowBackground">@color/jax_color_bg</item>
     </style>
 </resources>

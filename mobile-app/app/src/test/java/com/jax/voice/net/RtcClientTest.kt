@@ -188,6 +188,28 @@ class RtcClientTest {
         assertEquals("无 onExitRoom 不得重启 MicRecorder", 0, exitedCount)
     }
 
+    @Test
+    fun `enter timeout followed by exit completes onExited exactly once`() {
+        client.enterRoom(makeSession())
+        Thread.sleep(15_250)
+        assertTrue(errors.any { it.first == "enter_timeout" })
+        client.exitRoom()
+        fireOnExitRoom(0)
+        Thread.sleep(100)
+
+        assertEquals("enter timeout 后真实退房只能完成一次", 1, exitedCount)
+    }
+
+    @Test
+    fun `enter timeout followed by missing exit callback uses fallback exactly once`() {
+        client.enterRoom(makeSession())
+        Thread.sleep(15_250)
+        client.exitRoom()
+        Thread.sleep(3_250)
+
+        assertEquals("enter timeout 后退房兜底必须完成一次", 1, exitedCount)
+    }
+
     // ---- 音量回调: totalVolume 0~100 -> rms 0~1 ----
     @Test
     fun `user voice volume maps to normalized rms`() {
