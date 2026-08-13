@@ -20,6 +20,7 @@ from ..voice.auth import (
 from ..voice.config import VoiceSecurityConfig, production_gate, runtime_missing
 from ..voice.errors import HTTP_STATUS, error_payload
 from ..voice.nonce import NonceService
+from ..voice.privacy import FakeRuntimeActions, PrivacyService
 from ..voice.rate_limit import RateLimiter
 from ..voice.rtc_session import RtcSessionService
 from ..voice.storage import VoiceStore
@@ -46,7 +47,8 @@ class CreateSidecarSessionRequest(BaseModel):
 
 
 class _SecuredDeps:
-    def __init__(self, store, service, validator, nonces, limiter, security, devices=None) -> None:
+    def __init__(self, store, service, validator, nonces, limiter, security, devices=None,
+                 privacy=None) -> None:
         self.store: VoiceStore = store
         self.service: RtcSessionService = service
         self.validator: CredentialValidator = validator
@@ -54,9 +56,22 @@ class _SecuredDeps:
         self.limiter: RateLimiter = limiter
         self.security: VoiceSecurityConfig = security
         self.devices = devices
+        self.privacy: PrivacyService = privacy
 
     def runtime_missing(self) -> list[str]:
         return runtime_missing(self.security)
+
+    def cloud_processing_gate(self) -> JSONResponse | None:
+        """cloud_processing_enabled 读时门禁（ADR-021 D1，fail-closed）。
+
+        读失败也拒绝（None 视为放行不了，返回 40301）。
+        """
+        try:
+            if self.privacy.get("cloud_processing_enabled"):
+                return None
+        except Exception:  # noqa: BLE001 - 读失败 fail-closed
+            logger.exception("privacy cloud_processing read failed")
+        return self.error(40301)
 
     def resolve_bearer(self, authorization: str) -> str | None:
         if not authorization:
@@ -77,13 +92,17 @@ class _SecuredDeps:
 def create_secured_voice_router(*, store: VoiceStore, service: RtcSessionService,
                                 validator: CredentialValidator, nonces: NonceService,
                                 limiter: RateLimiter, security: VoiceSecurityConfig,
-                                devices=None) -> APIRouter:
+                                devices=None, privacy: PrivacyService | None = None) -> APIRouter:
     """装配商业安全路由；production=True 且缺必需能力时抛 ProductionGateError（拒绝启动）
 
     devices 为 None 时设备管理端点不注册（fail-closed：不提供匿名设备旁路）。
+    privacy 为 None 时回退 FakeRuntimeActions（测试/非生产装配；生产传入真实实例）。
     """
     production_gate(security)
-    deps = _SecuredDeps(store, service, validator, nonces, limiter, security, devices=devices)
+    if privacy is None:
+        privacy = PrivacyService(store, FakeRuntimeActions())
+    deps = _SecuredDeps(store, service, validator, nonces, limiter, security,
+                        devices=devices, privacy=privacy)
     router = APIRouter(tags=["voice"])
     if devices is not None:
         from .routes_voice_devices import build_device_router
@@ -92,6 +111,13 @@ def create_secured_voice_router(*, store: VoiceStore, service: RtcSessionService
             build_device_router(store=store, validator=validator, nonces=nonces,
                                 limiter=limiter, security=security, devices=devices)
         )
+
+    from .routes_voice_privacy import build_privacy_router
+
+    router.include_router(
+        build_privacy_router(validator=validator, nonces=nonces, limiter=limiter,
+                             security=security, privacy=privacy)
+    )
 
     @router.post("/api/v1/voice/session", status_code=201)
     async def voice_session(req: CreateDeviceSessionRequest, request: Request):
@@ -114,6 +140,9 @@ def create_secured_voice_router(*, store: VoiceStore, service: RtcSessionService
         )
         if not allowed:
             return deps.error(42901, headers={"Retry-After": str(retry_after)})
+        denied = deps.cloud_processing_gate()
+        if denied is not None:
+            return denied
         try:
             data = deps.service.issue(req.device_id)
         except Exception:  # noqa: BLE001
@@ -170,6 +199,9 @@ def create_secured_voice_router(*, store: VoiceStore, service: RtcSessionService
         )
         if not allowed:
             return deps.error(42901, headers={"Retry-After": str(retry_after)})
+        denied = deps.cloud_processing_gate()
+        if denied is not None:
+            return denied
         claim = deps.store.consume_pending_sign_claim(
             req.session_id, req.device_id, req.claim_token
         )

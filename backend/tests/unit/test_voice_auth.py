@@ -308,7 +308,12 @@ def test_error_payload_and_status_table() -> None:
     # 2026-08-13 新增 50301 termination_unconfirmed（revoke 终止未确认）
     assert HTTP_STATUS[50301] == 503
     assert error_payload(50301) == {"code": 50301, "data": None, "message": "termination_unconfirmed"}
-    assert len(ERROR_MESSAGES) == 12
+    # 2026-08-13 ADR-021 新增 40301 privacy_disabled / 50302 privacy_action_failed
+    assert HTTP_STATUS[40301] == 403
+    assert error_payload(40301) == {"code": 40301, "data": None, "message": "privacy_disabled"}
+    assert HTTP_STATUS[50302] == 503
+    assert error_payload(50302) == {"code": 50302, "data": None, "message": "privacy_action_failed"}
+    assert len(ERROR_MESSAGES) == 14
     err = VoiceError(42901)
     assert err.code == 42901
     assert err.message == "rate_limited"

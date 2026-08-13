@@ -7,6 +7,7 @@
  */
 import { useEffect, useState } from "react";
 import { Bell, CheckCircle2, Loader2, Moon, Sun, X, XCircle } from "lucide-react";
+import { PrivacySettings } from "./PrivacySettings";
 
 export interface MonitorTarget {
   app_id: string;
@@ -108,6 +109,10 @@ export function Settings({ targets, onToggleTarget, onClose }: SettingsProps) {
             <span className="st-th-value mono">{row.value}</span>
           </div>
         ))}
+      </div>
+
+      <div className="st-section">
+        <PrivacySettings />
       </div>
 
       <div className="st-section">

@@ -30,6 +30,7 @@ from .push.manager import PushManager
 from .services.reminder_service import ReminderService
 from .utils.logger import setup_logging
 from .voice.config import load_voice
+from .voice.privacy import privacy_runtime
 
 setup_logging(app_config.settings.log_level)
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ def _build_secured_session_router():
     )
     from .voice.devices import DeviceService
     from .voice.nonce import NonceService
+    from .voice.privacy import PrivacyRuntimeActions, PrivacyService
     from .voice.rate_limit import RateLimitConfig, RateLimiter
     from .voice.rtc_session import RtcSessionConfig, RtcSessionService
     from .voice.storage import VoiceStore
@@ -97,6 +99,9 @@ def _build_secured_session_router():
     validator = CredentialValidator(
         store, security.owner_credential_hash, sidecar_credentials
     )
+    # 真实隐私 RuntimeActions（ADR-021 D4）：desktop_capture 走 late-bound orchestrator holder，
+    # lifespan 里 privacy_runtime.bind(orch) 完成绑定；cloud/mic/background 为 no-op。
+    privacy = PrivacyService(store, PrivacyRuntimeActions())
     return routes_voice.create_secured_voice_router(
         store=store,
         service=service,
@@ -105,6 +110,7 @@ def _build_secured_session_router():
         limiter=RateLimiter(store, RateLimitConfig()),
         security=security,
         devices=DeviceService(store),
+        privacy=privacy,
     )
 
 
@@ -123,6 +129,8 @@ async def lifespan(app: FastAPI):
     routes_control.push_manager = push
     routes_control.orchestrator = orch
     routes_capture.orchestrator = orch
+    # 隐私桌面捕获动作的 late-bound orchestrator 绑定（ADR-021 D4）
+    privacy_runtime.bind(orch)
 
     # V1.5 大脑闭环（O-011/O-012/O-013）
     deepseek = DeepSeekClient(app_config.settings, app_config.brain)

@@ -5,6 +5,9 @@
   客户端会按网关超时误重试）。新增 50301 termination_unconfirmed（HTTP 503，
   服务暂时不可用、可安全重试），RevokeTerminationError 迁移至 50301；
   50401 保留为上游超时语义（未变）。
+- 2026-08-13 ADR-021 新增 40301 privacy_disabled（HTTP 403，cloud 处理关闭时
+  签发被拒，fail-closed）与 50302 privacy_action_failed（HTTP 503，运行时动作
+  apply 失败且设置已回滚，可安全重试）。
 """
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ ERROR_MESSAGES: dict[int, str] = {
     40101: "auth_failed",
     40102: "nonce_replay",
     40103: "credential_revoked",
+    40301: "privacy_disabled",
     40401: "device_not_found",
     40801: "handshake_timeout",
     40901: "state_conflict",
@@ -20,6 +24,7 @@ ERROR_MESSAGES: dict[int, str] = {
     42901: "rate_limited",
     50300: "credential_unavailable",
     50301: "termination_unconfirmed",
+    50302: "privacy_action_failed",
     50401: "upstream_timeout",
 }
 
@@ -28,6 +33,7 @@ HTTP_STATUS: dict[int, int] = {
     40101: 401,
     40102: 401,
     40103: 401,
+    40301: 403,
     40401: 404,
     40801: 408,
     40901: 409,
@@ -35,6 +41,7 @@ HTTP_STATUS: dict[int, int] = {
     42901: 429,
     50300: 503,
     50301: 503,
+    50302: 503,
     50401: 504,
 }
 

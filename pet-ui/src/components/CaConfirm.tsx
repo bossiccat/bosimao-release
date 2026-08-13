@@ -7,11 +7,13 @@
  */
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ShieldCheck } from "lucide-react";
+import { ChevronDown, ShieldCheck } from "lucide-react";
+import { PrivacyNotice } from "./PrivacyNotice";
 
 export function CaConfirm({ onClose }: { onClose: () => void }) {
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showPrivacy, setShowPrivacy] = useState(false);
 
   const install = async () => {
     setInstalling(true);
@@ -46,8 +48,24 @@ export function CaConfirm({ onClose }: { onClose: () => void }) {
           该证书仅用于本机回环（127.0.0.1）HTTPS/WSS 加密，不用于远程连接。
         </p>
 
-        {/* 隐私说明入口占位：阶段 B 接「设置 → 隐私」说明页后替换为可点击链接 */}
-        <p className="ca-confirm-privacy">可在「设置 → 隐私」查看详细说明。</p>
+        {/* 隐私说明入口（阶段 B-2）：由占位文本升级为可展开的隐私说明区（ADR-021 D1） */}
+        <div className="ca-confirm-privacy">
+          <button
+            type="button"
+            className="ca-confirm-privacy-toggle"
+            aria-expanded={showPrivacy}
+            onClick={() => setShowPrivacy((v) => !v)}
+          >
+            <span>查看隐私说明</span>
+            <ChevronDown
+              size={13}
+              strokeWidth={2}
+              className={showPrivacy ? "ca-confirm-privacy-open" : ""}
+              aria-hidden="true"
+            />
+          </button>
+          {showPrivacy && <PrivacyNotice />}
+        </div>
 
         {error && (
           <p className="ca-confirm-error" role="alert">
@@ -108,6 +126,20 @@ export function CaConfirm({ onClose }: { onClose: () => void }) {
         .ca-confirm-privacy {
           font-size: 12px; color: var(--muted);
           margin-bottom: var(--space-4);
+        }
+        .ca-confirm-privacy-toggle {
+          display: inline-flex; align-items: center; gap: 4px;
+          border: none; background: transparent;
+          color: var(--accent); cursor: pointer;
+          font-size: 12px; font-family: var(--font-body);
+          padding: 0;
+          transition: color var(--motion-fast) var(--ease-standard);
+        }
+        .ca-confirm-privacy-toggle:hover { color: var(--accent-hover); }
+        .ca-confirm-privacy-toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+        .ca-confirm-privacy-open { transform: rotate(180deg); }
+        @media (prefers-reduced-motion: reduce) {
+          .ca-confirm-privacy-open { transform: none; }
         }
         .ca-confirm-error {
           font-size: 12px; color: var(--danger);

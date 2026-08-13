@@ -56,6 +56,8 @@ class Orchestrator:
         self._monitor_enabled = True
         self._task: asyncio.Task | None = None
         self._last_alert_at: dict[str, float] = {}
+        # 桌面捕获隐私开关暂停前仍在捕获的已授权窗口（精确恢复用，ADR-021 D1）
+        self._desktop_capture_paused: set[str] = set()
 
     # ---------- 生命周期 ----------
     async def start(self) -> None:
@@ -85,6 +87,32 @@ class Orchestrator:
 
     def stop_monitoring(self) -> None:
         self._monitor_enabled = False
+
+    def set_desktop_capture(self, enabled: bool) -> None:
+        """隐私开关：桌面捕获即时停/启（ADR-021 D1，隐私单端生效点）。
+
+        false → 停止监控循环 + 停止全部 WGC 会话 + 释放帧文件；
+                记录停止时仍在捕获的已授权窗口（供精确恢复）。
+        true  → 恢复监控循环 + locate_all + 仅对停止时记录的已授权窗口 start_wgc。
+                红线：不得误恢复未授权/新出现的窗口。
+        """
+        if enabled:
+            self.start_monitoring()
+            self._sessions.locate_all()
+            for app_id in self._desktop_capture_paused:
+                session = self._sessions.get(app_id)
+                if session is not None and session.authorized \
+                        and session.mode not in ("denied", "status-only"):
+                    self._sessions.start_wgc(app_id)
+            self._desktop_capture_paused.clear()
+            return
+        # 精确记录停止时仍在捕获的已授权窗口（wgc 非空 = 正在捕获；未授权窗口绝不在恢复集）
+        self._desktop_capture_paused = {
+            s.target.app_id for s in self._sessions.all()
+            if s.wgc is not None and s.authorized
+        }
+        self.stop_monitoring()
+        self._sessions.stop_all()
 
     async def trigger_test_alert(self, app_id: str, level: int = 4) -> bool:
         """手动触发提醒测试（构造类型化 DetectionResult 走 _maybe_alert 内部逻辑）。
