@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "checks": [
+    {
+      "id": "sidecar-verify",
+      "cwd": ".",
+      "argv": ["node", "scripts/build-sidecar-external-bin.js", "--verify-only"],
+      "timeout_seconds": 600,
+      "expected_exit": 0,
+      "evidence_class": "ci-command"
+    },
+    {
+      "id": "tauri-release-build",
+      "cwd": "pet-ui/src-tauri",
+      "argv": ["cargo", "build", "--release"],
+      "timeout_seconds": 1800,
+      "expected_exit": 0,
+      "evidence_class": "ci-command"
+    }
+  ]
+}

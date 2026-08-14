@@ -1,0 +1,22 @@
+{
+  "claim_id": "android-duplex-audio",
+  "state": "EvidencePending",
+  "owner": "impl-team",
+  "reviewer": "independent-qa",
+  "risk": "Android 双工语音未验证真实麦克风/扬声器/TRTC 双向音频",
+  "target": {
+    "artifact_commit": "",
+    "artifact_sha256": "",
+    "artifact": "当前源码可归因签名 release APK + packaged Windows + TRTC"
+  },
+  "required_scenarios": [
+    "enterRoom 异步成功回调状态机",
+    "失败/超时/取消/晚回调/重入的幂等 teardown",
+    "exitRoom 与 stopLocalAudio",
+    "下行播放 / 蓝牙 / 耳机 / 音频焦点",
+    "锁屏 / 后台 / 网络切换",
+    "连续两轮真实双向语音"
+  ],
+  "evidence": [],
+  "superseded_by": null
+}

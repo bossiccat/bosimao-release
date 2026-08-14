@@ -1,0 +1,23 @@
+{
+  "claim_id": "windows-popup-free",
+  "state": "EvidencePending",
+  "owner": "impl-team",
+  "reviewer": "independent-qa",
+  "risk": "客户 Windows 交互桌面出现产品后代命令窗口",
+  "target": {
+    "artifact_commit": "",
+    "artifact_sha256": "",
+    "artifact": "packaged jax-pet.exe -> Tauri SidecarSupervisor -> jax-rtc-sidecar.exe"
+  },
+  "required_scenarios": [
+    "首次启动",
+    "App 重启",
+    "relay 故障恢复",
+    "rtc bridge 故障恢复",
+    "两个历史五分钟 watchdog 周期",
+    "正常退出后重启"
+  ],
+  "legacy_tasks": ["Jax-Watchdog-AtStartup", "Jax-Watchdog-Every5Min", "jax-watchdog"],
+  "evidence": [],
+  "superseded_by": null
+}
