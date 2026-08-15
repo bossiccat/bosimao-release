@@ -1,6 +1,7 @@
 """Run allow-listed release checks and persist non-overwritable command evidence."""
 
 import hashlib
+import hmac
 import json
 import os
 import platform
@@ -13,6 +14,13 @@ from pathlib import Path
 
 RESULT_SCHEMA = "release-governance/locked-check-result/v1"
 RELEASE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _evidence_hmac_key():
+    value = os.environ.get("RELEASE_EVIDENCE_HMAC_KEY")
+    if not value:
+        raise LockedCheckError("EVIDENCE_HMAC_KEY_MISSING", "CI evidence HMAC key is required")
+    return value.encode("utf-8")
 CHECK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -135,11 +143,16 @@ def _reserve_result_path(evidence_root, release_id, check_id):
     return target / "result.json"
 
 
-def _write_result(result_path, result):
+def _write_result(result_path, result, hmac_key):
     payload = (json.dumps(result, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    sidecar_path = result_path.with_suffix(".hmac")
     try:
         with result_path.open("xb") as handle:
             handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        with sidecar_path.open("x", encoding="ascii", newline="\n") as handle:
+            handle.write(hmac.new(hmac_key, payload, hashlib.sha256).hexdigest())
             handle.flush()
             os.fsync(handle.fileno())
     except FileExistsError as exc:
@@ -179,6 +192,7 @@ def run_locked_check(
     if not check_cwd.is_dir():
         raise LockedCheckError("CWD_MISSING", "locked cwd does not exist")
 
+    hmac_key = _evidence_hmac_key()
     commit = get_current_commit(repo)
     result_path = _reserve_result_path(evidence_root, release_id, check_id)
     argv = list(check["argv"])
@@ -196,6 +210,8 @@ def run_locked_check(
         "collector": collector,
     }
 
+    child_environment = os.environ.copy()
+    child_environment.pop("RELEASE_EVIDENCE_HMAC_KEY", None)
     try:
         completed = subprocess.run(
             argv,
@@ -204,6 +220,7 @@ def run_locked_check(
             shell=False,
             capture_output=True,
             timeout=check["timeout_seconds"],
+            env=child_environment,
         )
         stdout = completed.stdout or b""
         stderr = completed.stderr or b""
@@ -215,7 +232,7 @@ def run_locked_check(
             "stderr_sha256": _sha256_bytes(stderr),
             "status": "passed" if completed.returncode == check["expected_exit"] else "failed",
         }
-        _write_result(result_path, result)
+        _write_result(result_path, result, hmac_key)
         if completed.returncode != check["expected_exit"]:
             raise LockedCheckError(
                 "CHECK_EXIT_MISMATCH",
@@ -235,6 +252,7 @@ def run_locked_check(
                 "stderr_sha256": _sha256_bytes(stderr),
                 "status": "timeout",
             },
+            hmac_key,
         )
         raise LockedCheckError(
             "CHECK_TIMEOUT",
@@ -252,5 +270,6 @@ def run_locked_check(
                 "stderr_sha256": _sha256_bytes(encoded),
                 "status": "launch-error",
             },
+            hmac_key,
         )
         raise LockedCheckError("CHECK_LAUNCH_FAILED", "cannot start locked check: %s" % exc) from exc

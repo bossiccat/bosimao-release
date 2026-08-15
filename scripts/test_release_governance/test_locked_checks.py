@@ -1,6 +1,7 @@
 """RED tests for the immutable locked release-check runner (Task 3)."""
 
 import hashlib
+import hmac
 import json
 import subprocess
 import sys
@@ -47,6 +48,7 @@ def _runner(tmp_path, monkeypatch, checks):
     lock_path = tmp_path / "command-lock.json"
     evidence_root = tmp_path / "evidence"
     _write_lock(lock_path, checks)
+    monkeypatch.setenv("RELEASE_EVIDENCE_HMAC_KEY", "release-test-key")
     monkeypatch.setattr(
         "scripts.release_governance.run_locked_checks.get_current_commit",
         lambda repo_root: COMMIT,
@@ -186,6 +188,10 @@ def test_result_records_hashes_utc_commit_and_environment(tmp_path, monkeypatch)
     result = call("records")
     result_path = evidence_root / "release-001" / "ci-command" / "records" / "result.json"
     persisted = json.loads(result_path.read_text(encoding="utf-8"))
+    sidecar_path = result_path.with_suffix(".hmac")
+    assert sidecar_path.is_file()
+    expected_hmac = hmac.new(b"release-test-key", result_path.read_bytes(), hashlib.sha256).hexdigest()
+    assert sidecar_path.read_text(encoding="ascii") == expected_hmac
 
     assert result == persisted
     assert persisted["schema"] == "release-governance/locked-check-result/v1"
@@ -220,3 +226,24 @@ def test_existing_release_check_evidence_cannot_be_overwritten(tmp_path, monkeyp
         call("immutable")
 
     assert json.loads(result_path.read_text(encoding="utf-8")) == first
+
+
+def test_locked_child_does_not_inherit_evidence_hmac_key(tmp_path, monkeypatch):
+    call, _ = _runner(
+        tmp_path,
+        monkeypatch,
+        [
+            _check(
+                "no-secret-leak",
+                [
+                    sys.executable,
+                    "-c",
+                    "import os, sys; raise SystemExit(37 if 'RELEASE_EVIDENCE_HMAC_KEY' in os.environ else 0)",
+                ],
+            )
+        ],
+    )
+
+    result = call("no-secret-leak")
+
+    assert result["status"] == "passed"
