@@ -1,0 +1,7 @@
+# Repository release-governance controls require designated maintainer review.
+/governance/ @release-governance-maintainers
+/scripts/release_governance/ @release-governance-maintainers
+/scripts/release-preflight.py @release-governance-maintainers
+/.github/workflows/release-governance.yml @release-governance-maintainers
+/.github/CODEOWNERS @release-governance-maintainers
+/docs/governance/release-harness.md @release-governance-maintainers

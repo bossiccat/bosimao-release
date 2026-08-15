@@ -109,6 +109,9 @@ audit-*.txt
 outputs/
 overview.md
 
+# Release-governance CI generated evidence only
+artifacts/release-evidence/
+
 # 构建产物
 *.apk
 

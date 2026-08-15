@@ -121,6 +121,10 @@ def test_runner_uses_exact_locked_argv_without_shell(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "scripts.release_governance.run_locked_checks.subprocess.run", fake_run
     )
+    monkeypatch.setattr(
+        "scripts.release_governance.run_locked_checks._environment_fingerprint",
+        lambda: {"platform": "test", "python": "test"},
+    )
 
     call("exact")
 

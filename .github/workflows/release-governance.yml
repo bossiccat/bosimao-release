@@ -1,0 +1,150 @@
+name: release-governance
+
+on:
+  pull_request:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-candidate:
+    name: build-candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build immutable release candidate
+        run: >-
+          git archive --format=tar.gz
+          --output="${{ runner.temp }}/release-candidate.tar.gz"
+          "$GITHUB_SHA"
+      - name: Write candidate checksum
+        run: >-
+          (cd "${{ runner.temp }}" &&
+          sha256sum release-candidate.tar.gz > release-candidate.tar.gz.sha256)
+      - name: Write candidate provenance
+        run: >-
+          python scripts/release_governance/verify_candidate_provenance.py create
+          --candidate-path "${{ runner.temp }}/release-candidate.tar.gz"
+          --output "${{ runner.temp }}/release-candidate.provenance.json"
+          --repo-root .
+      - name: Upload candidate, checksum, and provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-candidate
+          path: |
+            ${{ runner.temp }}/release-candidate.tar.gz
+            ${{ runner.temp }}/release-candidate.tar.gz.sha256
+            ${{ runner.temp }}/release-candidate.provenance.json
+          if-no-files-found: error
+
+  verify:
+    name: verify
+    needs: build-candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Download release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release-input
+      - name: Verify candidate checksum
+        working-directory: ${{ runner.temp }}/release-input
+        run: sha256sum --check release-candidate.tar.gz.sha256
+      - name: Verify candidate provenance
+        run: >-
+          python scripts/release_governance/verify_candidate_provenance.py verify
+          --candidate-path "${{ runner.temp }}/release-input/release-candidate.tar.gz"
+          --provenance-json "${{ runner.temp }}/release-input/release-candidate.provenance.json"
+          --expected-commit "${{ github.sha }}"
+          --repo-root .
+      - name: Verify release claims
+        run: >-
+          python scripts/release-preflight.py verify
+          --policy governance/release-policy.json
+          --claims governance/claims
+          --command-lock governance/command-lock.json
+          --repo-root .
+          --artifact-path "${{ runner.temp }}/release-input/release-candidate.tar.gz"
+          --evidence-root artifacts/release-evidence
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Install test runner
+        run: python -m pip install --disable-pip-version-check pytest==9.1.1
+      - name: Run release governance regression tests
+        run: python -m pytest scripts/test_release_governance -q
+
+  release:
+    name: release
+    if: >-
+      github.event_name == 'push' && github.ref_type == 'tag' &&
+      startsWith(github.ref_name, 'v')
+    needs: [build-candidate, verify, test]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Download release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release-input
+      - name: Verify candidate checksum
+        working-directory: ${{ runner.temp }}/release-input
+        run: sha256sum --check release-candidate.tar.gz.sha256
+      - name: Verify candidate provenance
+        run: >-
+          python scripts/release_governance/verify_candidate_provenance.py verify
+          --candidate-path "${{ runner.temp }}/release-input/release-candidate.tar.gz"
+          --provenance-json "${{ runner.temp }}/release-input/release-candidate.provenance.json"
+          --expected-commit "${{ github.sha }}"
+          --repo-root .
+      - name: Create release evidence and manifest
+        if: success()
+        env:
+          RELEASE_EVIDENCE_HMAC_KEY: ${{ secrets.RELEASE_EVIDENCE_HMAC_KEY }}
+        run: >-
+          python scripts/release-preflight.py release
+          --release-id "${{ github.run_id }}-${{ github.run_attempt }}"
+          --policy governance/release-policy.json
+          --claims governance/claims
+          --command-lock governance/command-lock.json
+          --repo-root .
+          --artifact-path "${{ runner.temp }}/release-input/release-candidate.tar.gz"
+          --evidence-root artifacts/release-evidence
+          --ci-run-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      - name: Upload release evidence and manifest
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-evidence-${{ github.run_id }}
+          path: |
+            artifacts/release-evidence/
+            artifacts/release-evidence/**/release-manifest.json
+          if-no-files-found: warn

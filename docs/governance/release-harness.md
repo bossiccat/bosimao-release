@@ -12,6 +12,26 @@
 
 因此本地 `verify` / `release` 只代表仓库内控制面结果。未配置远端 protected branch、required status、production environment reviewer 和 CI-only 发布凭据时，治理等级只能是 `LOCAL_ONLY`。
 
+## GitHub 托管前置与当前等级
+
+仓库中的 `.github/workflows/release-governance.yml` 和 `.github/CODEOWNERS` 只声明 CI 契约，不能自行创建或验证 GitHub 的远端保护设置。尤其是 GitHub Free 私有仓库的可用保护能力、仓库管理员实际启用状态与生产审批策略，当前均未验证。因此当前等级仍为 `LOCAL_ONLY`，不得声称生产审批、不可绕过的分支保护或 CI-only 发布凭据已经启用。
+
+仓库管理员必须在 GitHub 托管端手工确认并启用以下控制：保护 default branch；限制 `v*` tag 创建；要求 CODEOWNERS 审核；将 `release-governance` 设为 required status；为 `production` environment 配置 reviewer；只将发布 token 和 `RELEASE_EVIDENCE_HMAC_KEY` 授予该 CI environment。完成后还必须以实际 PR 和 `v*` tag run 复核这些规则；在该复核留下证据前，Harness 不可标记为生产就绪。
+
+`.github/CODEOWNERS` 中的 `@release-governance-maintainers` 是当前没有远端组织信息时保留的待替换占位，不是已验证的 GitHub owner。仓库管理员必须将它改为实际 `@organization/team`，为该团队授予仓库 write 权限，并启用 GitHub 的 `Require review from Code Owners`。在远端确认这些设置以前，CODEOWNERS 文件本身不提供审批保证。
+
+## CI 工件与 PR 边界
+
+`build-candidate` job 由当前 `$GITHUB_SHA` 生成唯一的 `release-candidate.tar.gz`、同目录 SHA-256 sidecar，以及受版本控制 helper 生成的 `release-candidate.provenance.json`。provenance 固定使用 `release-governance/candidate-provenance/v1` schema，并绑定 build job 当前 HEAD 的完整 commit 与候选工件精确字节的 SHA-256。
+
+`verify` 与 tag-only `release` 都显式 checkout `github.sha`，只下载这三个 artifact 文件，先执行 `sha256sum --check`，再调用 `scripts/release_governance/verify_candidate_provenance.py verify`，最后才调用各自的 preflight。helper 会重新读取当前 checkout 的 `git rev-parse HEAD`，要求 provenance `git_commit`、workflow expected commit、当前 HEAD 三者相等，并重算候选工件 SHA-256 后要求其匹配 provenance。工件下载位置位于 runner 临时目录，避免污染仓库工作区并绕过 fail-closed clean-worktree 检查。
+
+artifact store 的 checksum 只证明下载的字节与上传的 checksum sidecar 一致，即传输完整性；它不单独证明该工件属于本次 workflow 所 checkout 的源码。provenance 绑定只用于阻断候选工件、commit 和 runner HEAD 之间的身份错配；它不替代远端 protected branch、受限 tag 创建、required status、production reviewer、CI-only 凭据或 artifact store 的访问控制。
+
+PR 仍运行无密钥回归测试：`test` job 覆盖 release-governance 的静态与行为回归，`verify` job 对同一候选工件执行 Claim 检查；两者均不接收 production environment 或 `RELEASE_EVIDENCE_HMAC_KEY`。PR 不会调度 `release` job，因而不会创建官方发布或访问发布环境。
+
+当前 release job 只完成 preflight 与证据上传；它不会执行官方发布命令。官方发布命令与最小权限发布凭据未接入，因此凭据锁定目标未完成。此状态不代表生产就绪，也不能作为产品已发布或生产审批已生效的证据。
+
 ## 输入可信边界
 
 `release-preflight.py release` 不接受调用方提供的 artifact SHA、旧 manifest 或手工 PASS。它在当前进程中读取 `--artifact-path` 的精确字节并现场计算 SHA-256，并在以下三个时点重新验证：
