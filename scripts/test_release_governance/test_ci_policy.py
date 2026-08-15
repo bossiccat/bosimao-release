@@ -124,6 +124,13 @@ def test_codeowners_protect_governance_release_scripts_and_workflow():
         assert protected_path in owners
 
 
+def test_codeowners_uses_real_repository_owner_not_placeholder_team():
+    owners = CODEOWNERS.read_text(encoding="utf-8")
+
+    assert "@release-governance-maintainers" not in owners
+    assert "@jinhong1688" in owners
+
+
 def test_gitignore_only_adds_generated_release_evidence_directory():
     gitignore = GITIGNORE.read_text(encoding="utf-8")
 
@@ -133,13 +140,16 @@ def test_gitignore_only_adds_generated_release_evidence_directory():
 def test_documentation_keeps_unverified_github_settings_at_local_only():
     document = HARNESS_DOC.read_text(encoding="utf-8")
 
-    assert "GitHub Free 私有仓库" in document
+    assert "bossiccat/bosimao-release" in document
+    assert "GitHub Free 私有组织仓库" in document
     assert "LOCAL_ONLY" in document
-    assert "未验证" in document
-    assert "production environment reviewer" in document
-    assert "@release-governance-maintainers" in document
-    assert "@organization/team" in document
+    assert "production environment" in document
+    assert "`v*` tag" in document
+    assert "当前套餐未提供 required reviewer" in document
+    assert "@jinhong1688" in document
+    assert "owner 与 reviewer 分离" in document
     assert "Require review from Code Owners" in document
+    assert "@release-governance-maintainers" not in document
 
 
 def test_documentation_does_not_call_preflight_only_release_production_ready():
