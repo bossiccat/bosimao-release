@@ -52,8 +52,9 @@ pet-ui/src-tauri/binaries/jax-rtc-sidecar-runtime/
 # 审计临时目录
 backend/.audit_tmp/
 
-# WorkBuddy 会话元数据
+# WorkBuddy 会话元数据与隔离工作树
 .workbuddy/
+/.worktrees/
 
 # 旧 venv 备份（可手动删除）
 .venv_old/
