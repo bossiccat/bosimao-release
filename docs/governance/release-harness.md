@@ -14,11 +14,11 @@
 
 ## GitHub 托管前置与当前等级
 
-仓库中的 `.github/workflows/release-governance.yml` 和 `.github/CODEOWNERS` 只声明 CI 契约，不能自行创建或验证 GitHub 的远端保护设置。尤其是 GitHub Free 私有仓库的可用保护能力、仓库管理员实际启用状态与生产审批策略，当前均未验证。因此当前等级仍为 `LOCAL_ONLY`，不得声称生产审批、不可绕过的分支保护或 CI-only 发布凭据已经启用。
+仓库中的 `.github/workflows/release-governance.yml` 和 `.github/CODEOWNERS` 只声明 CI 契约，不能自行创建或验证 GitHub 的远端保护设置。远端私有仓库 `bossiccat/bosimao-release` 已建立，默认分支为 `master`；GitHub Free 私有组织仓库当前不提供本项目所需的完整 Rulesets 强制能力。因此当前等级仍为 `LOCAL_ONLY`，不得声称生产审批或不可绕过的分支保护已经启用。
 
-仓库管理员必须在 GitHub 托管端手工确认并启用以下控制：保护 default branch；限制 `v*` tag 创建；要求 CODEOWNERS 审核；将 `release-governance` 设为 required status；为 `production` environment 配置 reviewer；只将发布 token 和 `RELEASE_EVIDENCE_HMAC_KEY` 授予该 CI environment。完成后还必须以实际 PR 和 `v*` tag run 复核这些规则；在该复核留下证据前，Harness 不可标记为生产就绪。
+仓库管理员必须在 GitHub 托管端确认并启用以下控制：保护 default branch；限制 `v*` tag 创建；要求 CODEOWNERS 审核；将 `release-governance` 设为 required status；为 `production` environment 配置 reviewer；只将发布 token 和 `RELEASE_EVIDENCE_HMAC_KEY` 授予该 CI environment。当前 `production` environment 已创建且部署来源限制为 `v*` tag，但当前套餐未提供 required reviewer。完成套餐升级或等价外部门禁后，还必须以实际 PR 和 `v*` tag run 复核这些规则；在该复核留下证据前，Harness 不可标记为生产就绪。
 
-`.github/CODEOWNERS` 中的 `@release-governance-maintainers` 是当前没有远端组织信息时保留的待替换占位，不是已验证的 GitHub owner。仓库管理员必须将它改为实际 `@organization/team`，为该团队授予仓库 write 权限，并启用 GitHub 的 `Require review from Code Owners`。在远端确认这些设置以前，CODEOWNERS 文件本身不提供审批保证。
+`.github/CODEOWNERS` 已绑定经 GitHub 组织成员 API 确认为 `bossiccat` 管理员的 `@jinhong1688`，不再引用不存在的占位团队。单一管理员 owner 只能确保 GitHub 能解析 owner 身份，不能形成 owner 与 reviewer 分离，也不能替代 `Require review from Code Owners` 远端规则；在独立 reviewer 和远端保护生效以前，CODEOWNERS 文件本身不提供不可绕过的审批保证。
 
 ## CI 工件与 PR 边界
 
