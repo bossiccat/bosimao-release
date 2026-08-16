@@ -41,6 +41,25 @@ jobs:
           packages: platform-tools platforms;android-35 build-tools;35.0.0
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@017a9effdb900e5b5b2fddfb590a105619dca3c3 # v4.4.2
+      - name: Prepare sherpa-onnx dependencies
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\scripts\fetch-deps.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $modelDir = "app/src/main/assets/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
+          $required = @(
+            "app/libs/sherpa-onnx-1.13.4.aar",
+            "$modelDir/tokens.txt",
+            "$modelDir/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+            "$modelDir/decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+            "$modelDir/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              Write-Error "Missing Android dependency file: $file"
+              exit 1
+            }
+          }
       - name: Run gate and capture log
         run: |
           $ErrorActionPreference = "Stop"
