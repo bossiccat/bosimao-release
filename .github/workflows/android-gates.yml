@@ -1,0 +1,113 @@
+name: Android gates
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - "mobile-app/**"
+      - ".github/workflows/android-gates.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android-gate:
+    name: Android gate (${{ matrix.gate.name }})
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        gate:
+          - { name: compileDebugKotlin, task: compileDebugKotlin }
+          - { name: testDebugUnitTest, task: ":app:testDebugUnitTest" }
+          - { name: assembleDebug, task: ":app:assembleDebug" }
+          - { name: assembleRelease, task: ":app:assembleRelease" }
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: mobile-app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up JDK 17
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Android SDK 35
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@017a9effdb900e5b5b2fddfb590a105619dca3c3 # v4.4.2
+      - name: Run gate and capture log
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:GRADLE_USER_HOME = Join-Path $env:RUNNER_TEMP "gradle-user-home"
+          $env:ANDROID_USER_HOME = Join-Path $env:RUNNER_TEMP "android-user-home"
+          New-Item -ItemType Directory -Force $env:GRADLE_USER_HOME, $env:ANDROID_USER_HOME | Out-Null
+          New-Item -ItemType Directory -Force ci-logs | Out-Null
+          $log = "ci-logs/${{ matrix.gate.name }}.log"
+          & .\gradlew.bat "${{ matrix.gate.task }}" --no-daemon --stacktrace --console=plain *>&1 | Tee-Object -FilePath $log
+          $exitCode = $LASTEXITCODE
+          Set-Content -Path "ci-logs/${{ matrix.gate.name }}.exit" -Value "exit=$exitCode"
+          if ($exitCode -ne 0) { exit $exitCode }
+      - name: Record APK provenance
+        if: always()
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateName = "${{ matrix.gate.name }}"
+          $provenance = "ci-logs/apk-provenance.txt"
+          New-Item -ItemType Directory -Force ci-logs | Out-Null
+          $apk = Get-ChildItem "app/build/outputs/apk" -Filter "*release*.apk" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $apk) {
+            Set-Content -Path $provenance -Value "APK_NONE=No release APK produced"
+            Add-Content -Path $provenance -Value "APKSIGNER_COMMAND=not-run (release APK missing)"
+            Add-Content -Path $provenance -Value "APKSIGNER_EXIT=UNKNOWN"
+            Add-Content -Path $provenance -Value "RELEASE_SIGNING_STATUS=UNKNOWN"
+            Add-Content -Path $provenance -Value "RELEASE_READY=NO"
+            if ($gateName -eq "assembleRelease") { exit 1 }
+            exit 0
+          }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $apk.FullName).Hash
+          Set-Content -Path $provenance -Value "APK_PATH=$($apk.FullName)"
+          Add-Content -Path $provenance -Value "APK_SHA256=$hash"
+          $sdkRoot = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { $env:ANDROID_SDK_ROOT }
+          $apksigner = if ($sdkRoot) { Join-Path $sdkRoot "build-tools\35.0.0\apksigner.bat" } else { $null }
+          if ($null -eq $apksigner -or -not (Test-Path -LiteralPath $apksigner)) {
+            Add-Content -Path $provenance -Value "APKSIGNER_COMMAND=missing (build-tools;35.0.0/apksigner.bat)"
+            Add-Content -Path $provenance -Value "APKSIGNER_EXIT=UNKNOWN"
+            Add-Content -Path $provenance -Value "RELEASE_SIGNING_STATUS=UNKNOWN"
+            Add-Content -Path $provenance -Value "RELEASE_READY=NO"
+            if ($gateName -eq "assembleRelease") { exit 1 }
+            exit 0
+          }
+          Add-Content -Path $provenance -Value "APKSIGNER_COMMAND=$apksigner verify --print-certs $($apk.FullName)"
+          $verifyOutput = @(& $apksigner verify --print-certs $apk.FullName 2>&1)
+          $verifyExit = $LASTEXITCODE
+          $summary = (($verifyOutput | Out-String).Trim() -replace "\s+", " ")
+          if ($summary.Length -gt 4000) { $summary = $summary.Substring(0, 4000) }
+          Add-Content -Path $provenance -Value "APKSIGNER_EXIT=$verifyExit"
+          Add-Content -Path $provenance -Value "APKSIGNER_OUTPUT_SUMMARY=$summary"
+          if ($verifyExit -eq 0 -and $summary -match "(?i)Signer #\d+ certificate") {
+            Add-Content -Path $provenance -Value "RELEASE_SIGNING_STATUS=SIGNED"
+            Add-Content -Path $provenance -Value "RELEASE_READY=YES"
+          } elseif ($verifyExit -ne 0 -and $summary -match "(?i)(DOES NOT VERIFY|no signers|not signed|no signature)") {
+            Add-Content -Path $provenance -Value "RELEASE_SIGNING_STATUS=UNSIGNED"
+            Add-Content -Path $provenance -Value "RELEASE_READY=NO"
+          } else {
+            Add-Content -Path $provenance -Value "RELEASE_SIGNING_STATUS=UNKNOWN"
+            Add-Content -Path $provenance -Value "RELEASE_READY=NO"
+            if ($gateName -eq "assembleRelease") { exit 1 }
+          }
+      - name: Upload gate logs and APKs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-${{ matrix.gate.name }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            mobile-app/ci-logs
+            mobile-app/app/build/outputs/apk/**/*.apk

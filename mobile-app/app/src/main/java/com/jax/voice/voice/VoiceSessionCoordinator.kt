@@ -90,8 +90,13 @@ class VoiceSessionCoordinator(
         scope.launch { channel.send(Event.Cancel) }
     }
 
-    /** 上报当前会话失败（如 RTC onError）；IDLE 时忽略 */
-    fun postFailure(code: String, message: String) {
+    /** 真实 SDK 进房成功；调用方必须传入发起 enter 时捕获的 generation。 */
+    fun postEnterSucceeded(generation: Long) {
+        scope.launch { channel.send(Event.EnterSucceeded(generation)) }
+    }
+
+    /** 会话失败；调用方必须传入产生该回调的 generation，禁止回调时读取当前代数。 */
+    fun postFailure(generation: Long, code: String, message: String) {
         scope.launch { channel.send(Event.Failure(generation, code, message)) }
     }
 
@@ -235,7 +240,6 @@ class VoiceSessionCoordinator(
         enterJob = scope.launch {
             try {
                 enterRoom(gen, session)
-                channel.send(Event.EnterSucceeded(gen))
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
