@@ -105,7 +105,10 @@ class VoiceForegroundService : Service() {
             onRms = { VoiceController.setRms(it) },
             onError = { code, msg ->
                 VoiceController.setLastError("进房失败: $code $msg")
-                coordinator?.postFailure(code, msg)
+            },
+            onEntered = { generation -> coordinator?.postEnterSucceeded(generation) },
+            onSessionFailure = { generation, code, msg ->
+                coordinator?.postFailure(generation, code, msg)
             },
             onExited = { exitGate?.complete(Unit) }
         )
@@ -158,8 +161,9 @@ class VoiceForegroundService : Service() {
                 )
                 VoiceSessionInfo(s.roomId, s.userId, s.userSig, s.sdkAppId, s.sessionId)
             },
-            enterRoom = { _, session ->
+            enterRoom = { generation, session ->
                 val client = rtcClient ?: throw IllegalStateException("rtc client not ready")
+                exitGate = CompletableDeferred()
                 client.enterRoom(
                     VoiceSessionApi.VoiceSession(
                         roomId = session.roomId,
@@ -168,14 +172,14 @@ class VoiceForegroundService : Service() {
                         sdkAppId = session.sdkAppId,
                         scene = "trtc_full_duplex",
                         sessionId = session.sessionId
-                    )
+                    ),
+                    generation = generation
                 )
             },
             exitRoom = { _ ->
                 val client = rtcClient
-                if (client != null && (client.isInRoom() || client.hasPendingEnter())) {
-                    val gate = CompletableDeferred<Unit>()
-                    exitGate = gate
+                if (client != null && client.hasActiveAttempt()) {
+                    val gate = exitGate ?: CompletableDeferred<Unit>().also { exitGate = it }
                     client.exitRoom()
                     gate.await() // 等真实退房回调（RtcClient 3s 兜底）；coordinator 退出超时再兜底
                 }

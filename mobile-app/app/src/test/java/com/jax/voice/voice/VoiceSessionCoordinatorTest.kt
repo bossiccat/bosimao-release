@@ -43,7 +43,6 @@ class VoiceSessionCoordinatorTest {
     private val exitCalls = AtomicInteger(0)
     private val signGates = mutableMapOf<Long, CompletableDeferred<VoiceSessionInfo>>()
     private val signSources = mutableMapOf<Long, String>()
-    private lateinit var enterGate: CompletableDeferred<Unit>
     private lateinit var exitGate: CompletableDeferred<Unit>
 
     private fun session(id: String) = VoiceSessionInfo(
@@ -60,7 +59,6 @@ class VoiceSessionCoordinatorTest {
         signCalls.set(0); enterCalls.set(0); exitCalls.set(0)
         signGates.clear()
         signSources.clear()
-        enterGate = CompletableDeferred()
         exitGate = CompletableDeferred()
     }
 
@@ -86,7 +84,7 @@ class VoiceSessionCoordinatorTest {
                 signGates[gen] = gate
                 if (stubbornSign) withContext(NonCancellable) { gate.await() } else gate.await()
             },
-            enterRoom = { _, _ -> enterCalls.incrementAndGet(); enterGate.await() },
+            enterRoom = { _, _ -> enterCalls.incrementAndGet() },
             exitRoom = { _ -> exitCalls.incrementAndGet(); exitGate.await() },
             signTimeoutMs = signTimeoutMs,
             enterTimeoutMs = enterTimeoutMs,
@@ -136,6 +134,37 @@ class VoiceSessionCoordinatorTest {
         delay(100)
         assertEquals(0, enterCalls.get())
         assertEquals(VoiceSessionState.IDLE, coordinator.model.value.state)
+    }
+
+    @Test
+    fun `enter request returning does not report IN_ROOM before SDK success callback`() = runBlocking<Unit> {
+        coordinator = buildCoordinator()
+        coordinator.start("main")
+        awaitState(VoiceSessionState.SIGNING)
+        awaitAnySignGate().complete(session("async-enter"))
+        awaitState(VoiceSessionState.ENTERING)
+        withTimeout(3_000) { while (enterCalls.get() < 1) delay(5) }
+        delay(100)
+
+        assertEquals(
+            "TRTC enterRoom 立即返回仅表示请求已提交，真实 onEnterRoom 成功回调前必须保持 ENTERING",
+            VoiceSessionState.ENTERING,
+            coordinator.model.value.state
+        )
+    }
+
+    @Test
+    fun `current generation SDK success is required to enter IN_ROOM`() = runBlocking<Unit> {
+        coordinator = buildCoordinator()
+        coordinator.start("main")
+        awaitState(VoiceSessionState.SIGNING)
+        awaitAnySignGate().complete(session("callback-success"))
+        val entering = awaitState(VoiceSessionState.ENTERING)
+        withTimeout(3_000) { while (enterCalls.get() < 1) delay(5) }
+
+        coordinator.postEnterSucceeded(entering.generation)
+
+        awaitState(VoiceSessionState.IN_ROOM)
     }
 
     // ---- AC-06: ENTERING 取消 → EXITING → 退房完成后 IDLE ----
@@ -236,10 +265,34 @@ class VoiceSessionCoordinatorTest {
         assertEquals(VoiceSessionState.SIGNING, coordinator.model.value.state)
         // gen2 正常完成
         awaitSignGate(2).complete(session("gen2"))
-        awaitState(VoiceSessionState.ENTERING)
-        enterGate.complete(Unit)
+        val entering = awaitState(VoiceSessionState.ENTERING)
+        coordinator.postEnterSucceeded(entering.generation)
         awaitState(VoiceSessionState.IN_ROOM)
         assertEquals(1, enterCalls.get())
+    }
+
+    @Test
+    fun `late SDK callbacks from old generation cannot revive current session`() = runBlocking<Unit> {
+        coordinator = buildCoordinator()
+        coordinator.start("gen1")
+        awaitState(VoiceSessionState.SIGNING)
+        awaitSignGate(1).complete(session("gen1"))
+        awaitState(VoiceSessionState.ENTERING)
+        coordinator.cancel()
+        awaitState(VoiceSessionState.EXITING)
+        exitGate.complete(Unit)
+        awaitState(VoiceSessionState.IDLE)
+
+        exitGate = CompletableDeferred()
+        coordinator.start("gen2")
+        awaitState(VoiceSessionState.SIGNING)
+        coordinator.postEnterSucceeded(1)
+        coordinator.postFailure(1, "late_enter", "旧会话失败")
+        delay(100)
+
+        assertEquals(VoiceSessionState.SIGNING, coordinator.model.value.state)
+        assertEquals(2, coordinator.model.value.generation)
+        assertEquals(null, coordinator.model.value.error)
     }
 
     // ---- 快速点击 20 次只产生一个活动会话 ----
@@ -261,7 +314,7 @@ class VoiceSessionCoordinatorTest {
         coordinator = buildCoordinator()
         coordinator.start("main")
         awaitState(VoiceSessionState.SIGNING)
-        coordinator.postFailure("auth_failed", "无法验证此设备")
+        coordinator.postFailure(1, "auth_failed", "无法验证此设备")
         val m = awaitState(VoiceSessionState.IDLE)
         assertEquals("无法验证此设备", m.error)
         assertEquals(0, exitCalls.get())
@@ -275,7 +328,7 @@ class VoiceSessionCoordinatorTest {
         awaitState(VoiceSessionState.SIGNING)
         awaitAnySignGate().complete(session("s1"))
         awaitState(VoiceSessionState.ENTERING)
-        coordinator.postFailure("enter_timeout", "进房超时")
+        coordinator.postFailure(1, "enter_timeout", "进房超时")
         awaitState(VoiceSessionState.EXITING)
         awaitExitCalls(1)
         assertEquals(1, exitCalls.get())
