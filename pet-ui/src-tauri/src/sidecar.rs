@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crate::credential::SIDECAR_CREDENTIAL_ENV;
 use crate::sidecar_credential::LaunchCredential;
 use crate::sidecar_integrity::{sha256_file, validate_hash, validate_runtime};
+use crate::sidecar_runtime_pointer::GenerationLease;
 
 /// 固定启动契约：调用方在构造时一次性锁定，运行时不允许注入任意参数。
 #[derive(Debug, Clone)]
@@ -56,6 +57,8 @@ pub enum SidecarError {
     RuntimeHashMismatch(PathBuf),
     RuntimeUntrusted,
     HashMismatch { expected: String, actual: String },
+    /// 解析失败（ADR-027 resolver fail-closed）：supervisor 永久 Stopped，拒绝任何启动。
+    ResolverFailed(String),
     AlreadyRunning,
     SpawnFailed(String),
     NotRunning,
@@ -63,9 +66,13 @@ pub enum SidecarError {
 
 /// 单一 owner：同一时间至多持有一个子进程，start/stop 串行驱动。
 pub struct SidecarSupervisor {
-    spec: SidecarSpec,
+    /// `None` 表示 resolver 失败（ADR-027 fail-closed），supervisor 永久 Stopped。
+    spec: Option<SidecarSpec>,
+    resolve_error: Option<String>,
     child: Option<Child>,
     state: SidecarState,
+    /// 解析成功时持有的 generation 租约，存活到 child 退出。
+    lease: Option<GenerationLease>,
 }
 
 #[derive(Debug)]
@@ -78,9 +85,34 @@ pub enum ValidatedSpawnError<E> {
 impl SidecarSupervisor {
     pub fn new(spec: SidecarSpec) -> Self {
         Self {
-            spec,
+            spec: Some(spec),
+            resolve_error: None,
             child: None,
             state: SidecarState::Stopped,
+            lease: None,
+        }
+    }
+
+    /// 解析成功且持有 generation 租约：租约存活到 child 退出（stop/try_wait 释放）。
+    pub fn new_with_lease(spec: SidecarSpec, lease: GenerationLease) -> Self {
+        Self {
+            spec: Some(spec),
+            resolve_error: None,
+            child: None,
+            state: SidecarState::Stopped,
+            lease: Some(lease),
+        }
+    }
+
+    /// resolver 失败时构造：永久 Stopped，任何 start 都返回 ResolverFailed，
+    /// 绝不使用 fallback sentinel 路径。
+    pub fn unresolved(diagnostic: String) -> Self {
+        Self {
+            spec: None,
+            resolve_error: Some(diagnostic),
+            child: None,
+            state: SidecarState::Stopped,
+            lease: None,
         }
     }
 
@@ -94,7 +126,10 @@ impl SidecarSupervisor {
 
     /// 固定参数只读视图，用于 capability 断言。
     pub fn allowed_args(&self) -> &[String] {
-        &self.spec.args
+        self.spec
+            .as_ref()
+            .map(|spec| spec.args.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn validate_binary(&self) -> Result<(), SidecarError> {
@@ -102,14 +137,17 @@ impl SidecarSupervisor {
     }
 
     fn validate_for_launch(&self) -> Result<(), SidecarError> {
+        let spec = self.spec.as_ref().ok_or_else(|| {
+            SidecarError::ResolverFailed(self.resolve_error.clone().unwrap_or_default())
+        })?;
         if self.state == SidecarState::Running {
             return Err(SidecarError::AlreadyRunning);
         }
-        let bin = &self.spec.binary_path;
+        let bin = &spec.binary_path;
         if !Path::new(bin).is_file() {
             return Err(SidecarError::BinaryMissing(bin.clone()));
         }
-        validate_hash(&self.spec.expected_sha256).map_err(|invalid| {
+        validate_hash(&spec.expected_sha256).map_err(|invalid| {
             if invalid.is_empty() {
                 SidecarError::ExpectedHashMissing
             } else {
@@ -117,13 +155,13 @@ impl SidecarSupervisor {
             }
         })?;
         let actual = sha256_file(bin)?;
-        if actual != self.spec.expected_sha256 {
+        if actual != spec.expected_sha256 {
             return Err(SidecarError::HashMismatch {
-                expected: self.spec.expected_sha256.clone(),
+                expected: spec.expected_sha256.clone(),
                 actual,
             });
         }
-        validate_runtime(&self.spec)?;
+        validate_runtime(spec)?;
         Ok(())
     }
 
@@ -147,21 +185,34 @@ impl SidecarSupervisor {
         if self.state == SidecarState::Running {
             return Err(SidecarError::AlreadyRunning);
         }
+        let Some(spec) = self.spec.as_ref() else {
+            return Err(SidecarError::ResolverFailed(
+                self.resolve_error.clone().unwrap_or_default(),
+            ));
+        };
+        // 拷贝 spawn 所需字段，避免在可变赋值（self.child/state）期间持有 spec 借用。
+        let binary_path = spec.binary_path.clone();
+        let args = spec.args.clone();
+        let ca_cert_path = spec.ca_cert_path.clone();
+        // ADR-027 §3：child working directory 指向 selected generation 目录，
+        // 使 Electron 从 generation 内解析 resources/app/... 相对路径。
+        let current_dir = spec.integrity.runtime_dir.clone();
         // 2026-08-13 弹窗修复：Windows 下强制 CREATE_NO_WINDOW，杜绝任何子进程弹窗
         // （即使未来 sidecar 换成 console 子系统二进制）。
         #[cfg(windows)]
         let mut cmd = {
             use std::os::windows::process::CommandExt;
-            let mut c = Command::new(&self.spec.binary_path);
+            let mut c = Command::new(&binary_path);
             c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
             c
         };
         #[cfg(not(windows))]
-        let mut cmd = Command::new(&self.spec.binary_path);
+        let mut cmd = Command::new(&binary_path);
         let child = cmd
-            .args(&self.spec.args)
+            .args(&args)
+            .current_dir(&current_dir)
             .env(SIDECAR_CREDENTIAL_ENV, launch.expose())
-            .env("NODE_EXTRA_CA_CERTS", &self.spec.ca_cert_path)
+            .env("NODE_EXTRA_CA_CERTS", &ca_cert_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -176,10 +227,15 @@ impl SidecarSupervisor {
     /// 返回最终退出码（0 = 优雅，非 0 = 被终止）。
     pub fn stop(&mut self) -> Result<i32, SidecarError> {
         let mut child = self.child.take().ok_or(SidecarError::NotRunning)?;
+        let graceful_timeout = self
+            .spec
+            .as_ref()
+            .map(|spec| spec.graceful_timeout)
+            .unwrap_or_default();
         if let Some(mut stdin) = child.stdin.take() {
             let _ = std::io::Write::write_all(&mut stdin, b"shutdown\n");
         }
-        let deadline = Instant::now() + self.spec.graceful_timeout;
+        let deadline = Instant::now() + graceful_timeout;
         let code = loop {
             if let Some(status) = child
                 .try_wait()
@@ -197,6 +253,8 @@ impl SidecarSupervisor {
             std::thread::sleep(Duration::from_millis(10));
         };
         self.state = SidecarState::Stopped;
+        // child 已退出：显式释放 generation 租约（ADR-027 §5）。
+        self.lease.take();
         Ok(code)
     }
 
@@ -206,6 +264,8 @@ impl SidecarSupervisor {
         match child.try_wait().ok()? {
             Some(status) => {
                 self.state = SidecarState::Stopped;
+                // child 已退出：显式释放 generation 租约。
+                self.lease.take();
                 Some(status.code().unwrap_or(-1))
             }
             None => None,

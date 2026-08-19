@@ -38,9 +38,26 @@ struct ProvenanceManifest {
     bundle_resources: BTreeMap<String, String>,
 }
 
+/// 判定 symlink 或 Windows reparse point（junction/mount point/symlink）。
+/// `metadata` 必须是 `symlink_metadata` 的结果（不跟随链接）。
+pub(crate) fn is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
 fn ensure_regular_not_symlink(path: &Path) -> Result<(), ()> {
     let metadata = std::fs::symlink_metadata(path).map_err(|_| ())?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if is_symlink_or_reparse(&metadata) || !metadata.is_file() {
         return Err(());
     }
     Ok(())
@@ -152,7 +169,7 @@ fn validate_native_subset(
     Ok(())
 }
 
-fn validate_path(value: &str) -> Result<(), SidecarError> {
+pub(crate) fn validate_path(value: &str) -> Result<(), SidecarError> {
     let path = Path::new(value);
     if value.is_empty()
         || value.contains('\\')
@@ -212,16 +229,16 @@ fn list_runtime_files(root: &Path, manifest_path: &Path) -> Result<BTreeSet<Stri
             .map_err(|error| SidecarError::SpawnFailed(error.to_string()))?
         {
             let entry = entry.map_err(|error| SidecarError::SpawnFailed(error.to_string()))?;
-            let file_type = entry
-                .file_type()
+            let entry_path = entry.path();
+            let metadata = std::fs::symlink_metadata(&entry_path)
                 .map_err(|error| SidecarError::SpawnFailed(error.to_string()))?;
-            if file_type.is_symlink() {
+            if is_symlink_or_reparse(&metadata) {
                 return Err(SidecarError::ManifestInvalid);
             }
-            if file_type.is_dir() {
-                visit(root, &entry.path(), files)?;
-            } else if file_type.is_file() {
-                files.insert(normalized_relative(root, entry.path())?);
+            if metadata.is_dir() {
+                visit(root, &entry_path, files)?;
+            } else if metadata.is_file() {
+                files.insert(normalized_relative(root, entry_path)?);
             }
         }
         Ok(())
@@ -232,6 +249,9 @@ fn list_runtime_files(root: &Path, manifest_path: &Path) -> Result<BTreeSet<Stri
         manifest_path.file_name().and_then(|name| name.to_str()),
         Some("jax-rtc-sidecar.exe.sha256"),
         Some("jax-rtc-sidecar.provenance.sha256"),
+        // generation 布局下 runtime_dir 即 selected generation 目录，其中
+        // generation.json 是 pointer 协议元数据，不属于 provenance 的 runtime_files。
+        Some("generation.json"),
     ]
     .into_iter()
     .flatten()

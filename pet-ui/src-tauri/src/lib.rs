@@ -33,4 +33,5 @@ pub mod sidecar;
 pub mod sidecar_credential;
 mod sidecar_integrity;
 mod sidecar_runtime_trust;
+pub mod sidecar_runtime_pointer;
 pub mod watchdog;

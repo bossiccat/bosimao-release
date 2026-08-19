@@ -11,16 +11,14 @@ use std::time::{Duration, Instant};
 
 use jax_pet::credential::CredentialProvider;
 use jax_pet::credential_windows::WindowsCredentialStore;
-use jax_pet::sidecar::{IntegritySpec, SidecarSpec, SidecarSupervisor};
+use jax_pet::sidecar::{SidecarSpec, SidecarSupervisor};
 use jax_pet::sidecar_credential::SidecarCredentialService;
+use jax_pet::sidecar_runtime_pointer::{resolve_sidecar_runtime, GenerationLease, ResolverError};
 use jax_pet::watchdog::{
     drive_restart_policy, HealthWindow, Watchdog, WatchdogAction, WatchdogConfig,
 };
 use tauri::{Emitter, Manager};
 
-const SIDECAR_BIN: &str = "jax-rtc-sidecar.exe";
-const SIDECAR_SHA_FILE: &str = "jax-rtc-sidecar.exe.sha256";
-const SIDECAR_MANIFEST_FILE: &str = "jax-rtc-sidecar.provenance.json";
 const SIDECAR_RUNTIME_DIR: &str = "jax-rtc-sidecar-runtime";
 const SIDECAR_ARGS: [&str; 1] = ["--role=sidecar"];
 const WATCHDOG_HEALTHY_AFTER: Duration = Duration::from_secs(30);
@@ -47,8 +45,13 @@ fn main() {
                 let _ = app.emit("ca-confirm-required", ());
             }
 
-            let spec = resolve_sidecar_spec(app);
-            let mut supervisor = SidecarSupervisor::new(spec);
+            let mut supervisor = match resolve_sidecar_spec(app) {
+                Ok((spec, lease)) => SidecarSupervisor::new_with_lease(spec, lease),
+                Err(error) => {
+                    eprintln!("sidecar runtime resolve failed: {error}");
+                    SidecarSupervisor::unresolved(error.to_string())
+                }
+            };
             let mut service = SidecarCredentialService::new(WindowsCredentialStore::sidecar());
             if let Err(error) = service.start_initial(&mut supervisor) {
                 eprintln!("sidecar initial start blocked: {error:?}");
@@ -101,33 +104,26 @@ fn get_owner_credential() -> Result<String, String> {
         .map_err(|error| format!("owner credential unavailable: {}", error.code.stable_code()))
 }
 
-/// 解析 externalBin 产物路径与哈希文件。
-/// 产物或哈希缺失时保持 fail-closed：spec 仍可构造，但 start() 会因
-/// BinaryMissing / HashMismatch 拒绝启动（ADR-017 最小权限）。
-fn resolve_sidecar_spec(app: &tauri::App) -> SidecarSpec {
+/// 解析 sidecar runtime 为 immutable generation 快照（ADR-027 §3）。
+/// fail-closed：current.json 缺失/截断/未知字段/错误 generation id/
+/// pointer-generation-provenance 摘要不匹配/missing/extra payload/traversal/
+/// symlink/reparse 一律返回结构化错误并拒绝启动，绝不构造 fallback sentinel 路径。
+/// 返回值同时携带 spec 与 generation 租约，supervisor 持有租约至 child 退出。
+fn resolve_sidecar_spec(
+    app: &tauri::App,
+) -> Result<(SidecarSpec, GenerationLease), ResolverError> {
     let dir = app
         .path()
         .resource_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let binary_path = dir.join(SIDECAR_BIN);
-    let runtime_dir = dir.join(SIDECAR_RUNTIME_DIR);
-    let hash_path = runtime_dir.join(SIDECAR_SHA_FILE);
-    let expected_sha256 = std::fs::read_to_string(&hash_path)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    SidecarSpec {
-        binary_path,
-        expected_sha256,
-        integrity: IntegritySpec {
-            manifest_path: runtime_dir.join(SIDECAR_MANIFEST_FILE),
-            expected_manifest_sha256: COMPILED_MANIFEST_SHA256.to_string(),
-            runtime_dir,
-        },
-        args: SIDECAR_ARGS.iter().map(|s| s.to_string()).collect(),
-        ca_cert_path: dir.join("certs").join("ca.crt"),
-        graceful_timeout: Duration::from_secs(5),
-        kill_timeout: Duration::from_secs(3),
-    }
+        .map_err(|error| ResolverError::ResourceDir(error.to_string()))?;
+    let runtime_root = dir.join(SIDECAR_RUNTIME_DIR);
+    let resolved = resolve_sidecar_runtime(&runtime_root, COMPILED_MANIFEST_SHA256)?;
+    Ok(resolved.into_sidecar_spec(
+        SIDECAR_ARGS.iter().map(|s| s.to_string()).collect(),
+        dir.join("certs").join("ca.crt"),
+        Duration::from_secs(5),
+        Duration::from_secs(3),
+    ))
 }
 
 /// watchdog 后台线程：code=0 不重启；异常退出/重启失败共享有限退避与熔断。
