@@ -8,13 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const EXE_DIR = (() => {
-  const dirs = fs
-    .readdirSync('C:/Windows/Temp')
-    .filter((n) => /^cargo-run-\d+$/.test(n))
-    .sort();
-  return `C:/Windows/Temp/${dirs[dirs.length - 1]}/debug`;
-})();
+const EXE_DIR = 'C:/Users/Administrator/WorkBuddy/监视app/tools/sidecar-publish-coordination/target/debug';
 const EXE = path.join(EXE_DIR, 'sidecar-publish-coordination.exe');
 
 const failures = [];

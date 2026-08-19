@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const EXE = 'C:/Windows/Temp/cargo-run-1787102556528/debug/sidecar-publish-coordination.exe';
+const EXE = 'C:/Users/Administrator/WorkBuddy/监视app/tools/sidecar-publish-coordination/target/debug/sidecar-publish-coordination.exe';
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'scpc-e2e-'));
 const TOKEN = '550e8400-e29b-41d4-a716-446655440000';
 const TOKEN2 = '660e8400-e29b-41d4-a716-446655440001';
