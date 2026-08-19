@@ -12,7 +12,6 @@ const {
   writeAndSyncFile,
   GENERATION_RE,
 } = require('./sidecar-runtime-protocol');
-const { restoreWritableGeneration } = require('./sidecar-runtime-immutable');
 
 const readerGcStates = new Map();
 
@@ -207,9 +206,6 @@ async function gcGenerations({ runtimeDir, retainCount = 2, minAgeMs = 0, proces
       if (leaseState.active || leaseState.uncertain) continue;
       if (readCurrentGeneration(runtimeDir) === id) continue;
       try {
-        // publisher 身份：先恢复可写位，再递归删除；只读 generation 因此可被回收。
-        // 恢复/删除任一失败都保留并在下次重试，绝不把删除失败转成发布失败。
-        try { restoreWritableGeneration(generationDir); } catch { /* best-effort */ }
         fs.rmSync(generationDir, { recursive: true, force: false });
         removed.push(id);
       } catch { /* retain deletion failures for a later retry */ }

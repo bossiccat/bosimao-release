@@ -22,7 +22,6 @@ const {
   generationIdForProvenance,
   publishCurrentPointer,
 } = require('../lib/sidecar-runtime-publish');
-const { restoreWritableGeneration } = require('../lib/sidecar-runtime-immutable');
 const {
   PROJECT_ROOT,
   balancedItem,
@@ -275,19 +274,16 @@ test('rejects Electron devDependency embedded in resources/app', () => {
 
 test('changing a selected generation payload fails verification', () => {
   const { config, generationDir } = fixture();
-  restoreWritableGeneration(generationDir); // publisher 身份恢复可写以注入篡改
   fs.writeFileSync(path.join(generationDir, 'resources.pak'), 'tampered');
   assert.throws(() => verifyPackage(config), (error) => error instanceof PackageError);
 });
 
 test('rejects runtime closed-set additions and omissions', () => {
   const added = fixture();
-  restoreWritableGeneration(added.generationDir);
   fs.writeFileSync(path.join(added.generationDir, 'unrecorded.dll'), 'unrecorded');
   assert.throws(() => verifyPackage(added.config), (error) => error instanceof PackageError);
 
   const omitted = fixture();
-  restoreWritableGeneration(omitted.generationDir);
   const manifest = JSON.parse(fs.readFileSync(path.join(omitted.generationDir, PROVENANCE_FILE), 'utf8'));
   manifest.runtime_files = manifest.runtime_files.filter((item) => item.path !== 'resources.pak');
   fs.writeFileSync(path.join(omitted.generationDir, PROVENANCE_FILE), JSON.stringify(manifest));
@@ -470,7 +466,6 @@ test('production trust rejects tiny externalBin accepted by self-consistency ver
 test('production trust rejects tiny native runtime files accepted by self-consistency verify', () => {
   const { config, generationDir } = fixture();
   verifyPackage(config);
-  restoreWritableGeneration(generationDir); // publisher 身份恢复可写以注入篡改
   fs.writeFileSync(
     path.join(generationDir, INSTALLED_BIN),
     Buffer.concat([Buffer.from([0x4d, 0x5a]), Buffer.alloc(5 * 1024 * 1024)]),
@@ -480,14 +475,12 @@ test('production trust rejects tiny native runtime files accepted by self-consis
 
 test('production trust rejects oversized non-PE binary without MZ header', () => {
   const { config, generationDir } = fixture();
-  restoreWritableGeneration(generationDir);
   fs.writeFileSync(path.join(generationDir, INSTALLED_BIN), Buffer.alloc(5 * 1024 * 1024, 0x41));
   expectTrustCode(config, generationDir, 'SIDECAR_PACKAGE_TRUST_PE_HEADER');
 });
 
 test('production trust accepts real-size PE externalBin and native closed set', () => {
   const { config, generationDir } = fixture();
-  restoreWritableGeneration(generationDir);
   fs.writeFileSync(
     path.join(generationDir, INSTALLED_BIN),
     Buffer.concat([Buffer.from([0x4d, 0x5a]), Buffer.alloc(5 * 1024 * 1024)]),

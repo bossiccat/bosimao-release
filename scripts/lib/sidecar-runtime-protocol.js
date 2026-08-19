@@ -4,9 +4,6 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const pointerReplace = require('./sidecar-pointer-replace');
-const { makeImmutableGeneration } = require('./sidecar-runtime-immutable');
-
 const GENERATION_RE = /^g-[0-9a-f]{64}$/;
 const HASH_RE = /^[0-9a-f]{64}$/;
 const CURRENT_KEYS = ['schema_version', 'generation', 'manifest_sha256'];
@@ -216,11 +213,10 @@ function finalizeStagedGeneration({ runtimeDir, stagingDir, provenanceBytes, exp
   });
   fs.writeFileSync(path.join(resolvedStaging, 'generation.json'), `${JSON.stringify(metadata)}\n`, { flag: 'wx' });
   fs.renameSync(resolvedStaging, generationDir);
-  makeImmutableGeneration(generationDir);
   return { generation, generationDir, metadata };
 }
 
-function replaceCurrentPointer(temporaryPath, currentPath, options = {}) {
+function replaceCurrentPointer(temporaryPath, currentPath, _options = {}) {
   if (typeof temporaryPath !== 'string' || typeof currentPath !== 'string') {
     fail('temporary and current pointer paths are required');
   }
@@ -230,7 +226,7 @@ function replaceCurrentPointer(temporaryPath, currentPath, options = {}) {
   if (path.dirname(temporaryAbsolute) !== path.dirname(currentAbsolute)) {
     fail('temporary and current pointers must share a directory');
   }
-  pointerReplace.replacePointer({ temporaryPath: temporaryAbsolute, currentPath: currentAbsolute, ...options });
+  fs.renameSync(temporaryAbsolute, currentAbsolute);
   return currentAbsolute;
 }
 
