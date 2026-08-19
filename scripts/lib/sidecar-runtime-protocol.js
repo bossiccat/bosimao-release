@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { makeImmutableGeneration } = require('./sidecar-runtime-immutable');
 
 const GENERATION_RE = /^g-[0-9a-f]{64}$/;
 const HASH_RE = /^[0-9a-f]{64}$/;
@@ -212,6 +213,8 @@ function finalizeStagedGeneration({ runtimeDir, stagingDir, provenanceBytes, exp
     files,
   });
   fs.writeFileSync(path.join(resolvedStaging, 'generation.json'), `${JSON.stringify(metadata)}\n`, { flag: 'wx' });
+  // 在 staging 内先完成冻结；冻结失败不得把可写 generation 暴露到 generations/。
+  makeImmutableGeneration(resolvedStaging);
   fs.renameSync(resolvedStaging, generationDir);
   return { generation, generationDir, metadata };
 }

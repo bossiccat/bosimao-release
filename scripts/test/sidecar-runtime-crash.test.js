@@ -21,6 +21,8 @@ const {
   verifyFinalizedGeneration,
 } = require('../lib/sidecar-runtime-publish');
 
+const { makeImmutableGeneration, restoreWritableGeneration } = require('../lib/sidecar-runtime-immutable');
+
 const workerPath = path.join(__dirname, 'sidecar-runtime-crash-worker.js');
 
 function sha256(bytes) {
@@ -320,19 +322,34 @@ test('GC deletion failure retains generation and retries on next run', async () 
   const current = buildGeneration(root, 'gc-current');
   const target = buildGeneration(root, 'gc-target');
   setCurrent(root, current.generation);
+  restoreWritableGeneration(target.generationDir);
   fs.utimesSync(target.generationDir, new Date(0), new Date(0));
+  makeImmutableGeneration(target.generationDir);
 
-  // 注入确定性删除失败：把 target generation 设为当前工作目录，
-  // Windows/POSIX 都无法删除进程 CWD → EBUSY。
-  const previous = process.cwd();
-  process.chdir(target.generationDir);
-  try {
-    const result = await gcGenerations({ runtimeDir: root, retainCount: 0, minAgeMs: 0, processIdentityResolver: () => null });
-    assert.equal(result.removed.includes(target.generation), false, 'deletion failure must not report removal');
-    assert.equal(fs.existsSync(target.generationDir), true, 'generation retained on deletion failure');
-  } finally {
-    process.chdir(previous);
-  }
+  // 受控注入一次删除失败，避免依赖 OS 对当前工作目录删除的不同语义。
+  let deleteAttempts = 0;
+  const failOnce = (generationDir) => {
+    deleteAttempts += 1;
+    assert.equal(generationDir, target.generationDir);
+    const error = new Error('injected busy generation directory');
+    error.code = 'EBUSY';
+    throw error;
+  };
+  const result = await gcGenerations({
+    runtimeDir: root,
+    retainCount: 0,
+    minAgeMs: 0,
+    processIdentityResolver: () => null,
+    deleteGeneration: failOnce,
+  });
+  assert.equal(deleteAttempts, 1, 'controlled delete path must run exactly once');
+  assert.equal(result.removed.includes(target.generation), false, 'deletion failure must not report removal');
+  assert.equal(fs.existsSync(target.generationDir), true, 'generation retained on deletion failure');
+  assert.throws(
+    () => fs.writeFileSync(path.join(target.generationDir, 'jax-rtc-sidecar.exe'), 'tampered'),
+    (error) => error && (error.code === 'EPERM' || error.code === 'EACCES'),
+    'a retained generation must be re-frozen after a failed GC deletion',
+  );
 
   const retried = await gcGenerations({ runtimeDir: root, retainCount: 0, minAgeMs: 0, processIdentityResolver: () => null });
   assert.equal(retried.removed.includes(target.generation), true, 'retry after failure removes generation');

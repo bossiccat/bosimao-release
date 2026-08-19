@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { makeImmutableGeneration, restoreWritableGeneration } = require('./sidecar-runtime-immutable');
 const {
   assertExactKeys,
   createRuntimeLayout,
@@ -186,7 +187,15 @@ function leasesForGeneration(runtimeDir, generation, processIdentityResolver) {
   return { active, uncertain };
 }
 
-async function gcGenerations({ runtimeDir, retainCount = 2, minAgeMs = 0, processIdentityResolver = () => null, now = Date.now(), onExclusive }) {
+async function gcGenerations({
+  runtimeDir,
+  retainCount = 2,
+  minAgeMs = 0,
+  processIdentityResolver = () => null,
+  now = Date.now(),
+  onExclusive,
+  deleteGeneration = (generationDir) => fs.rmSync(generationDir, { recursive: true, force: false }),
+}) {
   return withExclusiveReaderGc(runtimeDir, async () => {
     if (onExclusive) onExclusive();
     const current = readCurrentGeneration(runtimeDir);
@@ -206,9 +215,13 @@ async function gcGenerations({ runtimeDir, retainCount = 2, minAgeMs = 0, proces
       if (leaseState.active || leaseState.uncertain) continue;
       if (readCurrentGeneration(runtimeDir) === id) continue;
       try {
-        fs.rmSync(generationDir, { recursive: true, force: false });
+        restoreWritableGeneration(generationDir);
+        deleteGeneration(generationDir);
         removed.push(id);
-      } catch { /* retain deletion failures for a later retry */ }
+      } catch {
+        // 删除失败时 generation 仍会保留；恢复其只读保护，等待后续 GC 再重试。
+        try { makeImmutableGeneration(generationDir); } catch { /* preserve later GC retry */ }
+      }
     }
     return { removed, retained: [...retained] };
   });

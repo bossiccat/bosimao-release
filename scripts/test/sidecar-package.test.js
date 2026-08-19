@@ -15,6 +15,7 @@ const {
   verifyPackage,
 } = require('../lib/sidecar-package');
 const { assertProductionTrust } = require('../lib/sidecar-trust');
+const { restoreWritableGeneration } = require('../lib/sidecar-runtime-immutable');
 const {
   createCurrentPointer,
   createRuntimeLayout,
@@ -201,6 +202,11 @@ function expectTrustCode(config, generationDir, code) {
   );
 }
 
+// 篡改型测试在故意改写已 finalize fixture 前显式恢复写权限；生产 freeze 行为不在此处放宽。
+function restoreFixtureForTamper(generationDir) {
+  restoreWritableGeneration(generationDir);
+}
+
 test('package output is stable root + pointer + immutable generation with no flat fallback', () => {
   const { config, generation, generationDir } = fixture();
 
@@ -268,22 +274,26 @@ test('rejects missing TRTC native dependency', () => {
 
 test('rejects Electron devDependency embedded in resources/app', () => {
   const { config, generationDir } = fixture();
+  restoreFixtureForTamper(generationDir);
   fs.mkdirSync(path.join(generationDir, 'resources', 'app', 'node_modules', 'electron'));
   expectCode(config, 'SIDECAR_PACKAGE_DEV_DEPENDENCY_EMBEDDED');
 });
 
 test('changing a selected generation payload fails verification', () => {
   const { config, generationDir } = fixture();
+  restoreFixtureForTamper(generationDir);
   fs.writeFileSync(path.join(generationDir, 'resources.pak'), 'tampered');
   assert.throws(() => verifyPackage(config), (error) => error instanceof PackageError);
 });
 
 test('rejects runtime closed-set additions and omissions', () => {
   const added = fixture();
+  restoreFixtureForTamper(added.generationDir);
   fs.writeFileSync(path.join(added.generationDir, 'unrecorded.dll'), 'unrecorded');
   assert.throws(() => verifyPackage(added.config), (error) => error instanceof PackageError);
 
   const omitted = fixture();
+  restoreFixtureForTamper(omitted.generationDir);
   const manifest = JSON.parse(fs.readFileSync(path.join(omitted.generationDir, PROVENANCE_FILE), 'utf8'));
   manifest.runtime_files = manifest.runtime_files.filter((item) => item.path !== 'resources.pak');
   fs.writeFileSync(path.join(omitted.generationDir, PROVENANCE_FILE), JSON.stringify(manifest));
@@ -330,6 +340,7 @@ test('distinguishes build input and installed externalBin names', () => {
 
 test('a target-triple filename cannot substitute the installed jax-rtc-sidecar.exe identity', () => {
   const { config, generationDir } = fixture();
+  restoreFixtureForTamper(generationDir);
   const installed = path.join(generationDir, INSTALLED_BIN);
   const substituted = path.join(generationDir, `jax-rtc-sidecar-${TARGET_TRIPLE}.exe`);
   fs.renameSync(installed, substituted);
@@ -338,6 +349,7 @@ test('a target-triple filename cannot substitute the installed jax-rtc-sidecar.e
   // 反向：即便同时存在 target-triple 副本，合法 installed 身份仍必须存在；
   // 仅有三元组命名文件、缺失 jax-rtc-sidecar.exe 时必须失败。
   const partial = fixture();
+  restoreFixtureForTamper(partial.generationDir);
   fs.rmSync(path.join(partial.generationDir, INSTALLED_BIN));
   assert.throws(() => verifyPackage(partial.config), (error) => error instanceof PackageError);
 });
@@ -354,6 +366,7 @@ test('ignores unmanaged installer siblings but rejects managed runtime additions
   fs.writeFileSync(path.join(config.binDir, 'jax-pet.exe'), 'tauri-main');
   fs.writeFileSync(path.join(config.binDir, INSTALLED_BIN), 'installed-sidecar');
   verifyPackage(config);
+  restoreFixtureForTamper(generationDir);
   fs.writeFileSync(path.join(generationDir, 'unrecorded-runtime.dll'), 'unrecorded');
   assert.throws(() => verifyPackage(config), (error) => error instanceof PackageError);
 });
@@ -466,6 +479,7 @@ test('production trust rejects tiny externalBin accepted by self-consistency ver
 test('production trust rejects tiny native runtime files accepted by self-consistency verify', () => {
   const { config, generationDir } = fixture();
   verifyPackage(config);
+  restoreFixtureForTamper(generationDir);
   fs.writeFileSync(
     path.join(generationDir, INSTALLED_BIN),
     Buffer.concat([Buffer.from([0x4d, 0x5a]), Buffer.alloc(5 * 1024 * 1024)]),
@@ -475,12 +489,14 @@ test('production trust rejects tiny native runtime files accepted by self-consis
 
 test('production trust rejects oversized non-PE binary without MZ header', () => {
   const { config, generationDir } = fixture();
+  restoreFixtureForTamper(generationDir);
   fs.writeFileSync(path.join(generationDir, INSTALLED_BIN), Buffer.alloc(5 * 1024 * 1024, 0x41));
   expectTrustCode(config, generationDir, 'SIDECAR_PACKAGE_TRUST_PE_HEADER');
 });
 
 test('production trust accepts real-size PE externalBin and native closed set', () => {
   const { config, generationDir } = fixture();
+  restoreFixtureForTamper(generationDir);
   fs.writeFileSync(
     path.join(generationDir, INSTALLED_BIN),
     Buffer.concat([Buffer.from([0x4d, 0x5a]), Buffer.alloc(5 * 1024 * 1024)]),
