@@ -8,6 +8,7 @@ const {
   TARGET_TRIPLE,
   PackageError,
   buildPackage,
+  resolveCurrentGeneration,
   verifyPackage,
 } = require('./lib/sidecar-package');
 const { assertProductionTrust } = require('./lib/sidecar-trust');
@@ -37,9 +38,6 @@ function packageConfig() {
     binDir,
     runtimeDir,
     executable: path.join(binDir, `jax-rtc-sidecar-${TARGET_TRIPLE}.exe`),
-    hashFile: path.join(runtimeDir, 'jax-rtc-sidecar.exe.sha256'),
-    manifestFile: path.join(runtimeDir, 'jax-rtc-sidecar.provenance.json'),
-    manifestDigestFile: path.join(runtimeDir, 'jax-rtc-sidecar.provenance.sha256'),
     installedFile: 'jax-rtc-sidecar.exe',
     sourceLockFile,
     sourceLockHash: sha256(sourceLockFile),
@@ -51,10 +49,13 @@ function main() {
   const verifyOnly = process.argv.slice(2).includes('--verify-only');
   const config = packageConfig();
   const manifest = verifyOnly ? verifyPackage(config) : buildPackage(config);
+  // 生产可信门（体积 + PE 头）落在 selected immutable generation 内，
+  // 而非 flat runtime 或 externalBin 构建输入。
+  const generationDir = resolveCurrentGeneration(config).generationDir;
   assertProductionTrust({
-    executable: config.executable,
-    nativeDir: path.join(config.runtimeDir, 'resources', 'app', 'node_modules', 'trtc-electron-sdk', 'build', 'Release'),
-    runtimeDir: config.runtimeDir,
+    executable: path.join(generationDir, config.installedFile),
+    nativeDir: path.join(generationDir, 'resources', 'app', 'node_modules', 'trtc-electron-sdk', 'build', 'Release'),
+    runtimeDir: generationDir,
   });
   process.stdout.write(
     `${verifyOnly ? 'verified' : 'built'} ${manifest.external_bin.build_input_file} ${manifest.external_bin.sha256}\n`
