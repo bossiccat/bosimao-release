@@ -43,6 +43,7 @@ class RtcClientTest {
     private var stopLocalAudioCalled = false
     private var muted: Boolean? = null
     private var exitedCount = 0
+    private var enteredCount = 0
 
     private val states = mutableListOf<ConnectionState>()
     private val phases = mutableListOf<VoicePhase>()
@@ -66,6 +67,7 @@ class RtcClientTest {
         stopLocalAudioCalled = false
         muted = null
         exitedCount = 0
+        enteredCount = 0
         states.clear(); phases.clear(); errors.clear(); rmsValues.clear()
 
         listener = mockk<TRTCCloudListener>(relaxed = true)
@@ -85,6 +87,7 @@ class RtcClientTest {
             onRms = { rmsValues.add(it) },
             onError = { code, msg -> errors.add(code to msg) },
             onExited = { exitedCount++ },
+            onEntered = { enteredCount++ },
             engineFactory = { engine }
         )
     }
@@ -105,11 +108,15 @@ class RtcClientTest {
         client.enterRoom(makeSession())
         // 进房前 = CONNECTING
         assertEquals(ConnectionState.CONNECTING, states.last())
+        // 同步请求返回不等于进房成功：onEntered 不得触发
+        assertEquals("同步 enterRoom 返回不得触发进房确认", 0, enteredCount)
         fireOnEnterRoom(0)
         assertEquals(ConnectionState.CONNECTED, states.last())
         assertTrue("startLocalAudio(SPEECH) 应被调用", startLocalAudioCalled)
         assertEquals("应只进房一次", 1, enterRoomCount)
         assertTrue(client.isInRoom())
+        // 真实 onEnterRoom 成功回调触发进房确认
+        assertEquals("onEnterRoom 成功必须触发 onEntered", 1, enteredCount)
         // mic handoff：会话期不触发 onExited（MicRecorder 保持停止）
         assertEquals("会话期不得触发 onExited（mic 由 TRTC 独占）", 0, exitedCount)
     }
@@ -123,6 +130,8 @@ class RtcClientTest {
         assertEquals(ConnectionState.DISCONNECTED, states.last())
         assertFalse(client.isInRoom())
         assertTrue("进房失败应上报错误", errors.any { it.first == "enter_room" })
+        // 失败回调不得触发进房成功确认（失败经 onError/postFailure 收敛）
+        assertEquals("onEnterRoom 失败不得触发 onEntered", 0, enteredCount)
     }
 
     // ---- S3: 重复进房幂等（QA-PLAN §2 场景 C）----

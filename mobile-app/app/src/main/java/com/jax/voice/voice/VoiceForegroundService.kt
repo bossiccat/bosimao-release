@@ -51,6 +51,7 @@ class VoiceForegroundService : Service() {
     private var coordinator: VoiceSessionCoordinator? = null
     private var notifications: VoiceServiceNotifications? = null
     private var exitGate: CompletableDeferred<Unit>? = null
+    private var enterGate: CompletableDeferred<Unit>? = null
 
     @Volatile private var wakeActive = VoiceConfig.WAKE_DEFAULT_ENABLED
     @Volatile private var micRestartCount = 0
@@ -107,7 +108,8 @@ class VoiceForegroundService : Service() {
                 VoiceController.setLastError("进房失败: $code $msg")
                 coordinator?.postFailure(code, msg)
             },
-            onExited = { exitGate?.complete(Unit) }
+            onExited = { exitGate?.complete(Unit) },
+            onEntered = { enterGate?.complete(Unit) }
         )
         coordinator = buildCoordinator()
 
@@ -158,18 +160,26 @@ class VoiceForegroundService : Service() {
                 )
                 VoiceSessionInfo(s.roomId, s.userId, s.userSig, s.sdkAppId, s.sessionId)
             },
-            enterRoom = { _, session ->
+            enterRoom = { gen, session ->
                 val client = rtcClient ?: throw IllegalStateException("rtc client not ready")
-                client.enterRoom(
-                    VoiceSessionApi.VoiceSession(
-                        roomId = session.roomId,
-                        userId = session.userId,
-                        userSig = session.userSig,
-                        sdkAppId = session.sdkAppId,
-                        scene = "trtc_full_duplex",
-                        sessionId = session.sessionId
+                val gate = CompletableDeferred<Unit>()
+                enterGate = gate
+                try {
+                    client.enterRoom(
+                        VoiceSessionApi.VoiceSession(
+                            roomId = session.roomId,
+                            userId = session.userId,
+                            userSig = session.userSig,
+                            sdkAppId = session.sdkAppId,
+                            scene = "trtc_full_duplex",
+                            sessionId = session.sessionId
+                        )
                     )
-                )
+                    gate.await() // 等真实 onEnterRoom(result>=0) 回调（RtcClient 15s 兜底）；失败经 onError→postFailure 收敛
+                } finally {
+                    enterGate = null
+                }
+                coordinator?.postEnterSucceeded(gen)
             },
             exitRoom = { _ ->
                 val client = rtcClient

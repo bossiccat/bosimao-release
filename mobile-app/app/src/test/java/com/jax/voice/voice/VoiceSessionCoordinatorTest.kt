@@ -234,12 +234,57 @@ class VoiceSessionCoordinatorTest {
         delay(100)
         assertEquals("旧 generation 迟到回调不得进房", 0, enterCalls.get())
         assertEquals(VoiceSessionState.SIGNING, coordinator.model.value.state)
-        // gen2 正常完成
+        // gen2 正常完成：SDK 请求返回后由真实回调推进 IN_ROOM
         awaitSignGate(2).complete(session("gen2"))
         awaitState(VoiceSessionState.ENTERING)
         enterGate.complete(Unit)
+        coordinator.postEnterSucceeded(2)
         awaitState(VoiceSessionState.IN_ROOM)
         assertEquals(1, enterCalls.get())
+    }
+
+    // ---- TRTC 请求同步返回 ≠ 真实进房：IN_ROOM 只能由真实回调驱动 ----
+    @Test
+    fun `IN_ROOM requires real enter callback not synchronous effect return`() = runBlocking<Unit> {
+        coordinator = buildCoordinator()
+        coordinator.start("main")
+        awaitState(VoiceSessionState.SIGNING)
+        awaitAnySignGate().complete(session("s1"))
+        awaitState(VoiceSessionState.ENTERING)
+
+        // SDK 请求同步返回（enterRoom 效果完成）但 onEnterRoom 尚未回调
+        enterGate.complete(Unit)
+        awaitExitCalls(0)
+        delay(150)
+        assertEquals(
+            "同步 enterRoom 返回不得把状态提前推进到 IN_ROOM",
+            VoiceSessionState.ENTERING,
+            coordinator.model.value.state
+        )
+
+        // 真实成功回调（当前 generation）→ IN_ROOM
+        coordinator.postEnterSucceeded(1)
+        awaitState(VoiceSessionState.IN_ROOM)
+    }
+
+    // ---- 旧 generation 的迟到进房回调必须丢弃 ----
+    @Test
+    fun `late enter callback from old generation is discarded`() = runBlocking<Unit> {
+        coordinator = buildCoordinator()
+        coordinator.start("main")
+        awaitState(VoiceSessionState.SIGNING)
+        awaitAnySignGate().complete(session("s1"))
+        awaitState(VoiceSessionState.ENTERING)
+        enterGate.complete(Unit)
+
+        // 旧 generation 的 EnterSucceeded 必须被丢弃
+        coordinator.postEnterSucceeded(0)
+        delay(150)
+        assertEquals(VoiceSessionState.ENTERING, coordinator.model.value.state)
+
+        // 当前 generation 的回调才有效
+        coordinator.postEnterSucceeded(1)
+        awaitState(VoiceSessionState.IN_ROOM)
     }
 
     // ---- 快速点击 20 次只产生一个活动会话 ----

@@ -31,6 +31,8 @@ class RtcClient(
     private val onPhase: (VoicePhase) -> Unit,
     private val onRms: (Float) -> Unit,
     private val onError: (code: String, msg: String) -> Unit,
+    /** 真实 SDK onEnterRoom(result >= 0) 后触发，不能用 enterRoom() 同步返回替代。 */
+    private val onEntered: () -> Unit = {},
     /** 退房完成回调（onExitRoom 触发；超时兜底也会触发）：调用方在此重启 MicRecorder 恢复"一直在听" */
     private val onExited: () -> Unit,
     /** 远端播放 UI 事件（Task 7：正常停止 = RemoteAudioStopped，Task 8 接入 BargeInController） */
@@ -81,6 +83,7 @@ class RtcClient(
                 inRoom = true
                 VoiceController.setLastError("")
                 onState(ConnectionState.CONNECTED)
+                onEntered()
             } else {
                 inRoom = false
                 onState(ConnectionState.DISCONNECTED)
@@ -196,6 +199,9 @@ class RtcClient(
             Log.w(TAG, "exitRoom ignored: not in room / no pending enter")
             return
         }
+        // 进房超时兜底可能已置位 exitHandled；退房是新的完成周期，必须重置（对称于 enterRoom 开头），
+        // 否则 onExitRoom/退房兜底的 onExited 全被吞，mic 恢复被迫等 coordinator 5s 退出超时。
+        exitHandled = false
         inRoom = false
         cancelEnterTimeout()
         onState(ConnectionState.DISCONNECTED)
