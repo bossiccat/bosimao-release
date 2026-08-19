@@ -11,9 +11,17 @@ app/build/
 # 构建备份/临时产物（基线 commit 不入库）
 app/build.stale*/
 *.bak
-app/libs/*.aar
-app/libs/*.jar
-app/src/main/assets/sherpa-onnx-*
-# 模型二进制不入库（脚本下载）
-*.onnx
-*.bin
+# ============================================================
+# 依赖闭集策略：二进制依赖不入库（体积/许可），哈希清单入库管控。
+# 清单：scripts/deps-checksums.txt（file:/archive: 条目 + SHA-256）
+# 下载校验：scripts/fetch-deps.ps1（哈希不符 → 删除 + 非 0 退出）
+# 例外：keywords_jax.txt 为本项目自建文本（上游模型不含），
+#       其模板 scripts/keywords_jax.txt.template 入库（真源）。
+# 精确路径规则 —— 新增二进制输入时必须同步更新清单，否则不会静默漏网：
+# ============================================================
+app/libs/sherpa-onnx-1.13.4.aar
+app/src/main/assets/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/
+# tar.bz2 解压根目录整体不入库（含 int8/非int8 全部变体、test_wavs）；
+# 运行时闭集 5 文件 + keywords_jax.txt 由清单哈希逐一把关。
+# 模型 tar.bz2 若曾手动解压到 assets/ 根，也拦下：
+app/src/main/assets/*.tar.bz2

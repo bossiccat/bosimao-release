@@ -42,7 +42,7 @@ mobile-app/
         │   ├── voice/VoiceController.kt          # 全局 StateFlow（服务写、UI 读）
         │   ├── voice/VoiceForegroundService.kt   # 前台服务（一直在听）
         │   ├── voice/MicRecorder.kt              # AudioRecord 16k 单声道 PCM16，40ms/帧
-        │   ├── voice/WakeWordEngine.kt           # sherpa-onnx KWS（贾克斯/小贾）
+        │   ├── voice/WakeWordEngine.kt           # sherpa-onnx KWS（波斯猫，VoiceConfig.WAKEWORD）
         │   ├── voice/FrameDispatcher.kt          # 同一帧三路分发（KWS/VAD(M2)/上行）
         │   └── ui/FloatingOverlay.kt + WaveformView.kt
         └── res/…                                 # 设计 Token 色板（对齐 pet-ui tokens.css）
@@ -97,15 +97,17 @@ mobile-app/
       modelConfig = OnlineModelConfig(
           transducer = OnlineTransducerModelConfig(encoder, decoder, joiner),
           tokens = tokensFile, numThreads = 2, provider = "cpu", modelType = "zipformer2"),
-      keywordsFile = "", keywordsThreshold = 0.25f))
-  val stream = spotter.createStream("贾克斯 小贾")
+      keywordsFile = "$MODEL_DIR/keywords_jax.txt", keywordsThreshold = 0.25f))
+  val stream = spotter.createStream()
   // 每帧: stream.acceptWaveform(samples, 16000)
   //   → while (spotter.isReady(stream)) { spotter.decode(stream)
   //     val kw = spotter.getResult(stream).keyword; if (kw.isNotBlank()) { onWake(kw); spotter.reset(stream) } }
   ```
-- **模型文件**（放 assets，WakeWordEngine.kt 已按此加载）：
-  `{encoder,decoder,joiner}-epoch-12-avg-2-chunk-16-left-64.onnx` + `tokens.txt`
-- **换关键词**：改 `VoiceConfig.WAKEWORD`，免重训（spec §4.2）。
+- **模型文件**（放 assets，WakeWordEngine.kt 已按此加载，**int8 变体**）：
+  `{encoder,decoder,joiner}-epoch-12-avg-2-chunk-16-left-64.int8.onnx` + `tokens.txt` + `keywords_jax.txt`（项目自建，模板在 `scripts/keywords_jax.txt.template`）
+- **依赖完整性**：AAR 与模型全部输入的 SHA-256 清单见 `scripts/deps-checksums.txt`，
+  `scripts/fetch-deps.ps1` 下载/落盘均校验，不匹配即删除并失败；来源与策略详见 `docs/dependency-closure.md`
+- **换关键词**：改 `VoiceConfig.WAKEWORD` + 同步 `keywords_jax.txt.template` 与清单哈希，免重训（spec §4.2）。
 - **灵敏度**：`keywordsThreshold` 0.10–0.50，默认 0.25（spec §5.2 灵敏度 0.3-0.7 为 UI 刻度对应关系，M1 以真机校准为准，README 记录实测值）。
 
 ## 5. 权限清单（Manifest 已声明）

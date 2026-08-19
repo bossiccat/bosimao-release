@@ -1,0 +1,25 @@
+# =============================================================================
+# 依赖闭集 SHA-256 清单（本文件入库；二进制本体不入库，策略见文件头）
+# =============================================================================
+# 策略：二进制依赖不入库（仓库体积与许可考量），由 scripts/fetch-deps.ps1
+#       按 URL + 本清单哈希下载校验。本地已存在但不在本清单内的任何
+#       .aar / 模型文件都视为可疑输入（构建闭集外）。
+#
+# 格式：<sha256>  <相对于 mobile-app/ 的路径>
+#  - 归档级条目（archive:）：下载后立即校验，解压前的第一道门
+#  - 文件级条目（file:）：解压/落盘后校验，覆盖运行时真正加载的闭集
+# =============================================================================
+
+# --- sherpa-onnx 1.13.4 Android AAR（Java/Kotlin API + JNI + .so） ---
+archive: 03f9c4df965f21c71269365a7951a7f23b5696fddd093fa318c80d65550ab780  app/libs/sherpa-onnx-1.13.4.aar
+file:    03f9c4df965f21c71269365a7951a7f23b5696fddd093fa318c80d65550ab780  app/libs/sherpa-onnx-1.13.4.aar
+
+# --- KWS 模型归档（tar.bz2，解压到 assets/ 后删除） ---
+archive: b2f7c89690dc8ce4c6ed6afeab7cd800c36ad1421fb6b6302b4a4b194cf7f35f  app/src/main/assets/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+
+# --- KWS 模型：运行时闭集（WakeWordEngine.kt 实际加载的 5 个文件 + keywords_jax.txt） ---
+file: dd784973fc9d2fabb3b800d6dcd20fc3b0ca84f8e2415afe54b032878e447f4d  app/src/main/assets/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx
+file: ed83454004d5bd16d831eaf00adcd181ed7734886aab6ef440f3ffa5aa3cfe3b  app/src/main/assets/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx
+file: f79760052b87239e325f0567c752ad3130b30d92effb847d4307743c20c59a24  app/src/main/assets/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx
+file: 72316508d9119696145abc6f1f8cdc46287535c34e5ce7e595f845cb1499cf2e  app/src/main/assets/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt
+file: d5e91c16a4ae64197ce3d3e123ebaabb4f3598aaaebf83019401d529a766ffb5  app/src/main/assets/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/keywords_jax.txt
