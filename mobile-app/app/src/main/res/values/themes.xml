@@ -19,7 +19,6 @@
         <item name="android:statusBarColor">@color/jax_color_bg</item>
         <item name="android:navigationBarColor">@color/jax_color_bg</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:forceDarkAllowed">false</item>
         <item name="android:windowBackground">@color/jax_color_bg</item>
     </style>
 </resources>
