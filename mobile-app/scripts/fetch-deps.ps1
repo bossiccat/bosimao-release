@@ -11,7 +11,14 @@
 #         已存在且哈希正确的文件跳过下载；已存在但哈希错误 → 删除重下。
 
 $ErrorActionPreference = "Stop"
+# 关闭进度条：PS 5.1 的 Invoke-WebRequest 进度条渲染会把大文件下载拖慢 10 倍以上
+$ProgressPreference = "SilentlyContinue"
 $root = Split-Path -Parent $PSScriptRoot
+
+# tar 解压器：必须用 Windows 原生 bsdtar。GitHub windows-2022 runner 的 PATH 前置了
+# Strawberry Perl 的 MSYS tar，在 PS 5.1 管道下解压 bz2 会无限挂死（Run#7 卡 31min 实锤）。
+$tarExe = "C:\Windows\System32\tar.exe"
+if (-not (Test-Path $tarExe)) { $tarExe = "tar" } # 非 Windows 兜底
 
 $checksumFile = Join-Path $PSScriptRoot "deps-checksums.txt"
 if (-not (Test-Path $checksumFile)) {
@@ -103,7 +110,10 @@ if ((Test-File $modelFileEntry) -eq "ok") {
         exit 1
     }
     Write-Host "    归档 SHA-256 OK: $($modelArchive.Sha)"
-    tar -xf $modelTmp -C "$root\app\src\main\assets"
+    Write-Host "    [$(Get-Date -Format HH:mm:ss)] 解压中（$tarExe）..."
+    & $tarExe -xf $modelTmp -C "$root\app\src\main\assets"
+    if ($LASTEXITCODE -ne 0) { Write-Error "tar 解压失败（exit $LASTEXITCODE）—— 中止"; exit 1 }
+    Write-Host "    [$(Get-Date -Format HH:mm:ss)] 解压完成"
     Remove-Item $modelTmp
     # 解压后逐文件校验运行时闭集（file: 条目中位于模型目录下的全部文件）
     $failed = @()
