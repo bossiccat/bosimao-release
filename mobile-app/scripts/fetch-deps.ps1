@@ -110,17 +110,33 @@ if ((Test-File $modelFileEntry) -eq "ok") {
         exit 1
     }
     Write-Host "    归档 SHA-256 OK: $($modelArchive.Sha)"
-    Write-Host "    [$(Get-Date -Format HH:mm:ss)] 解压中（$tarExe，独立进程）..."
-    # 不用 & 直接调用：GitHub Actions runner 上 PS 5.1 的 stdout 管道会让原生 tar 无输出挂死
-    # （Run#7 MSYS tar 与 Run#8 System32 tar 同位置挂死实锤）。Start-Process 不继承管道，绕开。
-    $dest = "$root\app\src\main\assets"
-    $p = Start-Process -FilePath $tarExe -ArgumentList @('-xf', "`"$modelTmp`"", '-C', "`"$dest`"") -Wait -PassThru -NoNewWindow
-    if ($p.ExitCode -ne 0) { Write-Error "tar 解压失败（exit $($p.ExitCode)）—— 中止"; exit 1 }
+    Write-Host "    [$(Get-Date -Format HH:mm:ss)] 解压中（python tarfile，无外部 tar 进程）..."
+    # 不用 tar.exe：GitHub runner 无终端环境下 bsdtar 的 stderr 进度控制序列会永久阻塞
+    # （Run#7 MSYS tar / Run#8 System32 tar 直调 / Run#9 Start-Process 三种方式同位置挂死实锤）。
+    # Python tarfile 纯缓冲 stdout，且 runner 与本机均预装 Python，行为一致。
+    $pyScript = Join-Path $env:TEMP "extract_kws.py"
+@'
+import sys, tarfile
+src, dest = sys.argv[1], sys.argv[2]
+with tarfile.open(src, "r:bz2") as t:
+    try:
+        t.extractall(dest, filter="data")
+    except TypeError:
+        t.extractall(dest)
+    print("extracted entries:", len(t.getmembers()))
+'@ | Set-Content -Path $pyScript -Encoding ASCII
+    $pyExe = @(Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1)[0].Source
+    if (-not $pyExe) { Write-Error "python/py 均不可用 —— 无法解压 bz2"; exit 1 }
+    & $pyExe $pyScript $modelTmp "$root\app\src\main\assets"
+    if ($LASTEXITCODE -ne 0) { Write-Error "python 解压失败（exit $LASTEXITCODE）—— 中止"; exit 1 }
+    Remove-Item $pyScript -Force -ErrorAction SilentlyContinue
     Write-Host "    [$(Get-Date -Format HH:mm:ss)] 解压完成"
     Remove-Item $modelTmp
-    # 解压后逐文件校验运行时闭集（file: 条目中位于模型目录下的全部文件）
+    # 解压后逐文件校验运行时闭集（file: 条目中位于模型目录下的全部文件）。
+    # 注意：keywords_jax.txt 是自建文件、不在归档内，此时必缺——由下方恢复段补齐后统一复验，
+    # 此处只校验归档应含的文件（排除 keywords_jax.txt）。
     $failed = @()
-    foreach ($e in ($manifest | Where-Object { $_.Tag -eq 'file' -and $_.RelPath -like 'app\src\main\assets\sherpa-onnx-*' })) {
+    foreach ($e in ($manifest | Where-Object { $_.Tag -eq 'file' -and $_.RelPath -like 'app\src\main\assets\sherpa-onnx-*' -and $_.RelPath -notlike '*keywords_jax.txt' })) {
         if ((Test-File $e) -ne "ok") { $failed += $e.RelPath }
     }
     if ($failed.Count -gt 0) {
