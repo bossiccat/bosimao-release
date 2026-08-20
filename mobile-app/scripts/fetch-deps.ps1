@@ -110,9 +110,12 @@ if ((Test-File $modelFileEntry) -eq "ok") {
         exit 1
     }
     Write-Host "    归档 SHA-256 OK: $($modelArchive.Sha)"
-    Write-Host "    [$(Get-Date -Format HH:mm:ss)] 解压中（$tarExe）..."
-    & $tarExe -xf $modelTmp -C "$root\app\src\main\assets"
-    if ($LASTEXITCODE -ne 0) { Write-Error "tar 解压失败（exit $LASTEXITCODE）—— 中止"; exit 1 }
+    Write-Host "    [$(Get-Date -Format HH:mm:ss)] 解压中（$tarExe，独立进程）..."
+    # 不用 & 直接调用：GitHub Actions runner 上 PS 5.1 的 stdout 管道会让原生 tar 无输出挂死
+    # （Run#7 MSYS tar 与 Run#8 System32 tar 同位置挂死实锤）。Start-Process 不继承管道，绕开。
+    $dest = "$root\app\src\main\assets"
+    $p = Start-Process -FilePath $tarExe -ArgumentList @('-xf', "`"$modelTmp`"", '-C', "`"$dest`"") -Wait -PassThru -NoNewWindow
+    if ($p.ExitCode -ne 0) { Write-Error "tar 解压失败（exit $($p.ExitCode)）—— 中止"; exit 1 }
     Write-Host "    [$(Get-Date -Format HH:mm:ss)] 解压完成"
     Remove-Item $modelTmp
     # 解压后逐文件校验运行时闭集（file: 条目中位于模型目录下的全部文件）
