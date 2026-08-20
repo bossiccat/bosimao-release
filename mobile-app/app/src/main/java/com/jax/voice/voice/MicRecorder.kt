@@ -62,6 +62,9 @@ class MicRecorder(private val onFrame: (FloatArray) -> Unit) {
             Log.e(TAG, "getMinBufferSize failed: $minBuf")
             return false
         }
+        // 权限契约：RECORD_AUDIO 由调用方（VoiceForegroundService）在进入 IN_ROOM 前完成
+        // 运行时授权检查；本类只负责采集，不重复申请/检查（spec §4.1 采集层无权限职责）。
+        @android.annotation.SuppressLint("MissingPermission")
         val record = AudioRecord(
             MediaRecorder.AudioSource.MIC,
             SAMPLE_RATE,
