@@ -1,0 +1,110 @@
+# =============================================================================
+# Android 四门 CI：test / lint / assembleRelease / artifact
+# 波斯猫（Bosimao）商业产品 — mobile-app（Gradle 8.14 + AGP 8.6.1 + Kotlin 1.9.24,
+# JDK 17, compileSdk 35）。工作目录 mobile-app/ 由 defaults.run.working-directory 指定。
+#
+# 依赖闭集（docs: mobile-app/docs/dependency-closure.md）：
+#   - Maven 依赖：gradle.lockfile 锁定（lockAllConfigurations），从 google()/
+#     mavenCentral()/腾讯镜像按锁解析；TRTC LiteAVSDK 仅腾讯镜像提供。
+#   - 非 Maven 二进制（sherpa-onnx AAR 46.6MB + KWS 模型 31.1MB）不入库，
+#     由 mobile-app/scripts/fetch-deps.ps1 按 deps-checksums.txt 的 SHA-256
+#     从上游 GitHub Release 下载并强制校验；不匹配即删除并失败，绝不静默使用。
+#   - 缓存恢复的 AAR/模型同样必须过哈希校验（脚本对已存在文件先验后用），
+#     缓存投毒无法进入构建闭集。缓存键 = deps-checksums.txt 的 hash。
+# GRADLE_USER_HOME：CI 上无本机 360 干扰，用 runner 默认值，由 setup-gradle 缓存。
+# =============================================================================
+name: Android Gates
+
+on:
+  push:
+    branches: [master, ci/android-gates]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+    working-directory: mobile-app
+
+jobs:
+  android-gates:
+    name: "gates: test | lint | assembleRelease | artifact"
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Checkout (git root)
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK (cmdline-tools + ANDROID_HOME)
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages (API 35; licenses pre-accepted)
+        run: |
+          $lic = Join-Path $env:ANDROID_HOME 'licenses'
+          New-Item -ItemType Directory -Force -Path $lic | Out-Null
+          # 写入历代 android-sdk-license 哈希，免去交互式 --licenses
+          $hashes = @(
+            '24333f8a63b6825ea9c5514f83c2829b004d1fee',
+            '84831b9409646a918e30573bab4c9c91346d8abd',
+            'd975f751698a77b662f1254ddbeed3901e976f5a',
+            'd56f5187479451eabf01fb78af6dfcb131a6481e'
+          )
+          Set-Content -Path (Join-Path $lic 'android-sdk-license') -Value $hashes
+          sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle (wrapper cache + dependency cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Restore closed-set binaries cache (AAR + KWS model)
+        uses: actions/cache@v4
+        with:
+          path: |
+            mobile-app/app/libs/sherpa-onnx-1.13.4.aar
+            mobile-app/app/src/main/assets/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01
+          key: android-closedset-${{ hashFiles('mobile-app/scripts/deps-checksums.txt') }}
+
+      - name: Fetch + verify closed-set deps (SHA-256 enforced, fail on mismatch)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-deps.ps1
+
+      # ------------------------- 四门 -------------------------
+
+      - name: "Gate 1/4 - test (./gradlew test)"
+        run: .\gradlew.bat test --stacktrace
+
+      - name: "Gate 2/4 - lint (./gradlew lint)"
+        run: .\gradlew.bat lint --stacktrace
+
+      - name: "Gate 3/4 - assembleRelease (./gradlew assembleRelease)"
+        run: .\gradlew.bat assembleRelease --stacktrace
+
+      # upload-artifact 的 path 相对 GITHUB_WORKSPACE（defaults 不作用于 uses 步骤）
+      - name: "Gate 4/4 - artifact (upload release APK)"
+        uses: actions/upload-artifact@v4
+        with:
+          name: bosimao-release-apk
+          path: mobile-app/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      # 失败时留证：测试/lint 报告随 run 归档，便于远程定位
+      - name: Upload failure evidence (test/lint reports)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-failure-reports
+          path: |
+            mobile-app/app/build/reports/tests/**
+            mobile-app/app/build/reports/lint-results*.html
+          if-no-files-found: ignore
