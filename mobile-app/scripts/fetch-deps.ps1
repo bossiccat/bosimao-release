@@ -154,7 +154,10 @@ if ((Test-File $kwEntry) -ne "ok") {
     if (Test-Path $kwTemplate) {
         Write-Host "    恢复 keywords_jax.txt（自建关键词文件，来自仓库模板）..."
         New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
-        Copy-Item $kwTemplate (Join-Path $root $kwEntry.RelPath) -Force
+        # 不能用 Copy-Item：git checkout 在 Windows 上可能把模板 LF 转成 CRLF（core.autocrlf），
+        # 模板哈希按 LF 记录，CRLF 会让 27B 变 29B 导致校验必败。读入后统一按 LF 写出。
+        $kwContent = [IO.File]::ReadAllText($kwTemplate) -replace "`r`n", "`n"
+        [IO.File]::WriteAllText((Join-Path $root $kwEntry.RelPath), $kwContent, (New-Object System.Text.UTF8Encoding($false)))
         if ((Test-File $kwEntry) -ne "ok") {
             Write-Error "keywords_jax.txt 恢复后哈希仍不符（期望 $($kwEntry.Sha)）—— 中止"
             exit 1
