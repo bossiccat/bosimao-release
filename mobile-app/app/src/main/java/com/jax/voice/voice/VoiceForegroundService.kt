@@ -15,6 +15,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
 
 internal fun sessionEntryPoint(source: String): VoiceSessionApi.EntryPoint = when {
     source == "main" -> VoiceSessionApi.EntryPoint.MAIN
@@ -41,6 +42,12 @@ class VoiceForegroundService : Service() {
         const val ACTION_STOP = "com.jax.voice.action.STOP"
         const val ACTION_TALK = "com.jax.voice.action.TALK" // 立即对话（悬浮窗/通知兜底，§5.3）
         const val ACTION_PAUSE = "com.jax.voice.action.PAUSE" // 暂停/恢复监听
+
+        // Task #23 终止通知预算：HTTP callTimeout 封顶 + 2×500ms RTC 通知重试 ≈ ≤1.7s（< ~2s，
+        // 保证 App 被杀场景下退出主路径不被阻塞；CP 超时兜底已有）
+        private const val TERMINATE_HTTP_BUDGET_MS = 600L
+        private const val NOTICE_RETRY_DELAY_MS = 500L
+        private const val NOTICE_RETRY_MAX = 2
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -56,6 +63,18 @@ class VoiceForegroundService : Service() {
     @Volatile private var wakeActive = VoiceConfig.WAKE_DEFAULT_ENABLED
     @Volatile private var micRestartCount = 0
     @Volatile private var stopping = false
+
+    /** 最近一次签发的会话信息（Task #23：退出时提供 terminate 所需 room_id/sessionId 上下文） */
+    @Volatile private var lastSignedSession: VoiceSessionInfo? = null
+
+    /** 终止 HTTP 客户端：callTimeout 封顶，保证退出主路径预算（默认 client 是 10s 超时） */
+    private val terminationApi by lazy {
+        VoiceSessionApi(
+            client = okhttp3.OkHttpClient.Builder()
+                .callTimeout(TERMINATE_HTTP_BUDGET_MS, TimeUnit.MILLISECONDS)
+                .build()
+        )
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -158,7 +177,9 @@ class VoiceForegroundService : Service() {
                     credential = sessionCredential.wireCredential,
                     entryPoint = sessionEntryPoint(source)
                 )
-                VoiceSessionInfo(s.roomId, s.userId, s.userSig, s.sdkAppId, s.sessionId)
+                VoiceSessionInfo(s.roomId, s.userId, s.userSig, s.sdkAppId, s.sessionId).also {
+                    lastSignedSession = it // Task #23：退出时 terminate 上下文来源
+                }
             },
             enterRoom = { gen, session ->
                 val client = rtcClient ?: throw IllegalStateException("rtc client not ready")
@@ -181,9 +202,12 @@ class VoiceForegroundService : Service() {
                 }
                 coordinator?.postEnterSucceeded(gen)
             },
-            exitRoom = { _ ->
+            exitRoom = { gen ->
                 val client = rtcClient
                 if (client != null && (client.isInRoom() || client.hasPendingEnter())) {
+                    // Task #23：退房前上游接线（postTerminate → RTC 终止通知，含短重试）；
+                    // 任何失败照常退房（CP 超时兜底已有），总预算 ≤~2s
+                    runTerminationNoticeBeforeExit(client, gen)
                     val gate = CompletableDeferred<Unit>()
                     exitGate = gate
                     client.exitRoom()
@@ -194,10 +218,27 @@ class VoiceForegroundService : Service() {
         )
     }
 
+    /**
+     * 退出前上游接线（Task #23）：IN_ROOM 且有 sessionId 时 postTerminate 拿 tid →
+     * sendTerminationNotice（false 时 2 次×500ms 短重试）→ 返回后调用方 exitRoom。
+     * fail-open：任何异常吞掉照常退房；CancellationException 原样上抛不拦截。
+     */
+    private suspend fun runTerminationNoticeBeforeExit(client: RtcClient, generation: Long) =
+        runTerminationNotice(
+            service = this,
+            client = client,
+            terminationApi = terminationApi,
+            signedSession = { lastSignedSession },
+            generation = generation,
+            retryDelayMs = NOTICE_RETRY_DELAY_MS,
+            maxRetries = NOTICE_RETRY_MAX,
+        )
+
     /** 只渲染模型：mic handoff + 发布统一体验状态 + 兼容存量 VoiceController + 通知 */
     private fun renderModel(model: VoiceSessionModel) {
         when (model.state) {
             VoiceSessionState.IDLE -> {
+                lastSignedSession = null // 会话已收敛：清 terminate 上下文（Task #23）
                 VoiceController.setConnection(ConnectionState.DISCONNECTED)
                 VoiceController.setPhase(VoicePhase.MONITORING)
                 VoiceController.setLastError(model.error ?: "")

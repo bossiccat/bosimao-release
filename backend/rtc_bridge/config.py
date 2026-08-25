@@ -30,6 +30,15 @@ class BridgeConfig:
     down_max_frames: int = 200
     down_max_bytes: int = 200 * 640
     down_max_frame_age_ms: int = 1000
+    # Control Plane hello redemption（HTTPS + mTLS，零重试）
+    control_plane_base_url: str = ""
+    control_plane_service_credential: str = ""
+    control_plane_ca_file: str = ""
+    control_plane_client_cert_file: str = ""
+    control_plane_client_key_file: str = ""
+    control_plane_gateway_assertion: str = ""
+    control_plane_connect_timeout_s: float = 0.5
+    control_plane_total_timeout_s: float = 2.0
     # 会话保护
     no_peer_timeout_s: float = 120.0   # 进房后长时间无远端加入 → 退房回待命
     extra: dict = field(default_factory=dict)
@@ -42,6 +51,12 @@ def load_bridge_config(env: dict | None = None) -> BridgeConfig:
     def _int(name: str, default: int) -> int:
         try:
             return int(env.get(name, ""))
+        except (TypeError, ValueError):
+            return default
+
+    def _float(name: str, default: float) -> float:
+        try:
+            return float(env.get(name, ""))
         except (TypeError, ValueError):
             return default
 
@@ -62,4 +77,16 @@ def load_bridge_config(env: dict | None = None) -> BridgeConfig:
     cfg.down_max_frames = _int("RTC_BRIDGE_DOWN_MAX_FRAMES", cfg.down_max_frames)
     cfg.down_max_bytes = _int("RTC_BRIDGE_DOWN_MAX_BYTES", cfg.down_max_bytes)
     cfg.down_max_frame_age_ms = _int("RTC_BRIDGE_DOWN_MAX_FRAME_AGE_MS", cfg.down_max_frame_age_ms)
+    cfg.control_plane_base_url = env.get("RTC_BRIDGE_CONTROL_PLANE_BASE_URL", "")
+    cfg.control_plane_service_credential = env.get("RTC_BRIDGE_SERVICE_CREDENTIAL", "")
+    cfg.control_plane_ca_file = env.get("RTC_BRIDGE_CONTROL_PLANE_CA_FILE", "")
+    cfg.control_plane_client_cert_file = env.get("RTC_BRIDGE_CLIENT_CERT_FILE", "")
+    cfg.control_plane_client_key_file = env.get("RTC_BRIDGE_CLIENT_KEY_FILE", "")
+    cfg.control_plane_gateway_assertion = env.get("RTC_BRIDGE_GATEWAY_ASSERTION", "")
+    cfg.control_plane_connect_timeout_s = _float(
+        "RTC_BRIDGE_CONTROL_PLANE_CONNECT_TIMEOUT_S", cfg.control_plane_connect_timeout_s
+    )
+    cfg.control_plane_total_timeout_s = _float(
+        "RTC_BRIDGE_CONTROL_PLANE_TOTAL_TIMEOUT_S", cfg.control_plane_total_timeout_s
+    )
     return cfg

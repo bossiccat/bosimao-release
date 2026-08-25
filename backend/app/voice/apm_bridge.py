@@ -17,10 +17,10 @@ import asyncio
 import base64
 import json
 import logging
-import os
-import ssl
-import time
 from typing import Any, Awaitable, Callable
+
+from .apm_handshake import open_session
+from .apm_reconnect import reconnect
 
 import numpy as np
 
@@ -77,45 +77,16 @@ class ApmBridge:
         self._started = False               # 懒初始化：首个音频块到达才建会话（避免空闲连接被服务端回收）
         self._reconnect_lock = asyncio.Lock()
 
+    @property
+    def started(self) -> bool:
+        """APM 实时会话是否已真实建立（懒初始化完成后为 True）"""
+        return self._started
+
     async def start(self) -> None:
         """连接 API + 会话初始化 + 启动接收循环（阻塞直到就绪）"""
-        # 绕过系统代理：本机 Clash(127.0.0.1:7890) 未运行会劫持全部外连（2026-08-05 实测）
-        for k in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
-            os.environ.pop(k, None)
-        import websockets
-
-        headers = {"Authorization": f"Bearer {self._token}"} if self._token else None
-        try:
-            self._ws = await websockets.connect(
-                self._api_url, ssl=ssl.create_default_context(), additional_headers=headers,
-                open_timeout=20.0, max_size=16 * 1024 * 1024,
-            )
-        except TypeError:
-            # 旧版 websockets 用 extra_headers
-            self._ws = await websockets.connect(
-                self._api_url, ssl=ssl.create_default_context(), extra_headers=headers,
-                open_timeout=20.0, max_size=16 * 1024 * 1024,
-            )
-        # 排队 → 就绪
-        while True:
-            msg = json.loads(await asyncio.wait_for(self._ws.recv(), timeout=15))
-            if msg.get("type") in ("session.queue_done", "queue_done"):
-                break
-            if msg.get("type") == "error":
-                raise RuntimeError(f"API 排队失败: {msg}")
-        # 会话初始化
-        await self._ws.send(json.dumps({
-            "type": "session.init",
-            "payload": {"system_prompt": self._system_prompt},
-        }))
-        while True:
-            msg = json.loads(await asyncio.wait_for(self._ws.recv(), timeout=15))
-            if msg.get("type") == "session.created":
-                self._session_id = msg.get("session_id", "")
-                logger.info("apm session created: %s", self._session_id)
-                break
-            if msg.get("type") == "error":
-                raise RuntimeError(f"API 会话失败: {msg}")
+        self._ws, self._session_id = await open_session(
+            self._api_url, self._token, self._system_prompt
+        )
         self._recv_task = asyncio.create_task(self._recv_loop())
         self._started = True
 
@@ -159,24 +130,16 @@ class ApmBridge:
                         return
 
     async def _reconnect(self) -> None:
-        """断线重连：关旧连接 → 重新 start（连 ws + queue + session.init）；失败则标记不可用等下一块音频"""
-        async with self._reconnect_lock:
-            if self._closed:
-                return
-            if self._ws is not None:
-                try:
-                    await self._ws.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            self._ws = None
-            if self._recv_task is not None:
-                self._recv_task.cancel()
-                self._recv_task = None
-            try:
-                await self.start()
-            except Exception as e:  # noqa: BLE001
-                logger.error("apm reconnect failed: %s", e)
-                self._ws = None
+        """断线重连：关旧连接 → 重新 start；失败则等下一块音频重试。"""
+        await reconnect(
+            lock=self._reconnect_lock,
+            is_closed=lambda: self._closed,
+            get_ws=lambda: self._ws,
+            set_ws=lambda value: setattr(self, "_ws", value),
+            get_recv_task=lambda: self._recv_task,
+            set_recv_task=lambda value: setattr(self, "_recv_task", value),
+            start=self.start,
+        )
 
     async def _recv_loop(self) -> None:
         """下行：SSE/JSON 事件循环 → audio delta 转 16k s16 → on_audio_out"""
@@ -230,67 +193,7 @@ class ApmBridge:
             self._recv_task.cancel()
 
 
-# ---------- 独立验证 ----------
-async def _verify(wav_path: str, out_path: str) -> None:
-    import wave
-
-    audio_out: list[bytes] = []
-    text_out: list[str] = []
-    first_out_t: float | None = None
-    t0 = time.perf_counter()
-
-    async def on_audio(pcm: bytes) -> None:
-        nonlocal first_out_t
-        if first_out_t is None:
-            first_out_t = time.perf_counter()
-            print(f"首音频 @{(first_out_t-t0)*1000:.0f}ms, {len(pcm)}B")
-        audio_out.append(pcm)
-
-    async def on_text(t: str) -> None:
-        text_out.append(t)
-        print(f"  [text @{(time.perf_counter()-t0)*1000:.0f}ms] {t!r}")
-
-    bridge = ApmBridge(on_audio_out=on_audio, on_text=on_text)
-    await bridge.start()
-    print(f"会话就绪 @{(time.perf_counter()-t0)*1000:.0f}ms")
-
-    w = wave.open(wav_path)
-    pcm = w.readframes(w.getnframes())
-    # 按 40ms 帧喂（模拟手机 40ms 采集帧）
-    frame = 1600  # 40ms @16k = 1600 样本 = 3200B
-    for i in range(0, len(pcm), frame * 2):
-        await bridge.feed_pcm(pcm[i : i + frame * 2])
-        await asyncio.sleep(0.04)
-    # 尾部 3s 静音（VAD 判定说完）
-    silence = b"\x00\x00" * 16000 * 3
-    await bridge.feed_pcm(silence)
-    # 等回复（最多 25s）
-    deadline = time.perf_counter() + 25
-    while time.perf_counter() < deadline and not audio_out:
-        await asyncio.sleep(0.2)
-    await bridge.close()
-
-    print(f"文本: {''.join(text_out)[:200]!r}")
-    print(f"音频块: {len(audio_out)}, 总字节: {sum(len(b) for b in audio_out)}")
-    if audio_out and out_path:
-        with wave.open(out_path, "wb") as wo:
-            wo.setnchannels(1)
-            wo.setsampwidth(2)
-            wo.setframerate(16000)
-            wo.writeframes(b"".join(audio_out))
-        print(f"已保存: {out_path}")
-
-
-def main() -> None:
-    import argparse
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    parser = argparse.ArgumentParser(description="ApmBridge 独立验证")
-    parser.add_argument("--wav", required=True, help="16k s16 mono WAV 输入")
-    parser.add_argument("--out", default="", help="输出 WAV（下行音频拼接）")
-    args = parser.parse_args()
-    asyncio.run(_verify(args.wav, args.out))
-
-
 if __name__ == "__main__":
+    from .apm_verify import main
+
     main()

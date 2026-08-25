@@ -20,11 +20,13 @@ ERROR_MESSAGES: dict[int, str] = {
     40401: "device_not_found",
     40801: "handshake_timeout",
     40901: "state_conflict",
+    40914: "hello_state_conflict",
     41301: "queue_overflow",
     42901: "rate_limited",
     50300: "credential_unavailable",
     50301: "termination_unconfirmed",
     50302: "privacy_action_failed",
+    50303: "hello_redemption_unavailable",
     50401: "upstream_timeout",
 }
 
@@ -37,11 +39,13 @@ HTTP_STATUS: dict[int, int] = {
     40401: 404,
     40801: 408,
     40901: 409,
+    40914: 409,
     41301: 413,
     42901: 429,
     50300: 503,
     50301: 503,
     50302: 503,
+    50303: 503,
     50401: 504,
 }
 

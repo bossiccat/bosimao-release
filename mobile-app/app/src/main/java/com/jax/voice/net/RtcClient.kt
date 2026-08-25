@@ -47,17 +47,42 @@ class RtcClient(
         private const val EXIT_TIMEOUT_MS = 3_000L // 退房回调超时兜底
         private const val ENTER_TIMEOUT_MS = 15_000L // 进房回调超时兜底
         private const val REMOTE_LEAVE_TIMEOUT_MS = 60_000L // 对端离开超时退房
+        /** 自定义命令 cmdId=1：会话终止通知（与 sidecar rtc.js onRecvCustomCmdMsg 约定一致，Task #23） */
+        const val CMD_ID_TERMINATE = 1
     }
 
     @Volatile private var inRoom = false // 本地维护；13.4 SDK 无 isInRoom 公开方法
     @Volatile private var exitHandled = false // 防「超时兜底 + 真实回调」双触发
-    @Volatile private var exitTimeoutThread: Thread? = null
-    @Volatile private var enterTimeoutThread: Thread? = null
-    @Volatile private var leaveTimeoutThread: Thread? = null
     @Volatile private var lastVolLogTs = 0L // 非零音量降频记录（3s 一条）
     @Volatile private var remoteUserId: String? = null // 最近远端用户（打断 flush 目标）
 
     private val audioRms = RtcAudioFrameRms(onRms = { onRms(it) }) // 本地采集帧 RMS（波形兜底源）
+
+    private val timeouts = RtcClientTimeouts(
+        exitTimeoutMs = EXIT_TIMEOUT_MS,
+        enterTimeoutMs = ENTER_TIMEOUT_MS,
+        remoteLeaveTimeoutMs = REMOTE_LEAVE_TIMEOUT_MS,
+        onExitTimeout = {
+            if (!exitHandled) {
+                exitHandled = true
+                Log.w(TAG, "onExitRoom timeout (${EXIT_TIMEOUT_MS}ms): forcing onExited")
+                onExited()
+            }
+        },
+        onEnterTimeout = {
+            if (!exitHandled && !inRoom) {
+                exitHandled = true
+                inRoom = false
+                Log.e(TAG, "onEnterRoom timeout (${ENTER_TIMEOUT_MS}ms): forcing enter failure recovery")
+                onState(ConnectionState.DISCONNECTED)
+                onError("enter_timeout", "进房超时（${ENTER_TIMEOUT_MS / 1000}s 无回调）")
+            }
+        },
+        onRemoteLeaveTimeout = {
+            Log.w(TAG, "remote leave timeout (${REMOTE_LEAVE_TIMEOUT_MS}ms): auto exitRoom")
+            if (inRoom) exitRoom()
+        }
+    )
 
     /** TRTC 引擎（默认 App 进程级单例 sharedInstance）；懒加载：首次 enterRoom 才创建实例 */
     private val cloud: TRTCCloud by lazy {
@@ -151,6 +176,10 @@ class RtcClient(
             // Task 7：正常远端停止只发 UI 事件，绝不 muteRemoteAudio(true)（订阅长期有效，AC-12）
             playback.onRemoteAudioStatusUpdated(userId, audioStatus, reason)
         }
+        override fun onRecvCustomCmdMsg(userId: String, cmdId: Int, seq: Int, message: ByteArray?) {
+            // 反向命令预留（Task #23）：sidecar → 手机下行自定义命令通道；当前只记录，不处理。
+            DiagLog.log("Rtc", "onRecvCustomCmdMsg user=$userId cmdId=$cmdId seq=$seq len=${message?.size ?: 0}")
+        }
         override fun onError(errCode: Int, errMsg: String, extraInfo: Bundle?) {
             Log.e(TAG, "TRTC error: $errCode $errMsg")
             onError("$errCode", errMsg)
@@ -194,7 +223,7 @@ class RtcClient(
 
     /** 退房（异步：等 onExitRoom 回调；3s 超时兜底强制恢复）。进房进行中也可退房（取消在途 enter，Task 6）。 */
     fun exitRoom() {
-        val pendingEnter = enterTimeoutThread != null
+        val pendingEnter = timeouts.enterThread != null
         if (!inRoom && !pendingEnter) {
             Log.w(TAG, "exitRoom ignored: not in room / no pending enter")
             return
@@ -213,7 +242,33 @@ class RtcClient(
     }
 
     /** 是否有在途进房（enterRoom 已调用、onEnterRoom 未回）：coordinator 据此决定是否等待退房回调 */
-    fun hasPendingEnter(): Boolean = enterTimeoutThread != null
+    fun hasPendingEnter(): Boolean = timeouts.enterThread != null
+
+    /**
+     * 退房前向 sidecar 发终止通知（sendCustomCmdMsg，cmdId=[CMD_ID_TERMINATE]，reliable+ordered）。
+     * payload JSON {type:"note_termination", termination_id}，sidecar rtc.js 解析后经 bridge
+     * noteTermination 中继给 rtc_bridge。绝不抛错：SDK 异常/未进房一律返回 false（调用方可短重试）。
+     */
+    fun sendTerminationNotice(terminationId: String): Boolean {
+        if (terminationId.isBlank()) {
+            Log.w(TAG, "sendTerminationNotice ignored: blank terminationId")
+            return false
+        }
+        val payload = org.json.JSONObject()
+            .put("type", "note_termination")
+            .put("termination_id", terminationId)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        return try {
+            // javap 核对 13.4.0.20477 jar：sendCustomCmdMsg(int cmdId, byte[] data, boolean reliable, boolean ordered)
+            val sent = cloud.sendCustomCmdMsg(CMD_ID_TERMINATE, payload, true, true)
+            DiagLog.log("Rtc", "terminationNotice sent=$sent tid=$terminationId")
+            sent
+        } catch (t: Throwable) {
+            Log.w(TAG, "sendTerminationNotice failed: ${t.message}", t)
+            false
+        }
+    }
 
     /** 显式打断（用户开口/点击，AC-13）：本地播放 stop/flush + generation 失效，长期订阅不变 */
     fun interruptRemotePlayback() {
@@ -249,57 +304,10 @@ class RtcClient(
         }
     }
 
-    private fun scheduleExitTimeout() {
-        cancelExitTimeout()
-        exitTimeoutThread = daemonDelay(EXIT_TIMEOUT_MS) {
-            if (!exitHandled) {
-                exitHandled = true
-                Log.w(TAG, "onExitRoom timeout (${EXIT_TIMEOUT_MS}ms): forcing onExited")
-                onExited()
-            }
-        }
-    }
-    private fun cancelExitTimeout() {
-        exitTimeoutThread?.interrupt()
-        exitTimeoutThread = null
-    }
-    private fun scheduleEnterTimeout() {
-        cancelEnterTimeout()
-        enterTimeoutThread = daemonDelay(ENTER_TIMEOUT_MS) {
-            if (!exitHandled && !inRoom) {
-                exitHandled = true
-                inRoom = false
-                Log.e(TAG, "onEnterRoom timeout (${ENTER_TIMEOUT_MS}ms): forcing enter failure recovery")
-                onState(ConnectionState.DISCONNECTED)
-                onError("enter_timeout", "进房超时（${ENTER_TIMEOUT_MS / 1000}s 无回调）")
-            }
-        }
-    }
-    private fun cancelEnterTimeout() {
-        enterTimeoutThread?.interrupt()
-        enterTimeoutThread = null
-    }
-    private fun scheduleRemoteLeaveTimeout() {
-        cancelLeaveTimeout()
-        leaveTimeoutThread = daemonDelay(REMOTE_LEAVE_TIMEOUT_MS) {
-            Log.w(TAG, "remote leave timeout (${REMOTE_LEAVE_TIMEOUT_MS}ms): auto exitRoom")
-            if (inRoom) exitRoom()
-        }
-    }
-    private fun cancelLeaveTimeout() {
-        leaveTimeoutThread?.interrupt()
-        leaveTimeoutThread = null
-    }
-
-    /** 通用守护线程延时兜底：取消 = interrupt（sleep 抛 InterruptedException 后静默退出） */
-    private fun daemonDelay(ms: Long, onTimeout: () -> Unit): Thread {
-        return Thread {
-            try {
-                Thread.sleep(ms)
-                onTimeout()
-            } catch (_: InterruptedException) {
-                // 正常回调先到 → 兜底已取消
-            }
-        }.apply { isDaemon = true; start() }
-    }
+    private fun scheduleExitTimeout() = timeouts.scheduleExit()
+    private fun cancelExitTimeout() = timeouts.cancelExit()
+    private fun scheduleEnterTimeout() = timeouts.scheduleEnter()
+    private fun cancelEnterTimeout() = timeouts.cancelEnter()
+    private fun scheduleRemoteLeaveTimeout() = timeouts.scheduleLeave()
+    private fun cancelLeaveTimeout() = timeouts.cancelLeave()
 }

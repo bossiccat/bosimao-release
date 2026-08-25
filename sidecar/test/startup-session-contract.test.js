@@ -12,6 +12,17 @@ const RTC_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'rtc.js'), 'utf8')
 const PHONE_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'phone.js'), 'utf8');
 const MAIN_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 
+function hello(sessionId = 's1', deviceId = 'd1', roomId = 'r1') {
+  return {
+    type: 'hello', proof: `proof-${sessionId}`, nonce: `nonce-${sessionId}-current`,
+    jti: `jti-${sessionId}`, session_id: sessionId, device_id: deviceId, room_id: roomId,
+    sidecar_user_id: 'jax-pc-sidecar', generation: 0, protocol_version: '1.0',
+    audio_format: {
+      encoding: 'pcm_s16le', sample_rate_hz: 16000, channels: 1, frame_ms: 20, frame_bytes: 640,
+    },
+  };
+}
+
 function validCredential() {
   return 's'.repeat(32);
 }
@@ -81,14 +92,12 @@ test('bridge has no startup hello and only connects for a complete active sessio
   try {
     const bridge = new BridgeClient('ws://127.0.0.1:19092', () => {}, () => {});
     assert.equal(opened.length, 0);
-    assert.throws(() => bridge.startSession({ session_id: '', device_id: 'd', room_id: 'r', user_id: 'u', sdk_version: 'v' }));
-    bridge.startSession({ session_id: 's1', device_id: 'd1', room_id: 'r1', user_id: 'u', sdk_version: 'v' });
+    assert.throws(() => bridge.startSession({ ...hello(), proof: '' }));
+    bridge.startSession(hello());
     assert.equal(opened.length, 1);
     opened[0].readyState = FakeWebSocket.OPEN;
     opened[0].onopen();
-    assert.deepEqual(opened[0].sent[0], {
-      type: 'hello', role: 'sidecar', sdk_version: 'v', session_id: 's1', device_id: 'd1', room_id: 'r1', user_id: 'u',
-    });
+    assert.deepEqual(opened[0].sent[0], hello());
     bridge.clearSession();
     opened[0].onclose();
     assert.equal(opened.length, 1, 'no active session must not reconnect');
@@ -108,8 +117,8 @@ test('a changed session replaces the socket and sends its hello as the first fra
     close() { this.closed = true; this.readyState = 3; }
   }
   global.WebSocket = FakeWebSocket;
-  const sessionA = { session_id: 'sA', device_id: 'dA', room_id: 'rA', user_id: 'u', sdk_version: 'v' };
-  const sessionB = { session_id: 'sB', device_id: 'dB', room_id: 'rB', user_id: 'u', sdk_version: 'v' };
+  const sessionA = hello('sA', 'dA', 'rA');
+  const sessionB = hello('sB', 'dB', 'rB');
   try {
     const bridge = new BridgeClient('ws://127.0.0.1:19092', () => {}, () => {});
     bridge.startSession(sessionA);
@@ -121,7 +130,7 @@ test('a changed session replaces the socket and sends its hello as the first fra
     assert.equal(opened[0].sent.length, 1, 'session B hello must not use old socket');
     opened[1].readyState = FakeWebSocket.OPEN;
     opened[1].onopen();
-    assert.deepEqual(opened[1].sent, [{ type: 'hello', role: 'sidecar', ...sessionB }]);
+    assert.deepEqual(opened[1].sent, [sessionB]);
     opened[0].onclose();
     assert.equal(opened.length, 2, 'stale onclose must not create a competing socket');
     bridge.startSession(sessionB);
@@ -131,10 +140,49 @@ test('a changed session replaces the socket and sends its hello as the first fra
   }
 });
 
-test('pending/sign flow checks room before bridge hello and signs the Android intent device', () => {
-  assert.match(RTC_SOURCE, /device_id:\s*intent\.device_id/);
+test('pending/sign flow binds the claim and forwards the CP hello unchanged', () => {
+  assert.match(RTC_SOURCE, /fetchSigForDevice\(intent\)/);
+  assert.match(RTC_SOURCE, /session_id:\s*intent\.session_id/);
+  assert.match(RTC_SOURCE, /claim_token:\s*intent\.claim_token/);
   assert.match(RTC_SOURCE, /cred\.room_id\s*!==\s*intent\.room_id/);
-  assert.match(RTC_SOURCE, /bridge\.startSession\(/);
-  assert.ok(RTC_SOURCE.indexOf('cred.room_id !== intent.room_id') < RTC_SOURCE.indexOf('bridge.startSession('));
+  assert.match(RTC_SOURCE, /bridge\.startSession\(cred\.hello\)/);
+  assert.ok(RTC_SOURCE.indexOf('cred.room_id !== intent.room_id') < RTC_SOURCE.indexOf('bridge.startSession(cred.hello)'));
   assert.doesNotMatch(RTC_SOURCE, /bridge\.start\(/);
+});
+
+test('rtc bridge disconnect uses the existing controlled termination entry', () => {
+  assert.match(RTC_SOURCE, /\(\)\s*=>\s*\{[\s\S]*exitSidecar\(['"]bridge_disconnected['"]\)/);
+});
+
+test('bridge disconnect consumes the active proof and never reconnects it', () => {
+  const opened = [];
+  const scheduled = [];
+  const originalWs = global.WebSocket;
+  const originalTimeout = global.setTimeout;
+  class FakeWebSocket {
+    static OPEN = 1;
+    constructor() { this.readyState = 0; this.sent = []; opened.push(this); }
+    send(value) { this.sent.push(JSON.parse(value)); }
+    close() { this.readyState = 3; }
+  }
+  global.WebSocket = FakeWebSocket;
+  global.setTimeout = (fn, delay) => { scheduled.push({ fn, delay }); return 1; };
+  let disconnected = 0;
+  try {
+    const bridge = new BridgeClient(
+      'ws://127.0.0.1:19092', () => {}, () => {}, () => { disconnected += 1; },
+    );
+    bridge.startSession(hello());
+    opened[0].readyState = FakeWebSocket.OPEN;
+    opened[0].onopen();
+    opened[0].onclose();
+    assert.equal(bridge._activeHello, null);
+    assert.equal(bridge._sessionKey, null);
+    assert.equal(disconnected, 1);
+    assert.equal(scheduled.length, 0, 'one-time proof must never schedule reconnect');
+    assert.equal(opened.length, 1);
+  } finally {
+    global.WebSocket = originalWs;
+    global.setTimeout = originalTimeout;
+  }
 });

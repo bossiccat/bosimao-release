@@ -1,4 +1,7 @@
 # OpenAPI 契约 — 贾克斯模式后端 API
+# 历史兼容边界：本文件中的 voice/relay REST 与 WS 契约仅供旧客户端兼容，不是方案 B 商业控制面。
+# 方案 B 商业语音权威契约仅见 docs/api/commercial-voice-openapi.yaml；本文件不得作为 KWS_READY、
+# wake/re-enter 状态迁移或任何语音会话状态的第二状态真源。非语音监控接口仍以本文件为契约。
 # 版本：v1.2（V1.5 M1 voice 网关）2026-08-04
 # 基础路径：http://127.0.0.1:8000
 # 说明：前后端对照开发依据；WS 契约见文末 schema
@@ -14,7 +17,7 @@ openapi: 3.0.3
 info:
   title: 贾克斯模式 - AI 智能体监控中枢 API
   version: 1.0.0
-  description: 桌宠 UI 与后端的全部 HTTP/WS 接口契约
+  description: 桌宠 UI 与后端的非语音监控接口及历史兼容 voice/relay 接口契约；方案 B 商业语音权威契约见 docs/api/commercial-voice-openapi.yaml
 
 servers:
   - url: http://127.0.0.1:8000
@@ -92,13 +95,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/PushResult"
 
-  # ========== 语音（V1.1，未实现） ==========
+  # ========== 历史兼容语音（V1.1，未实现） ==========
+  # 仅供旧客户端兼容；不得用于方案 B 商业控制面、KWS_READY、wake/re-enter 或语音状态真源。
   # 后端 routes_control.py 未实现 voice 端点；WS control 收到 voice_wake/voice_suspend 仅 echo ack
   # 排期：V1.1（关联 OPEN-DECISIONS O-005 / O-003）
   /api/v1/voice/wake:
     post:
-      summary: 唤醒语音会话（进入 Listening）【V1.1 未实现】
+      summary: 历史兼容唤醒语音会话（方案 B 禁用）
+      description: 仅供旧客户端兼容；方案 B 的 wake/re-enter 必须调用 docs/api/commercial-voice-openapi.yaml 中的 /api/v1/voice/sessions/wake。
       operationId: voiceWake
+      deprecated: true
+      x-legacy: true
+      x-commercial-control-plane: false
       x-implemented: false
       x-phase: v1.1
       responses:
@@ -107,20 +115,29 @@ paths:
 
   /api/v1/voice/suspend:
     post:
-      summary: 挂起语音会话（回落 Monitoring）【V1.1 未实现】
+      summary: 历史兼容挂起语音会话（方案 B 禁用）
+      description: 仅供旧客户端兼容；方案 B 的退下必须调用商业控制面 terminate，并等待 terminal acknowledgements，不得由 suspend 直接进入 KWS_READY。
       operationId: voiceSuspend
+      deprecated: true
+      x-legacy: true
+      x-commercial-control-plane: false
       x-implemented: false
       x-phase: v1.1
       responses:
         "202":
           description: 语音会话已挂起
 
-  # ========== voice 网关（mobile-voice-spec §8/§10，V1.5 M1 落地） ==========
-  # 实时音频走 WS（/ws/voice），不走 REST；控制面如下。
+  # ========== 历史兼容 voice 网关（mobile-voice-spec §8/§10，V1.5 M1） ==========
+  # 仅保留旧客户端 REST 兼容；不是方案 B 商业控制面，不得作为 KWS_READY、wake/re-enter 或第二状态真源。
+  # 实时音频走 WS（/ws/voice），不走 REST；以下为历史控制面。
   /api/v1/voice/pair:
     post:
-      summary: 配对码 + token 签发（M1 stub：局域网直连；中继配对属 M2）
+      summary: 历史兼容配对码 + token 签发（方案 B 禁用）
+      description: 仅供旧客户端兼容；方案 B 会话签发、wake/re-enter 和 fresh resource 必须使用 docs/api/commercial-voice-openapi.yaml。
       operationId: createVoicePair
+      deprecated: true
+      x-legacy: true
+      x-commercial-control-plane: false
       x-phase: v1.5-m1
       x-implemented: true
       responses:
@@ -142,8 +159,12 @@ paths:
 
   /api/v1/voice/status:
     get:
-      summary: 语音网关状态（phone 在线数 / 路径 / 引擎 / STT 模型状态）
+      summary: 历史兼容语音网关状态（方案 B 禁用）
+      description: 仅供旧客户端兼容；不得用本状态授权 KWS_READY、wake/re-enter 或替代商业控制面状态查询。
       operationId: getVoiceStatus
+      deprecated: true
+      x-legacy: true
+      x-commercial-control-plane: false
       x-phase: v1.5-m1
       x-implemented: true
       responses:
@@ -176,13 +197,18 @@ paths:
                             buffer_bytes: {type: integer}
                             last_rx: {type: number, format: unix-epoch}
 
-  # ========== 中继服务（mobile-voice-spec §6/§7，V1.5 M2 落地，backend/relay/） ==========
+  # ========== 历史兼容中继服务（mobile-voice-spec §6/§7，V1.5 M2，backend/relay/） ==========
+  # 仅保留旧客户端 relay 兼容；不是方案 B 商业控制面，不得作为 KWS_READY、wake/re-enter 或第二状态真源。
   # 独立服务：python -m backend.relay.relay_server（uvicorn 端口 19090），纯透传不解析不存储。
   # 部署目标：CloudBase（CloudRun 容器，支持长连接 WS）；局域网直连不走中继（见 /ws/voice）。
   /relay/pair:
     post:
-      summary: 签发配对码 + 中继连接信息（配对主流程走 WS /relay/ws 的 pair 帧）
+      summary: 历史兼容中继配对（方案 B 禁用）
+      description: 仅供旧客户端 relay 兼容；方案 B 商业控制面不使用该中继配对或其状态作为会话授权依据。
       operationId: createRelayPair
+      deprecated: true
+      x-legacy: true
+      x-commercial-control-plane: false
       x-phase: v1.5-m2
       x-implemented: true
       x-deploy: cloudbase
@@ -353,6 +379,8 @@ components:
           nullable: true
 
   # ========== WS /ws/pet 消息契约 ==========
+  # 其中 pet_state/voice_transcript/voice_wake/voice_suspend 仅为历史语音兼容，不是方案 B 商业控制面，
+  # 不得作为 KWS_READY、wake/re-enter 或第二状态真源；其余非语音监控消息契约保持有效。
   # 方向：backend → UI
   #   {type: "event", event: "session_updated", data: AgentSession}          ✅ 已实现（routes_ws.py:43）
   #   {type: "event", event: "alert", data: {app_id, level: 1-4, state, summary, suggestion?}}  ✅ 已实现（routes_ws.py:46）
@@ -368,7 +396,8 @@ components:
   # 心跳：UI 每 15s 发 ping，backend 回 pong；断开自动重连（指数退避，上限 30s）
   # WS 契约修订记录：pet_state / voice_transcript / voice 控制指令均标 x-phase: v1.1（后端 WsHub 仅广播 session_updated/alert）
 
-  # ========== WS /ws/voice 语音流契约（mobile-voice-spec §7，V1.5 M1） ==========
+  # ========== 历史兼容 WS /ws/voice 语音流契约（mobile-voice-spec §7，V1.5 M1） ==========
+  # 仅供旧客户端兼容；不是方案 B 商业控制面，不得作为 KWS_READY、wake/re-enter 或第二状态真源。
   # 端点：WS /ws/voice（局域网直连主端点）；/api/v1/voice/stream 为同协议别名（M1 已实现）
   # 鉴权：?token= 查询参数 或 hello.token（.env VOICE_TOKEN；未配置时为开发态放行）
   # 帧格式：
@@ -400,7 +429,8 @@ components:
   # 状态：会话状态变化经 GET /api/v1/voice/status 查询；EVT 广播复用 EventBus（V1.5 M3）
   # TODO(M3)：路径 A 全双工（apm_bridge）接入后补充 interrupt/barge-in 语义，x-phase 升 v1.5-m3
 
-  # ========== WS /relay/ws 中继契约（mobile-voice-spec §6/§7，V1.5 M2） ==========
+  # ========== 历史兼容 WS /relay/ws 中继契约（mobile-voice-spec §6/§7，V1.5 M2） ==========
+  # 仅供旧客户端 relay 兼容；不是方案 B 商业控制面，不得作为 KWS_READY、wake/re-enter 或第二状态真源。
   # 端点：WS /relay/ws（独立中继服务，端口 19090；部署目标 CloudBase CloudRun）
   # 鉴权：?token= 查询参数 或 pair 帧内 token（.env RELAY_TOKEN；未配置=开发态放行，生产必须配置）
   # 角色：手机(role=phone) 与 PC(role=pc) 使用同一 pairing_code 各自连入 → 中继双向绑定

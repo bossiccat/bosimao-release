@@ -24,6 +24,8 @@ PRINCIPAL_OWNER = "owner"
 PRINCIPAL_DEVICE = "device"
 PRINCIPAL_SIDECAR = "sidecar"
 PRINCIPAL_SESSION = "session"
+PRINCIPAL_RTC_BRIDGE = "rtc_bridge"
+PRINCIPAL_BRAIN = "brain"
 
 
 @dataclass(frozen=True)
@@ -59,9 +61,15 @@ class CredentialValidator:
         *,
         clock: Callable[[], datetime] = utc_now,
         sidecar_credential_hash: str = "",
+        rtc_bridge_credential_hash: str = "",
+        brain_service_credential_hash: str = "",
     ) -> None:
         self._store = store
         self._owner_hash = owner_credential_hash
+        # 方案 B ack 上报服务凭证（contract brainService / rtcBridgeService）；
+        # 未配置（空哈希）时对应 verify_* 一律 40101 fail-closed。
+        self._rtc_bridge_hash = rtc_bridge_credential_hash
+        self._brain_hash = brain_service_credential_hash
         legacy_hash = sidecar_credential_hash
         if isinstance(sidecar_credentials, str) and not legacy_hash:
             legacy_hash = sidecar_credentials
@@ -141,3 +149,25 @@ class CredentialValidator:
         if row.expires_at < time.time():
             raise AuthError(40103)
         return CredentialPrincipal(PRINCIPAL_DEVICE, token_device_id, row.credential_id)
+
+    def _verify_service_hash(self, bearer: str, stored_hash: str,
+                             principal_type: str, subject_id: str,
+                             credential_id: str) -> CredentialPrincipal:
+        """静态服务凭证验证（rtc_bridge / brain）；未配置即拒绝。"""
+        if not bearer or not self._verify_static(bearer, stored_hash):
+            raise AuthError(40101)
+        return CredentialPrincipal(principal_type, subject_id, credential_id)
+
+    def verify_rtc_bridge(self, bearer: str) -> CredentialPrincipal:
+        """rtc_bridge 服务身份（ack 上报 A3/A4 与 hello proof 签发对象）。"""
+        return self._verify_service_hash(
+            bearer, self._rtc_bridge_hash, PRINCIPAL_RTC_BRIDGE,
+            "rtc_bridge", "rtc-bridge-credential",
+        )
+
+    def verify_brain(self, bearer: str) -> CredentialPrincipal:
+        """Brain ingress/outbox 服务身份（ack 上报 brain_turns_sealed）。"""
+        return self._verify_service_hash(
+            bearer, self._brain_hash, PRINCIPAL_BRAIN,
+            "brain", "brain-service-credential",
+        )

@@ -1,0 +1,74 @@
+"""Shared constants, errors and transaction helpers for the control-plane ledger."""
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+from .storage import VoiceStore
+
+ACKNOWLEDGEMENTS = (
+    "android_trtc_left", "sidecar_trtc_left", "bridge_drained_closed",
+    "apm_cancelled_closed", "brain_turns_sealed",
+)
+ACK_REPORTERS = {
+    "android_trtc_left": frozenset({"android"}),
+    "sidecar_trtc_left": frozenset({"sidecar"}),
+    "bridge_drained_closed": frozenset({"sidecar", "rtc_bridge"}),
+    "apm_cancelled_closed": frozenset({"rtc_bridge"}),
+    "brain_turns_sealed": frozenset({"brain"}),
+}
+ROOT_TERMINATE_ALLOWED_STATES = frozenset({"ACTIVE"})
+RETRY_ALLOWED_STATES = frozenset({"TERMINATION_PARTIAL", "TERMINATION_TIMEOUT"})
+RETRY_REASON_BY_PARENT_RESULT = {
+    "partial": "retry_failed_acknowledgements", "timeout": "retry_timeout",
+}
+
+
+class IdempotencyConflict(Exception):
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.code = 40912
+
+
+class InvalidTerminationState(Exception):
+    def __init__(self, message: str, code: int = 40916) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class LedgerBase:
+    def __init__(self, store: VoiceStore) -> None:
+        if not isinstance(store, VoiceStore):
+            raise TypeError("SessionLedger requires an existing VoiceStore")
+        self.store = store
+
+    def initialize(self) -> None:
+        self.store.initialize()
+
+    @staticmethod
+    def _payload_hash(payload: dict[str, Any]) -> str:
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _begin(conn: Any) -> None:
+        conn.execute("BEGIN IMMEDIATE")
+
+    @staticmethod
+    def _finish(conn: Any, error: BaseException | None = None) -> None:
+        conn.rollback() if error is not None else conn.commit()
+
+    @staticmethod
+    def _termination_context(conn: Any, termination_id: str) -> Any:
+        row = conn.execute(
+            "SELECT t.*, s.device_id, s.room_id, s.state AS session_state"
+            " FROM control_plane_terminations t"
+            " JOIN control_plane_sessions s ON s.session_id = t.session_id"
+            " WHERE t.termination_id = ?", (termination_id,),
+        ).fetchone()
+        if row is None:
+            raise InvalidTerminationState("termination not found", code=40403)
+        return row

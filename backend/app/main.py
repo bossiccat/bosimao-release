@@ -34,7 +34,9 @@ from .utils.crash_reporter import (
 )
 from .utils.logger import setup_logging
 from .voice.config import load_voice
+from .voice.auth import CredentialValidator
 from .voice.privacy import privacy_runtime
+from .voice.trusted_gateway import TrustedGatewayIdentityMiddleware
 
 setup_logging(app_config.settings.log_level)
 logger = logging.getLogger(__name__)
@@ -60,6 +62,7 @@ def _build_secured_session_router():
         build_sidecar_credential_hashes,
     )
     from .voice.devices import DeviceService
+    from .voice.hello_runtime import build_hello_runtime
     from .voice.nonce import NonceService
     from .voice.privacy import PrivacyRuntimeActions, PrivacyService
     from .voice.rate_limit import RateLimitConfig, RateLimiter
@@ -104,7 +107,24 @@ def _build_secured_session_router():
         )
     )
     validator = CredentialValidator(
-        store, security.owner_credential_hash, sidecar_credentials
+        store, security.owner_credential_hash, sidecar_credentials,
+        rtc_bridge_credential_hash=(
+            CredentialValidator.hash_credential(settings.voice_rtc_bridge_credential)
+            if settings.voice_rtc_bridge_credential else ""
+        ),
+        brain_service_credential_hash=(
+            CredentialValidator.hash_credential(settings.voice_brain_service_credential)
+            if settings.voice_brain_service_credential else ""
+        ),
+    )
+    hello_runtime = build_hello_runtime(
+        store=store,
+        production=settings.voice_production,
+        private_key_pem=settings.voice_hello_private_key_pem,
+        public_key_pem=settings.voice_hello_public_key_pem,
+        rtc_bridge_credential=settings.voice_rtc_bridge_credential,
+        certificate_binding=settings.voice_rtc_bridge_cert_binding,
+        gateway_assertion=settings.voice_gateway_shared_assertion,
     )
     # 真实隐私 RuntimeActions（ADR-021 D4）：desktop_capture 走 late-bound orchestrator holder，
     # lifespan 里 privacy_runtime.bind(orch) 完成绑定；cloud/mic/background 为 no-op。
@@ -118,6 +138,9 @@ def _build_secured_session_router():
         security=security,
         devices=DeviceService(store),
         privacy=privacy,
+        hello_service=hello_runtime.service,
+        hello_certificate_binding=hello_runtime.certificate_binding,
+        hello_gateway_assertion_hash=hello_runtime.gateway_assertion_hash,
     )
 
 
@@ -188,6 +211,15 @@ app = FastAPI(
 # 阶段 E-1：全局未捕获异常兜底（路由内未 try/except 的异常 → 落盘 + 统一 500）
 app.add_exception_handler(
     Exception, build_fastapi_exception_handler(app_config.settings.app_version)
+)
+app.add_middleware(
+    TrustedGatewayIdentityMiddleware,
+    gateway_assertion_hash=(
+        CredentialValidator.hash_credential(
+            app_config.settings.voice_gateway_shared_assertion
+        ) if app_config.settings.voice_gateway_shared_assertion else ""
+    ),
+    certificate_binding=app_config.settings.voice_rtc_bridge_cert_binding,
 )
 
 app.include_router(routes_status.router)

@@ -1,15 +1,18 @@
 openapi: 3.0.3
 info:
   title: 波斯猫商业双工语音 API
-  version: 1.1.0
+  version: 1.2.0-draft
   description: |
-    Phase 2 控制面唯一 HTTP 契约。P0 媒体主链路是 Android TRTC ->
+    方案 B 的唯一商业控制面 HTTP 契约。媒体主链路是 Android TRTC ->
     Tauri externalBin 托管的 Node/Electron Windows RTC adapter -> bounded rtc_bridge
     -> MiniCPM-o/APM -> TRTC Android。HTTP/WS 不承担商业主媒体平面。
 
-    P0 只允许 Android 主页面、悬浮球、前台通知 action 发起同一 TRTC 全双工路径。
-    唤醒词与用户显式选择的半双工兼容模式属于 P1；P0 失败时禁止自动降级。
+    方案 B 的商业待命严格为：ACTIVE(n) -> TERMINATING(n) -> TERMINATED(n) ->
+    KWS_READY(n) -> SIGNING(n+1) -> ENTERING(n+1) -> ACTIVE(n+1)。仅持久化商业
+    控制面可裁决 KWS_READY；marker、局部 timeout、WebSocket close、旧 room/session/userSig
+    或 docs/openapi.yaml 的旧 wake/suspend/half-duplex/relay 语义均不得授权待命或重进房。
 
+    本文件冻结待实现的 machine-readable 契约，不代表生产代码、MiniCPM-o、TRTC 或真机验收已通过。
     生产环境缺设备凭证验证器、独立 sidecar credential、nonce 存储、防重放、
     device/IP 限流、TLS 或 TRTC SDKAppID/SecretKey 任一项时，必须拒绝启动或拒绝全部会话。
 servers:
@@ -23,6 +26,9 @@ tags:
   - name: Pairing
   - name: Devices
   - name: Sessions
+  - name: Termination
+  - name: Wake
+  - name: InternalBridge
   - name: Status
   - name: Stream
 
@@ -30,6 +36,7 @@ paths:
   /api/v1/voice/devices/pairing-code:
     post:
       tags: [Pairing]
+      operationId: createVoicePairingCode
       summary: 由 Windows 本机 owner 生成一次性配对码
       description: pairing_code 的 TTL 不超过 300 秒，服务端仅存 code_hash，最多成功消费一次。
       security:
@@ -57,6 +64,7 @@ paths:
   /api/v1/voice/devices/register:
     post:
       tags: [Pairing]
+      operationId: registerVoiceDevice
       summary: Android 使用一次性配对码注册设备
       description: |
         pairing_code 是 bootstrap 认证主体；该端点不是匿名注册，也不要求尚未存在的
@@ -88,6 +96,7 @@ paths:
   /api/v1/voice/devices:
     get:
       tags: [Devices]
+      operationId: listVoiceDevices
       summary: 查询已配对设备
       security:
         - ownerBearer: []
@@ -112,6 +121,7 @@ paths:
   /api/v1/voice/devices/{device_id}/revoke:
     post:
       tags: [Devices]
+      operationId: revokeVoiceDevice
       summary: 撤销设备及其活动会话
       description: |
         强一致安全动作。成功前必须使 credential 失效、登记未过期 userSig 指纹、
@@ -146,6 +156,7 @@ paths:
   /api/v1/voice/session:
     post:
       tags: [Sessions]
+      operationId: createDeviceVoiceSession
       summary: 为 Android 设备签发短期 TRTC 会话
       security:
         - deviceBearer: []
@@ -174,6 +185,7 @@ paths:
   /api/v1/voice/session/pending:
     get:
       tags: [Sessions]
+      operationId: claimPendingVoiceSession
       summary: 原子领取一个待处理的 sidecar 会话意图
       description: 独立 sidecar 控制面轮询；单个意图最多领取一次，仅返回会话元数据，不承载音频。
       security:
@@ -194,6 +206,7 @@ paths:
   /api/v1/voice/session/sign:
     post:
       tags: [Sessions]
+      operationId: createSidecarVoiceSession
       summary: 为唯一 Node/Electron sidecar 签发短期 TRTC 会话
       description: 只接受独立 sidecar credential；禁止复用 device credential 或由客户端自报特权身份。
       security:
@@ -220,9 +233,242 @@ paths:
         '503': { $ref: '#/components/responses/CredentialUnavailable' }
         '504': { $ref: '#/components/responses/UpstreamTimeout' }
 
+  /api/v1/voice/sessions/{session_id}/terminate:
+    post:
+      tags: [Termination]
+      operationId: terminateCommercialVoiceSession
+      summary: 发起同代会话的受控终止
+      x-error-codes: [40912, 40916, 50301]
+      description: |
+        仅 device credential 可调用。首次合法请求只可将 ACTIVE 会话推进至 TERMINATING 并返回 202；
+        不得在任何 acknowledgement 完成前报告 TERMINATED 或 KWS_READY。同一 request_id 的相同规范化请求
+        必须返回同一 termination_id；同键不同 payload 返回 40912。
+      security:
+        - deviceBearer: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/RequestNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TerminateSessionRequest'
+      responses:
+        '202':
+          description: 终止周期已持久化并受理；不是终止完成证明
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TerminationAcceptedResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+        '409': { $ref: '#/components/responses/TerminateStateConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/TerminationUnavailable' }
+
+  /api/v1/voice/sessions/{session_id}/termination/{termination_id}:
+    get:
+      tags: [Termination]
+      operationId: getCommercialVoiceTermination
+      summary: 查询商业终止聚合结果
+      x-error-codes: [50301]
+      description: |
+        只有五项 acknowledgement 均为 confirmed 时 result 才可为 complete。partial 或 timeout
+        必须保持受限恢复态，禁止客户端将 IDLE、timeout 或局部退出解释为 KWS_READY。
+      security:
+        - deviceBearer: []
+        - sidecarBearer: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/TerminationId'
+      responses:
+        '200':
+          description: 当前或终局的终止聚合记录
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TerminationStatusResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/TerminationNotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/TerminationUnavailable' }
+
+  /api/v1/voice/sessions/{session_id}/termination/{termination_id}/retry:
+    post:
+      tags: [Termination]
+      operationId: retryCommercialVoiceTermination
+      summary: 为 partial 或 timeout 父周期创建受审计的子终止周期
+      x-error-codes: [40912, 40913, 40916, 50302]
+      x-parent-resource:
+        pathTemplate: /api/v1/voice/sessions/{session_id}/termination/{termination_id}
+        parentTerminationIdSource: $request.path.termination_id
+      description: |
+        只允许父周期处于 TERMINATION_PARTIAL 或 TERMINATION_TIMEOUT。CP 必须原子创建新的
+        child termination_id，保留 parent_termination_id，并仅重新分发 failed/pending 的确认动作。
+        已 confirmed 的 acknowledgement 仅作为只读基线，不得重复触发破坏性退出。
+      security:
+        - deviceBearer: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/TerminationId'
+        - $ref: '#/components/parameters/RequestNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RetryTerminationRequest' }
+      responses:
+        '202':
+          description: 子终止周期已受理；不是终止完成证明
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RetryTerminationAcceptedResponse' }
+          links:
+            childTerminationStatus:
+              operationId: getCommercialVoiceTermination
+              parameters:
+                session_id: $response.body#/data/session_id
+                termination_id: $response.body#/data/termination_id
+              description: 查询本次 retry 创建的 child termination；data.parent_termination_id 必须等于请求路径 termination_id。
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/TerminationNotFound' }
+        '409': { $ref: '#/components/responses/RetryTerminationStateConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/TerminationRetryUnavailable' }
+
+  /api/v1/voice/sessions/{session_id}/termination/{termination_id}/acknowledgements:
+    post:
+      tags: [Termination]
+      operationId: reportCommercialVoiceTerminationAcknowledgement
+      summary: 被授权参与方上报单项 terminal acknowledgement
+      x-error-codes: [40901, 50301]
+      description: |
+        上报端点本身不改变终止结论；它只接受与账本精确匹配、且来自被授权参与方的
+        单项报告。reporter 不由客户端自报，而是由服务端验证的 credential 派生
+        （见 x-reporter-derivation）。五项 acknowledgement 的授权 reporter：
+        android_trtc_left -> android；sidecar_trtc_left -> sidecar；
+        bridge_drained_closed -> sidecar 与 rtc_bridge 两份独立报告（均 confirmed
+        才聚合 confirmed）；apm_cancelled_closed -> rtc_bridge；
+        brain_turns_sealed -> brain。
+        已 terminal 的终止周期与继承（inherited）的只读 acknowledgement 不接受
+        新报告。所有主体均要求 X-Request-Nonce 原子消费（防旧报告重放覆盖）。
+      x-reporter-derivation:
+        deviceBearer: android
+        sidecarBearer: sidecar
+        rtcBridgeService: rtc_bridge
+        brainService: brain
+      security:
+        - deviceBearer: []
+        - sidecarBearer: []
+        - rtcBridgeService: []
+        - brainService: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/TerminationId'
+        - $ref: '#/components/parameters/RequestNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AckReportRequest' }
+      responses:
+        '202':
+          description: 报告已受理并完成聚合；不是终止完成证明
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckReportAcceptedResponse' }
+          links:
+            terminationStatus:
+              operationId: getCommercialVoiceTermination
+              parameters:
+                session_id: $response.body#/data/session_id
+                termination_id: $response.body#/data/termination_id
+              description: 查询当前聚合状态；ack_result 反映本项聚合结果。
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/TerminationNotFound' }
+        '409': { $ref: '#/components/responses/AckStateConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/TerminationUnavailable' }
+
+  /api/v1/voice/sessions/wake:
+    post:
+      tags: [Wake]
+      operationId: wakeCommercialVoiceSession
+      summary: 消费 KWS 唤醒事件并签发下一代全新 TRTC 会话资源
+      x-error-codes: [40913, 40917, 50301]
+      x-independent-tests:
+        - generation_equals_prior_generation_plus_one
+        - fresh_session_room_and_user_sig_not_in_previous_resource_refs
+      description: |
+        仅 CP 已记录 KWS_READY(n) 时可受理。CP 必须以 device_id + prior_session_id +
+        prior_generation 为作用域原子消费 wake_event_id，签发 generation=n+1 且全新的 session_id、room_id、
+        user_sig。不得复用旧资源或为重放事件签发第二个房间。
+      security:
+        - deviceBearer: []
+      parameters:
+        - $ref: '#/components/parameters/RequestNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WakeSessionRequest' }
+      responses:
+        '201':
+          description: 已原子消费 wake_event_id 并签发新代资源
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WakeSessionResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+        '409': { $ref: '#/components/responses/WakeStateConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/TerminationUnavailable' }
+
+  /api/v1/voice/internal/rtc-bridge/hello-redeem:
+    post:
+      tags: [InternalBridge]
+      operationId: redeemCommercialStreamHello
+      summary: rtc_bridge 原子消费 sidecar hello proof 与 nonce
+      x-error-codes: [40914, 50303]
+      description: |
+        仅 rtc_bridge service credential 加 mTLS 或同等级、受绑定的短期服务身份可访问。
+        redemption 不可用、proof/nonce 已消费、claim/body 不一致或账本不允许进入时必须 fail-closed；
+        rtc_bridge 不得离线放行、创建 PeerVoiceSession 或回复 ready。
+      security:
+        - rtcBridgeService: []
+      x-mtls-enforcement:
+        required: true
+        termination_boundary: trusted_gateway
+        certificate_binding: rtcBridgeService.subject
+        strip_untrusted_certificate_header: true
+        fail_closed: true
+        description: 网关必须先验证客户端证书信任链，再将证书主体与 rtcBridgeService 主体绑定；未经验证或绑定失败不得转发。
+      parameters:
+        - $ref: '#/components/parameters/RtcBridgeClientCertificate'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HelloRedeemRequest' }
+      responses:
+        '200':
+          description: proof 与 nonce 已持久化原子消费；响应不包含秘密或 userSig
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HelloRedeemResponse' }
+        '400': { $ref: '#/components/responses/InvalidHello' }
+        '401': { $ref: '#/components/responses/HelloUnauthorized' }
+        '409': { $ref: '#/components/responses/HelloStateConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/HelloRedemptionUnavailable' }
+
   /api/v1/voice/status:
     get:
       tags: [Status]
+      operationId: getCommercialVoiceStatus
       summary: 查询当前凭证可见的聚合会话状态和脱敏指标
       security:
         - deviceBearer: []
@@ -248,7 +494,9 @@ paths:
   /api/v1/voice/stream:
     get:
       tags: [Stream]
+      operationId: openCommercialVoiceStream
       summary: 建立受保护的 WebSocket 控制与本机桥接通道
+      x-error-codes: [40917, 50303]
       description: |
         通过 HTTP Upgrade 建立 WebSocket。该通道只用于控制、状态、转写事件及
         Node/Electron sidecar 到 localhost rtc_bridge 的固定协议桥接，不是商业主媒体平面。
@@ -271,7 +519,7 @@ paths:
         '504': { $ref: '#/components/responses/UpstreamTimeout' }
       x-websocket-contract:
         firstClientMessage:
-          $ref: '#/components/schemas/StreamHello'
+          $ref: '#/components/schemas/CommercialStreamHello'
         clientControlMessages:
           oneOf:
             - $ref: '#/components/schemas/HeartbeatControl'
@@ -312,7 +560,16 @@ components:
       type: http
       scheme: bearer
       bearerFormat: opaque-session-bound-credential
-
+    rtcBridgeService:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-rtc-bridge-short-lived-service-credential
+      description: 仅 rtc_bridge 服务身份可用；不得由 Android、sidecar、session bearer 或浏览器代替或转发。
+    brainService:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-brain-service-credential
+      description: 仅 Brain ingress/outbox 服务身份可用；不得由 Android、sidecar、rtc_bridge 或浏览器代替或转发。
   parameters:
     RequestNonce:
       name: X-Request-Nonce
@@ -330,6 +587,24 @@ components:
       schema:
         type: string
         format: uuid
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TerminationId:
+      name: termination_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RtcBridgeClientCertificate:
+      name: X-Client-Certificate-Thumbprint
+      in: header
+      required: true
+      x-gateway-derived: true
+      x-client-supplied: false
+      description: mTLS 已验证的 rtc_bridge 客户端证书关联标识；可信网关必须剥离外部同名头并从已验证证书派生，不得透传客户端提供值。
+      schema: { type: string, minLength: 16, maxLength: 256 }
 
   responses:
     BadRequest:
@@ -357,6 +632,34 @@ components:
     StateConflict:
       description: 状态、并发消费或指令顺序冲突
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 40901, data: null, message: state_conflict } } }
+    TerminateStateConflict:
+      description: terminate 幂等键负载冲突或已有终止周期
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/IdempotencyPayloadMismatchError'
+              - $ref: '#/components/schemas/TerminationAlreadyInProgressError'
+    RetryTerminationStateConflict:
+      description: 父终止不可重试、retry request_id 冲突或幂等键负载不匹配
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/TerminationNotRetryableError'
+              - $ref: '#/components/schemas/RequestIdReusedError'
+              - $ref: '#/components/schemas/IdempotencyPayloadMismatchError'
+    AckStateConflict:
+      description: reporter 未被授权上报该项、上下文与账本不匹配、终止已 terminal 或 acknowledgement 为继承只读
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 40901, data: null, message: state_conflict } } }
+    WakeStateConflict:
+      description: wake 事件过期或重放，或前代资源和 generation 不匹配
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/WakeEventReplayError'
+              - $ref: '#/components/schemas/StaleGenerationError'
     QueueOverflow:
       description: 队列预算耗尽且无法恢复
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 41301, data: null, message: queue_overflow } } }
@@ -369,14 +672,38 @@ components:
     CredentialUnavailable:
       description: 生产凭证、TLS、nonce、限流或 TRTC 配置不可用；fail-closed
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 50300, data: null, message: credential_unavailable } } }
+    TerminationUnavailable:
+      description: 终止确认账本不可用；必须 fail-closed
+      content: { application/json: { schema: { $ref: '#/components/schemas/TerminationUnconfirmedError' } } }
     UpstreamTimeout:
       description: RTC、sidecar 或模型上游超时
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 50401, data: null, message: upstream_timeout } } }
+    SessionNotFound:
+      description: 会话不存在
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 40402, data: null, message: session_not_found } } }
+    TerminationNotFound:
+      description: 终止周期不存在或不属于路径会话
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 40403, data: null, message: termination_not_found } } }
+    TerminationRetryUnavailable:
+      description: 无法可靠持久化或分发子终止周期；必须 fail-closed 且不得创建半成品 child termination
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 50302, data: null, message: termination_retry_dispatch_unavailable } } }
+    InvalidHello:
+      description: hello 字段缺失、格式错误或不满足精确绑定
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 40021, data: null, message: invalid_hello } } }
+    HelloUnauthorized:
+      description: rtc_bridge 服务身份、proof 或 nonce 验证失败
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, examples: { service_auth: { value: { code: 40114, data: null, message: rtc_bridge_service_auth_failed } }, proof_invalid: { value: { code: 40111, data: null, message: hello_proof_invalid } }, proof_expired: { value: { code: 40112, data: null, message: hello_proof_expired } }, replay: { value: { code: 40113, data: null, message: hello_replay } } } } }
+    HelloStateConflict:
+      description: proof 对应的 session、room、device 或 generation 不是当前可进入代
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 40914, data: null, message: hello_state_conflict } } }
+    HelloRedemptionUnavailable:
+      description: proof/nonce 原子账本不可用；必须拒绝 hello
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { code: 50303, data: null, message: hello_redemption_unavailable } } }
 
   schemas:
     ErrorCode:
       type: integer
-      enum: [40001, 40101, 40102, 40103, 40401, 40801, 40901, 41301, 42901, 50300, 50301, 50401]
+      enum: [40001, 40021, 40101, 40102, 40103, 40111, 40112, 40113, 40114, 40401, 40402, 40403, 40801, 40901, 40911, 40912, 40913, 40914, 40916, 40917, 41301, 42901, 50300, 50301, 50302, 50303, 50401]
     ErrorResponse:
       type: object
       additionalProperties: false
@@ -386,7 +713,477 @@ components:
         data: { nullable: true }
         message:
           type: string
-          enum: [invalid_device_or_user, auth_failed, nonce_replay, credential_revoked, device_not_found, handshake_timeout, state_conflict, queue_overflow, rate_limited, credential_unavailable, termination_unconfirmed, upstream_timeout]
+          enum: [invalid_device_or_user, invalid_hello, auth_failed, nonce_replay, credential_revoked, hello_proof_invalid, hello_proof_expired, hello_replay, rtc_bridge_service_auth_failed, device_not_found, session_not_found, termination_not_found, handshake_timeout, state_conflict, stale_or_conflicting_generation, idempotency_key_payload_mismatch, wake_event_replayed_or_expired, hello_state_conflict, request_id_reused, termination_not_retryable, queue_overflow, rate_limited, credential_unavailable, termination_unconfirmed, termination_retry_dispatch_unavailable, hello_redemption_unavailable, upstream_timeout]
+    IdempotencyPayloadMismatchError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          properties:
+            code: { type: integer, enum: [40912] }
+            message: { type: string, enum: [idempotency_key_payload_mismatch] }
+    WakeEventReplayError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          properties:
+            code: { type: integer, enum: [40913] }
+            message: { type: string, enum: [wake_event_replayed_or_expired] }
+    RequestIdReusedError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          properties:
+            code: { type: integer, enum: [40916] }
+            message: { type: string, enum: [request_id_reused] }
+    StaleGenerationError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          properties:
+            code: { type: integer, enum: [40917] }
+            message: { type: string, enum: [stale_or_conflicting_generation] }
+    TerminationAlreadyInProgressError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          properties:
+            code: { type: integer, enum: [40916] }
+            message: { type: string, enum: [request_id_reused] }
+    TerminationNotRetryableError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          properties:
+            code: { type: integer, enum: [40913] }
+            message: { type: string, enum: [termination_not_retryable] }
+    TerminationUnconfirmedError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          properties:
+            code: { type: integer, enum: [50301] }
+            message: { type: string, enum: [termination_unconfirmed] }
+
+    CommercialState:
+      type: string
+      enum: [ACTIVE, TERMINATING, TERMINATED, KWS_READY, SIGNING, ENTERING, TERMINATION_PARTIAL, TERMINATION_TIMEOUT]
+    TerminalResult:
+      type: string
+      enum: [complete, partial, timeout]
+    AcknowledgementState:
+      type: string
+      enum: [confirmed, failed, pending, timed_out]
+    TerminationAcknowledgements:
+      type: object
+      additionalProperties: false
+      required: [android_trtc_left, sidecar_trtc_left, bridge_drained_closed, apm_cancelled_closed, brain_turns_sealed]
+      properties:
+        android_trtc_left: { $ref: '#/components/schemas/AcknowledgementState' }
+        sidecar_trtc_left: { $ref: '#/components/schemas/AcknowledgementState' }
+        bridge_drained_closed:
+          description: CP 仅在 sidecar_bridge_drained 与 rtc_bridge_session_closed 两份独立确认均 confirmed 时才可聚合为 confirmed。
+          allOf:
+            - $ref: '#/components/schemas/AcknowledgementState'
+        apm_cancelled_closed: { $ref: '#/components/schemas/AcknowledgementState' }
+        brain_turns_sealed: { $ref: '#/components/schemas/AcknowledgementState' }
+    TerminateSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [session_id, device_id, room_id, generation, request_id, reason, requested_at]
+      properties:
+        session_id: { type: string, format: uuid, description: 必须与路径 session_id 相等。 }
+        device_id: { type: string, format: uuid }
+        room_id: { type: string, minLength: 1, maxLength: 64 }
+        generation: { type: integer, minimum: 0 }
+        request_id: { type: string, format: uuid, description: session_id + generation + terminate 作用域内的幂等键。 }
+        reason: { type: string, enum: [user_stop, remote_leave, app_shutdown, security_revoke, error_recovery] }
+        requested_at: { type: string, format: date-time }
+    RetryTerminationRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, reason]
+      properties:
+        request_id: { type: string, format: uuid, description: 必须是新键；不得复用父 terminate 或既有 retry 的 request_id。 }
+        reason: { type: string, enum: [retry_failed_acknowledgements, retry_timeout] }
+    AckReportRequest:
+      type: object
+      additionalProperties: false
+      required: [acknowledgement, result, session_id, device_id, room_id, generation, reported_at]
+      description: reporter 不在请求体中：由服务端验证的 credential 派生，客户端自报一律拒绝。
+      properties:
+        acknowledgement:
+          type: string
+          enum: [android_trtc_left, sidecar_trtc_left, bridge_drained_closed, apm_cancelled_closed, brain_turns_sealed]
+        result: { type: string, enum: [confirmed, failed] }
+        session_id: { type: string, format: uuid, description: 必须与路径 session_id 相等且与终止账本精确匹配。 }
+        device_id: { type: string, format: uuid }
+        room_id: { type: string, minLength: 1, maxLength: 64 }
+        generation: { type: integer, minimum:  0 }
+        reported_at: { type: string, format: date-time, description: 参与方本地观测时间；CP 以服务器接收时间为准记录 reported_at。 }
+        error_code:
+          type: string
+          nullable: true
+          maxLength: 128
+          description: result=failed 时必填的脱敏错误码；confirmed 时必须省略或为 null。
+    TerminationAcceptedData:
+      type: object
+      additionalProperties: false
+      required: [termination_id, session_id, generation, state, status_url]
+      properties:
+        termination_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
+        state: { type: string, enum: [TERMINATING] }
+        status_url: { type: string, format: uri-reference }
+    RetryTerminationAcceptedData:
+      type: object
+      additionalProperties: false
+      required: [termination_id, parent_termination_id, session_id, generation, state, status_url]
+      properties:
+        termination_id: { type: string, format: uuid }
+        parent_termination_id: { type: string, format: uuid, minLength: 1 }
+        session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
+        state: { type: string, enum: [TERMINATING] }
+        status_url: { type: string, format: uri-reference }
+    TerminationAcceptedResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/TerminationAcceptedData' }
+        message: { type: string, enum: [''] }
+    RetryTerminationAcceptedResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/RetryTerminationAcceptedData' }
+        message: { type: string, enum: [''] }
+    AckReportAcceptedData:
+      type: object
+      additionalProperties: false
+      required: [termination_id, session_id, generation, acknowledgement, ack_result, result, status_url]
+      properties:
+        termination_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
+        acknowledgement:
+          type: string
+          enum: [android_trtc_left, sidecar_trtc_left, bridge_drained_closed, apm_cancelled_closed, brain_turns_sealed]
+        ack_result: { $ref: '#/components/schemas/AcknowledgementState' }
+        result:
+          description: 本报告受理后的终止周期当前聚合结果；最后一项 confirmed 时为 complete。
+          type: string
+          enum: [pending, complete, partial, timeout]
+        status_url: { type: string, format: uri-reference }
+    AckReportAcceptedResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/AckReportAcceptedData' }
+        message: { type: string, enum: [''] }
+    ConfirmedTerminationAcknowledgements:
+      type: object
+      additionalProperties: false
+      required: [android_trtc_left, sidecar_trtc_left, bridge_drained_closed, apm_cancelled_closed, brain_turns_sealed]
+      properties:
+        android_trtc_left: { type: string, enum: [confirmed] }
+        sidecar_trtc_left: { type: string, enum: [confirmed] }
+        bridge_drained_closed: { type: string, enum: [confirmed] }
+        apm_cancelled_closed: { type: string, enum: [confirmed] }
+        brain_turns_sealed: { type: string, enum: [confirmed] }
+    RootTerminationPendingData:
+      type: object
+      additionalProperties: false
+      required: [type, scope, status_variant, termination_id, session_id, generation, result, acknowledgements, terminal_at, retryable]
+      properties:
+        type: { type: string, enum: [session.terminating] }
+        scope: { type: string, enum: [root] }
+        status_variant: { type: string, enum: [root_pending] }
+        termination_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
+        result: { type: string, enum: [pending] }
+        acknowledgements: { $ref: '#/components/schemas/TerminationAcknowledgements' }
+        terminal_at: { type: string, format: date-time, nullable: true }
+        retryable: { type: boolean, enum: [false] }
+    RootTerminationCompleteData:
+      type: object
+      additionalProperties: false
+      required: [type, scope, status_variant, termination_id, session_id, generation, result, acknowledgements, terminal_at, retryable]
+      properties:
+        type: { type: string, enum: [session.terminated] }
+        scope: { type: string, enum: [root] }
+        status_variant: { type: string, enum: [root_complete] }
+        termination_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
+        result: { type: string, enum: [complete] }
+        acknowledgements: { $ref: '#/components/schemas/ConfirmedTerminationAcknowledgements' }
+        terminal_at: { type: string, format: date-time }
+        retryable: { type: boolean, enum: [false] }
+    RootTerminationPartialData:
+      type: object
+      additionalProperties: false
+      required: [type, scope, status_variant, termination_id, session_id, generation, result, acknowledgements, terminal_at, retryable]
+      properties:
+        type: { type: string, enum: [session.terminated] }
+        scope: { type: string, enum: [root] }
+        status_variant: { type: string, enum: [root_partial] }
+        termination_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
+        result: { type: string, enum: [partial] }
+        acknowledgements: { $ref: '#/components/schemas/TerminationAcknowledgements' }
+        terminal_at: { type: string, format: date-time }
+        retryable: { type: boolean, enum: [true] }
+    RootTerminationTimeoutData:
+      type: object
+      additionalProperties: false
+      required: [type, scope, status_variant, termination_id, session_id, generation, result, acknowledgements, terminal_at, retryable]
+      properties:
+        type: { type: string, enum: [session.terminated] }
+        scope: { type: string, enum: [root] }
+        status_variant: { type: string, enum: [root_timeout] }
+        termination_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
+        result: { type: string, enum: [timeout] }
+        acknowledgements: { $ref: '#/components/schemas/TerminationAcknowledgements' }
+        terminal_at: { type: string, format: date-time }
+        retryable: { type: boolean, enum: [true] }
+    RetryTerminationPendingData:
+      type: object
+      additionalProperties: false
+      required: [type, scope, status_variant, termination_id, parent_termination_id, session_id, generation, result, acknowledgements, terminal_at, retryable]
+      properties:
+        type: { type: string, enum: [session.terminating] }
+        scope: { type: string, enum: [retry_child] }
+        status_variant: { type: string, enum: [retry_child_pending] }
+        termination_id: { type: string, format: uuid }
+        parent_termination_id: { type: string, format: uuid, minLength: 1 }
+        session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
+        result: { type: string, enum: [pending] }
+        acknowledgements: { $ref: '#/components/schemas/TerminationAcknowledgements' }
+        terminal_at: { type: string, format: date-time, nullable: true }
+        retryable: { type: boolean, enum: [false] }
+    RetryTerminationCompleteData:
+      type: object
+      additionalProperties: false
+      required: [type, scope, status_variant, termination_id, parent_termination_id, session_id, generation, result, acknowledgements, terminal_at, retryable]
+      properties:
+        type: { type: string, enum: [session.terminated] }
+        scope: { type: string, enum: [retry_child] }
+        status_variant: { type: string, enum: [retry_child_complete] }
+        termination_id: { type: string, format: uuid }
+        parent_termination_id: { type: string, format: uuid, minLength: 1 }
+        session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
+        result: { type: string, enum: [complete] }
+        acknowledgements: { $ref: '#/components/schemas/ConfirmedTerminationAcknowledgements' }
+        terminal_at: { type: string, format: date-time }
+        retryable: { type: boolean, enum: [false] }
+    RetryTerminationPartialData:
+      type: object
+      additionalProperties: false
+      required: [type, scope, status_variant, termination_id, parent_termination_id, session_id, generation, result, acknowledgements, terminal_at, retryable]
+      properties:
+        type: { type: string, enum: [session.terminated] }
+        scope: { type: string, enum: [retry_child] }
+        status_variant: { type: string, enum: [retry_child_partial] }
+        termination_id: { type: string, format: uuid }
+        parent_termination_id: { type: string, format: uuid, minLength: 1 }
+        session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
+        result: { type: string, enum: [partial] }
+        acknowledgements: { $ref: '#/components/schemas/TerminationAcknowledgements' }
+        terminal_at: { type: string, format: date-time }
+        retryable: { type: boolean, enum: [true] }
+    RetryTerminationTimeoutData:
+      type: object
+      additionalProperties: false
+      required: [type, scope, status_variant, termination_id, parent_termination_id, session_id, generation, result, acknowledgements, terminal_at, retryable]
+      properties:
+        type: { type: string, enum: [session.terminated] }
+        scope: { type: string, enum: [retry_child] }
+        status_variant: { type: string, enum: [retry_child_timeout] }
+        termination_id: { type: string, format: uuid }
+        parent_termination_id: { type: string, format: uuid, minLength: 1 }
+        session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
+        result: { type: string, enum: [timeout] }
+        acknowledgements: { $ref: '#/components/schemas/TerminationAcknowledgements' }
+        terminal_at: { type: string, format: date-time }
+        retryable: { type: boolean, enum: [true] }
+    TerminationStatusData:
+      oneOf:
+        - $ref: '#/components/schemas/RootTerminationPendingData'
+        - $ref: '#/components/schemas/RootTerminationCompleteData'
+        - $ref: '#/components/schemas/RootTerminationPartialData'
+        - $ref: '#/components/schemas/RootTerminationTimeoutData'
+        - $ref: '#/components/schemas/RetryTerminationPendingData'
+        - $ref: '#/components/schemas/RetryTerminationCompleteData'
+        - $ref: '#/components/schemas/RetryTerminationPartialData'
+        - $ref: '#/components/schemas/RetryTerminationTimeoutData'
+      discriminator:
+        propertyName: status_variant
+        mapping:
+          root_pending: '#/components/schemas/RootTerminationPendingData'
+          root_complete: '#/components/schemas/RootTerminationCompleteData'
+          root_partial: '#/components/schemas/RootTerminationPartialData'
+          root_timeout: '#/components/schemas/RootTerminationTimeoutData'
+          retry_child_pending: '#/components/schemas/RetryTerminationPendingData'
+          retry_child_complete: '#/components/schemas/RetryTerminationCompleteData'
+          retry_child_partial: '#/components/schemas/RetryTerminationPartialData'
+          retry_child_timeout: '#/components/schemas/RetryTerminationTimeoutData'
+    TerminationStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/TerminationStatusData' }
+        message: { type: string, enum: [''] }
+    PreviousResourceRefs:
+      type: object
+      additionalProperties: false
+      required: [session_id, room_id, user_sig_fingerprint]
+      properties:
+        session_id: { type: string, format: uuid }
+        room_id: { type: string, minLength: 1, maxLength: 64 }
+        user_sig_fingerprint:
+          type: string
+          minLength: 16
+          maxLength: 128
+          description: 单向脱敏指纹，仅用于 freshness 比较；不得包含或恢复 user_sig 明文。
+    GenerationTransition:
+      type: object
+      additionalProperties: false
+      required: [from_generation, to_generation, increment]
+      properties:
+        from_generation: { type: integer, minimum: 0 }
+        to_generation: { type: integer, minimum: 1 }
+        increment: { type: integer, enum: [1] }
+      x-field-constraints:
+        - to_generation == from_generation + increment
+    ResourceFreshnessProof:
+      type: object
+      additionalProperties: false
+      required: [session_id_changed, room_id_changed, user_sig_changed]
+      properties:
+        session_id_changed: { type: boolean, enum: [true] }
+        room_id_changed: { type: boolean, enum: [true] }
+        user_sig_changed: { type: boolean, enum: [true] }
+    WakeSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [device_id, prior_session_id, prior_generation, previous_resource_refs, wake_event_id, detected_at, kws_instance_id]
+      properties:
+        device_id: { type: string, format: uuid }
+        prior_session_id: { type: string, format: uuid }
+        prior_generation: { type: integer, minimum: 0 }
+        previous_resource_refs: { $ref: '#/components/schemas/PreviousResourceRefs' }
+        wake_event_id: { type: string, format: uuid }
+        detected_at: { type: string, format: date-time }
+        kws_instance_id: { type: string, minLength: 1, maxLength: 128 }
+      x-field-constraints:
+        - prior_session_id == previous_resource_refs.session_id
+    WakeSessionData:
+      type: object
+      additionalProperties: false
+      required: [wake_event_id, prior_session_id, prior_generation, previous_resource_refs, generation_transition, resource_freshness, generation, session_id, room_id, user_id, user_sig, expires_at, scene]
+      properties:
+        wake_event_id: { type: string, format: uuid }
+        prior_session_id: { type: string, format: uuid }
+        prior_generation: { type: integer, minimum: 0 }
+        previous_resource_refs: { $ref: '#/components/schemas/PreviousResourceRefs' }
+        generation_transition: { $ref: '#/components/schemas/GenerationTransition' }
+        resource_freshness: { $ref: '#/components/schemas/ResourceFreshnessProof' }
+        generation: { type: integer, minimum: 1 }
+        session_id: { type: string, format: uuid }
+        room_id: { type: string, minLength: 1, maxLength: 64 }
+        user_id: { type: string, minLength: 1, maxLength: 64 }
+        user_sig:
+          type: string
+          minLength: 1
+          readOnly: true
+          description: TTL 不超过 600 秒的响应 secret；禁止落库、日志或诊断明文。
+        expires_at: { type: string, format: date-time }
+        scene: { type: string, enum: [trtc_full_duplex] }
+      x-field-constraints:
+        - prior_session_id == previous_resource_refs.session_id
+        - generation_transition.from_generation == prior_generation
+        - generation_transition.to_generation == generation
+        - generation == prior_generation + 1
+        - session_id != previous_resource_refs.session_id
+        - room_id != previous_resource_refs.room_id
+      x-independent-tests:
+        - generation_equals_prior_generation_plus_one
+        - all_resource_freshness_flags_are_true
+        - session_room_and_user_sig_fingerprint_differ_from_previous_resource_refs
+    WakeSessionResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/WakeSessionData' }
+        message: { type: string, enum: [''] }
+    CommercialAudioFormat:
+      type: object
+      additionalProperties: false
+      required: [encoding, sample_rate_hz, channels, frame_ms, frame_bytes]
+      properties:
+        encoding: { type: string, enum: [pcm_s16le] }
+        sample_rate_hz: { type: integer, enum: [16000] }
+        channels: { type: integer, enum: [1] }
+        frame_ms: { type: integer, enum: [20] }
+        frame_bytes: { type: integer, enum: [640] }
+    CommercialStreamHello:
+      type: object
+      additionalProperties: false
+      required: [type, proof, nonce, jti, session_id, device_id, room_id, sidecar_user_id, generation, protocol_version, audio_format]
+      properties:
+        type: { type: string, enum: [hello] }
+        proof: { type: string, minLength: 1, writeOnly: true, description: 一次性 hello proof；禁止日志或持久化明文。 }
+        nonce: { type: string, minLength: 16, maxLength: 512, writeOnly: true, description: 与 proof 和主体绑定并原子消费。 }
+        jti: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        room_id: { type: string, minLength: 1, maxLength: 64 }
+        sidecar_user_id: { type: string, minLength: 1, maxLength: 64 }
+        generation: { type: integer, minimum: 0 }
+        protocol_version: { type: string, enum: ['1.0'] }
+        audio_format: { $ref: '#/components/schemas/CommercialAudioFormat' }
+    HelloRedeemRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommercialStreamHello'
+    HelloRedeemData:
+      type: object
+      additionalProperties: false
+      required: [redeemed, session_id, device_id, room_id, sidecar_user_id, generation, expires_at]
+      properties:
+        redeemed: { type: boolean, enum: [true] }
+        session_id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        room_id: { type: string, minLength: 1, maxLength: 64 }
+        sidecar_user_id: { type: string, minLength: 1, maxLength: 64 }
+        generation: { type: integer, minimum: 0 }
+        expires_at: { type: string, format: date-time }
+    HelloRedeemResponse:
+      type: object
+      additionalProperties: false
+      required: [code, data, message]
+      properties:
+        code: { type: integer, enum: [0] }
+        data: { $ref: '#/components/schemas/HelloRedeemData' }
+        message: { type: string, enum: [''] }
 
     CreatePairingCodeRequest:
       type: object
@@ -526,22 +1323,27 @@ components:
     CreateSidecarSessionRequest:
       type: object
       additionalProperties: false
-      required: [device_id, user_id]
+      required: [session_id, claim_token, device_id, user_id]
       properties:
+        session_id: { type: string, format: uuid }
+        claim_token: { type: string, minLength: 32, maxLength: 256, writeOnly: true }
         device_id: { type: string, format: uuid }
         user_id: { type: string, minLength: 1, maxLength: 64 }
     SessionData:
       type: object
       additionalProperties: false
-      required: [session_id, room_id, user_id, sdk_app_id, user_sig, expires_at, scene]
+      required: [session_id, room_id, user_id, sdk_app_id, user_sig, expires_at, scene, generation, hello, hello_expires_at]
       properties:
         session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0, description: CP 签发的商业 generation；不得以 Android actor 或 sidecar 私有计数替代。 }
         room_id: { type: string, minLength: 1, maxLength: 64 }
         user_id: { type: string, minLength: 1, maxLength: 64 }
         sdk_app_id: { type: integer, format: int64, minimum: 1 }
-        user_sig: { type: string, minLength: 1, writeOnly: true, description: TTL 不超过 600 秒；禁止落库或日志明文。 }
+        user_sig: { type: string, minLength: 1, readOnly: true, description: TTL 不超过 600 秒的响应 secret；禁止落库、日志或诊断明文。 }
         expires_at: { type: string, format: date-time }
         scene: { type: string, enum: [trtc_full_duplex] }
+        hello: { $ref: '#/components/schemas/CommercialStreamHello' }
+        hello_expires_at: { type: string, format: date-time }
     SessionResponse:
       type: object
       additionalProperties: false
@@ -554,12 +1356,13 @@ components:
     PendingSessionIntent:
       type: object
       additionalProperties: false
-      required: [session_id, device_id, room_id, expires_at]
+      required: [session_id, device_id, room_id, generation, expires_at]
       properties:
         session_id: { type: string, format: uuid }
-        device_id: { type: string, minLength: 1, maxLength: 64 }
+        device_id: { type: string, format: uuid }
         room_id: { type: string, minLength: 1, maxLength: 64 }
-        expires_at: { type: number, format: double }
+        generation: { type: integer, minimum: 0 }
+        expires_at: { type: string, format: date-time }
     PendingSessionData:
       type: object
       additionalProperties: false
@@ -581,11 +1384,20 @@ components:
     VoiceStatusData:
       type: object
       additionalProperties: false
-      required: [session_id, state, up_frame_count, up_bytes, down_frame_count, down_bytes, queue_depth, queue_drops, reconnects]
+      required: [session_id, generation, state, commercial_state, up_frame_count, up_bytes, down_frame_count, down_bytes, queue_depth, queue_drops, reconnects]
       properties:
         session_id: { type: string, format: uuid }
+        generation: { type: integer, minimum: 0 }
         turn_id: { type: string, format: uuid, nullable: true }
-        state: { type: string, enum: [IDLE, SIGNING, ENTERING, IN_ROOM, EXITING] }
+        state: { type: string, enum: [IDLE, SIGNING, ENTERING, IN_ROOM, EXITING], description: 兼容 UI 投影；不能单独授权 KWS 或 wake。 }
+        commercial_state: { $ref: '#/components/schemas/CommercialState' }
+        termination_id: { type: string, format: uuid, nullable: true }
+        terminal_result:
+          type: string
+          nullable: true
+          enum: [complete, partial, timeout, null]
+        retryable: { type: boolean, nullable: true }
+        kws_ready: { type: boolean, nullable: true, description: 只有 state=IDLE + commercial_state=KWS_READY + kws_ready=true 才授权 wake。 }
         up_frame_count: { type: integer, format: int64, minimum: 0 }
         up_bytes: { type: integer, format: int64, minimum: 0 }
         down_frame_count: { type: integer, format: int64, minimum: 0 }
@@ -607,25 +1419,6 @@ components:
         data: { $ref: '#/components/schemas/VoiceStatusData' }
         message: { type: string, enum: [''] }
 
-    StreamHello:
-      type: object
-      additionalProperties: false
-      required: [type, session_id, device_id, protocol_version, audio_format]
-      properties:
-        type: { type: string, enum: [hello] }
-        session_id: { type: string, format: uuid }
-        device_id: { type: string, format: uuid }
-        protocol_version: { type: string, enum: ['1.0'] }
-        audio_format:
-          type: object
-          additionalProperties: false
-          required: [encoding, sample_rate_hz, channels, frame_ms, frame_bytes]
-          properties:
-            encoding: { type: string, enum: [pcm_s16le] }
-            sample_rate_hz: { type: integer, enum: [16000] }
-            channels: { type: integer, enum: [1] }
-            frame_ms: { type: integer, enum: [20] }
-            frame_bytes: { type: integer, enum: [640] }
     BaseControl:
       type: object
       required: [type, session_id, generation]

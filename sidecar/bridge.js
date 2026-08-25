@@ -3,18 +3,29 @@
 const log = require('./logger');
 
 function sessionHello(session) {
-  const required = ['session_id', 'device_id', 'room_id', 'user_id', 'sdk_version'];
-  if (!session || required.some((key) => typeof session[key] !== 'string' || !session[key])) {
+  const requiredStrings = [
+    'proof', 'nonce', 'jti', 'session_id', 'device_id', 'room_id', 'sidecar_user_id',
+  ];
+  const validAudio = session && session.audio_format
+    && session.audio_format.encoding === 'pcm_s16le'
+    && session.audio_format.sample_rate_hz === 16000
+    && session.audio_format.channels === 1
+    && session.audio_format.frame_ms === 20
+    && session.audio_format.frame_bytes === 640;
+  if (!session || session.type !== 'hello' || session.protocol_version !== '1.0'
+      || !Number.isInteger(session.generation) || session.generation < 0 || !validAudio
+      || requiredStrings.some((key) => typeof session[key] !== 'string' || !session[key])) {
     throw new Error('SIDECAR_INVALID_SESSION_HELLO');
   }
-  return { type: 'hello', role: 'sidecar', ...session };
+  return { ...session };
 }
 
 class BridgeClient {
-  constructor(url, onDownAudio, onCtrl) {
+  constructor(url, onDownAudio, onCtrl, onDisconnect = () => {}) {
     this.url = url;
     this.onDownAudio = onDownAudio;
     this.onCtrl = onCtrl;
+    this.onDisconnect = onDisconnect;
     this.ws = null;
     this.connected = false;
     this._stop = false;
@@ -75,10 +86,12 @@ class BridgeClient {
       if (generation !== this._generation || this.ws !== ws) return;
       this.ws = null;
       this.connected = false;
-      if (this._stop || !this._activeHello) return;
-      const delay = [1, 2, 4, 8][Math.min(this._backoffIdx, 3)] * 1000;
-      this._backoffIdx += 1;
-      setTimeout(() => this._connect(generation), delay);
+      const hadSession = this._activeHello !== null;
+      this._activeHello = null;
+      this._sessionKey = null;
+      this._generation += 1;
+      this._backoffIdx = 0;
+      if (hadSession && !this._stop) this.onDisconnect();
     };
     ws.onerror = () => { try { ws.close(); } catch (_) { /* closed */ } };
   }
@@ -102,6 +115,30 @@ class BridgeClient {
   sendPeerState(state, userId) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this._activeHello) return;
     this.ws.send(JSON.stringify({ type: 'peer_state', state, user_id: userId }));
+  }
+
+  // 上行 ctrl（sidecar → rtc_bridge）。当前唯一动作：note_termination 终止上下文中继。
+  sendCtrl(payload) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this._activeHello) {
+      return false;
+    }
+    try {
+      this.ws.send(JSON.stringify(payload));
+      return true;
+    } catch (_) { return false; }
+  }
+
+  // 把终止上下文（termination_id）中继给 rtc_bridge，供其 drain 后上报
+  // bridge_drained_closed。fail-safe：未连接/参数非法一律返回 false，不抛错，
+  // 绝不影响拆链主流程。上游接入点（获知 tid 处）调用本方法即可。
+  noteTermination(sessionId, terminationId) {
+    if (typeof sessionId !== 'string' || !sessionId) return false;
+    if (typeof terminationId !== 'string' || !terminationId) return false;
+    if (terminationId.length > 128) return false;
+    return this.sendCtrl({
+      type: 'ctrl', action: 'note_termination',
+      session_id: sessionId, termination_id: terminationId,
+    });
   }
 
   close() {

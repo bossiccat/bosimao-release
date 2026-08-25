@@ -11,12 +11,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .._frozen_paths import bundled_path
+from .migration_runner import apply_migrations, split_sql_script
 from .repositories import audit as _audit
 from .repositories import device_credentials as _dc
 from .repositories import nonces as _nonces
 from .repositories import pairing_codes as _pc
 from .repositories import pending_sessions as _pending
+from .repositories import hello_proofs as _hello_proofs
 from .repositories import rate_limit as _rl
 from .repositories import settings as _settings
 from .repositories.common import now_unix
@@ -27,17 +28,9 @@ DeviceCredentialRow = _dc.DeviceCredentialRow
 NonceRepository = _nonces.NonceRepository
 PairingCodeRepository = _pc.PairingCodeRepository
 PendingSessionRepository = _pending.PendingSessionRepository
+HelloProofRepository = _hello_proofs.HelloProofRepository
 RateLimitRepository = _rl.RateLimitRepository
 SettingsRepository = _settings.SettingsRepository
-
-MIGRATIONS_DIR = bundled_path("backend", "app", "voice", "migrations")
-MIGRATIONS = (
-    "001_commercial_voice.sql",
-    "002_pending_session_claims.sql",
-    "003_credential_identity.sql",
-    "004_pending_claim_tokens.sql",
-)
-
 
 def _open_connection(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=30.0)
@@ -69,6 +62,7 @@ class VoiceStore:
         connect = lambda: _open_connection(self.db_path)  # noqa: E731
         self.pairing_codes = PairingCodeRepository(connect)
         self.pending_sessions = PendingSessionRepository(connect)
+        self.hello_proofs = HelloProofRepository(connect)
         self.device_credentials = DeviceCredentialRepository(connect)
         self.nonces = NonceRepository(connect)
         self.rate_limit = RateLimitRepository(connect)
@@ -83,29 +77,11 @@ class VoiceStore:
         finally:
             conn.close()
 
+    _split_sql_script = staticmethod(split_sql_script)
+
     def initialize(self) -> None:
-        """执行未应用的迁移；schema_migrations 记录版本，幂等可重入"""
         with self.connect() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations ("
-                " version TEXT PRIMARY KEY, applied_at REAL NOT NULL)"
-            )
-            applied = {
-                row[0] for row in conn.execute(
-                    "SELECT version FROM schema_migrations"
-                ).fetchall()
-            }
-            for migration in MIGRATIONS:
-                if migration in applied:
-                    continue
-                script = (MIGRATIONS_DIR / migration).read_text(encoding="utf-8")
-                with conn:
-                    conn.executescript(script)
-                    conn.execute(
-                        "INSERT INTO schema_migrations(version, applied_at)"
-                        " VALUES (?, strftime('%s','now'))",
-                        (migration,),
-                    )
+            apply_migrations(conn)
 
     # ---- device credentials（Secret 只哈希） ----
 
@@ -300,8 +276,11 @@ class VoiceStore:
     # ---- pending session control plane（metadata only，原子单次领取） ----
 
     def enqueue_pending_session(self, session_id: str, device_id: str, room_id: str,
-                                expires_at: float, now: float | None = None) -> None:
-        self.pending_sessions.enqueue(session_id, device_id, room_id, expires_at, now=now)
+                                generation: int, expires_at: float,
+                                now: float | None = None) -> None:
+        self.pending_sessions.enqueue(
+            session_id, device_id, room_id, generation, expires_at, now=now
+        )
 
     def claim_pending_session(self, now: float | None = None) -> dict | None:
         return self.pending_sessions.claim_one(now=now)

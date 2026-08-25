@@ -129,7 +129,7 @@ def test_revoked_credential_returns_40103_and_never_leaks_token(tmp_path: Path, 
     assert e.value.code == 40103
     assert SECRET_A not in str(e.value)
     with caplog.at_level(logging.DEBUG):
-        pass
+        logging.getLogger("app.voice.auth").debug("credential rejected")
     assert SECRET_A not in caplog.text
 
 
@@ -313,7 +313,14 @@ def test_error_payload_and_status_table() -> None:
     assert error_payload(40301) == {"code": 40301, "data": None, "message": "privacy_disabled"}
     assert HTTP_STATUS[50302] == 503
     assert error_payload(50302) == {"code": 50302, "data": None, "message": "privacy_action_failed"}
-    assert len(ERROR_MESSAGES) == 14
+    assert HTTP_STATUS[40914] == 409
+    assert error_payload(40914) == {
+        "code": 40914, "data": None, "message": "hello_state_conflict",
+    }
+    assert HTTP_STATUS[50303] == 503
+    assert error_payload(50303) == {
+        "code": 50303, "data": None, "message": "hello_redemption_unavailable",
+    }
     err = VoiceError(42901)
     assert err.code == 42901
     assert err.message == "rate_limited"

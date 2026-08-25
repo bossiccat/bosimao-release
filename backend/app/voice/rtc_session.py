@@ -21,6 +21,7 @@ import uuid
 
 from pydantic import BaseModel
 
+from .timefmt import epoch_to_iso8601
 from .usersig import gen_user_sig
 
 logger = logging.getLogger(__name__)
@@ -107,15 +108,40 @@ class RtcSessionService:
         logger.info("sign rtc session room=%s user_id=%s sdk_app_id=%s", room_id, user_id, self.cfg.sdk_app_id)
         return self._session_payload(room_id, user_id, user_sig)
 
+    def sign_bound(self, *, session_id: str, device_id: str, room_id: str,
+                   user_id: str, generation: int) -> dict:
+        """Sign TRTC credentials for an existing CP-owned session resource."""
+        if not self.is_configured():
+            raise ConfigMissingError("TRTC credentials unavailable")
+        self._validate_device_id(device_id)
+        self._validate_user_id(user_id)
+        if not session_id or not room_id or generation < 0:
+            raise InvalidDeviceIdError("invalid bound session context")
+        user_sig = gen_user_sig(
+            sdk_app_id=self.cfg.sdk_app_id,
+            secret_key=self.cfg.secret_key,
+            user_id=user_id,
+            expire_s=self.cfg.user_sig_expire_s,
+        )
+        payload = self._session_payload(room_id, user_id, user_sig)
+        payload["session_id"] = session_id
+        payload["generation"] = generation
+        return payload
+
     def _session_payload(self, room_id: str, user_id: str, user_sig: str) -> dict:
-        """组装 OpenAPI SessionData：session_id + expires_at + scene=trtc_full_duplex"""
+        """组装 OpenAPI SessionData：session_id + expires_at + scene=trtc_full_duplex
+
+        expires_at 按 OpenAPI（docs/api/commercial-voice-openapi.yaml SessionData）
+        声明的 date-time 格式返回 ISO8601 UTC 字符串；需要 epoch 的内部消费方
+        （pending claim 入队、userSig 指纹登记）经 timefmt.as_epoch 归一化。
+        """
         return {
             "session_id": str(uuid.uuid4()),
             "room_id": room_id,
             "user_id": user_id,
             "user_sig": user_sig,
             "sdk_app_id": self.cfg.sdk_app_id,
-            "expires_at": time.time() + self.cfg.user_sig_expire_s,
+            "expires_at": epoch_to_iso8601(time.time() + self.cfg.user_sig_expire_s),
             "scene": SCENE_FULL_DUPLEX,
         }
 
