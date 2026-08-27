@@ -32,6 +32,7 @@ async def main_async() -> None:
     }
 
     bridge = BridgeServer(cfg, state)
+    await bridge.start_command_consumer()
     health = HealthServer(
         cfg.health_host,
         cfg.health_port,
@@ -67,6 +68,7 @@ async def main_async() -> None:
             await stop_event.wait()
         except asyncio.CancelledError:
             pass
+        await bridge.stop_command_consumer()
         await health.stop()
         logger.info("rtc_bridge stopped")
 
