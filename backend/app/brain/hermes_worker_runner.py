@@ -2,29 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from .agent_thread_registry import AgentThreadRegistry
-
-
-# 服务端锁定的只读 profile allowlist。任何新 profile 必须先过安全审查再入表。
-_WORKER_PROFILES: dict[str, tuple[str, ...]] = {
-    # 默认安全模式：纯 CLI 帮助，零网络、零副作用。
-    "probe_help": ("--help",),
-    # 受控只读 DeepSeek 推理：显式 model+provider 路由（隐式 provider 推断已证实不可靠，
-    # 会命中 HTTP 401），空 toolsets 禁用一切工具副作用，oneshot 单轮、提示词固定为 ping。
-    "deepseek_readonly": (
-        "-z",
-        "--model", "deepseek-v4-flash-0731",
-        "--provider", "kkdmx",
-        "--toolsets", "",
-        "ping",
-    ),
-}
-
-_DEFAULT_PROFILE = "probe_help"
+from .hermes_worker_profiles import (
+    DEFAULT_PROFILE,
+    REQUIRED_BINDING_KEYS,
+    WORKER_PROFILES,
+    binding_matches,
+)
 
 
 class HermesWorkerRunner:
@@ -37,7 +26,7 @@ class HermesWorkerRunner:
         command_factory: Callable[[str], Sequence[str]] | None = None,
         profile: str | None = None,
     ) -> None:
-        if command_factory is not None and (profile or _DEFAULT_PROFILE) != _DEFAULT_PROFILE:
+        if command_factory is not None and (profile or DEFAULT_PROFILE) != DEFAULT_PROFILE:
             raise ValueError(
                 "command_factory 仅供测试注入默认 probe_help profile；"
                 "受限 profile 不允许命令覆盖。"
@@ -46,7 +35,7 @@ class HermesWorkerRunner:
         self._hermes_bin = hermes_bin
         # 全量命令覆盖仅限测试缝隙（默认 profile）；生产装配不得传入。
         self._command_factory = command_factory
-        self._profile = profile or _DEFAULT_PROFILE
+        self._profile = profile or DEFAULT_PROFILE
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._running_events: dict[str, asyncio.Event] = {}
 
@@ -60,15 +49,41 @@ class HermesWorkerRunner:
         """按 allowlist 组装命令；未知 profile 返回 None（启动阶段拒绝）。"""
         if self._command_factory is not None:
             return tuple(self._command_factory(binary))
-        args = _WORKER_PROFILES.get(self._profile)
+        args = WORKER_PROFILES.get(self._profile)
         if args is None:
             return None
         return (binary, *args)
+
+    def _verify_command_binding(self, thread_id: str) -> str | None:
+        """校验审批命令 payload 携带的 profile 绑定与 runner 配置一致。
+
+        返回错误摘要（无绑定/篡改/不匹配），None 表示通过。
+        仅默认 profile 的测试缝隙（command_factory 注入）跳过校验。
+        """
+        if self._command_factory is not None:
+            return None
+        db_row = self._registry.last_command_payload(thread_id)
+        if not db_row:
+            return "审批命令缺少 profile 绑定，后台 Worker 拒绝启动。"
+        missing = [k for k in REQUIRED_BINDING_KEYS if k not in db_row]
+        if missing:
+            return f"审批命令绑定不完整（缺 {','.join(missing)}），后台 Worker 拒绝启动。"
+        if not binding_matches(str(db_row["profile"]), tuple(db_row["command_argv"])):
+            return "审批命令绑定与 allowlist 不一致，后台 Worker 拒绝启动。"
+        if str(db_row["profile"]) != self._profile:
+            return "审批命令绑定的 profile 与 runner 配置不一致，后台 Worker 拒绝启动。"
+        return None
 
     async def start(self, thread_id: str) -> dict:
         thread = self._registry.get(thread_id)
         if thread is None:
             return {"error": "thread_not_found"}
+
+        binding_error = self._verify_command_binding(thread_id)
+        if binding_error is not None:
+            return self._registry.update(thread_id, "failed", binding_error) or {
+                "error": "thread_not_found"
+            }
 
         binary = self._resolve_binary()
         if binary is None:
@@ -131,6 +146,10 @@ class HermesWorkerRunner:
             "failed",
             f"后台 Worker 的 Hermes 探测失败（退出码 {exit_code}）。",
         ) or {"error": "thread_not_found"}
+
+    def start_sync(self, thread_id: str) -> dict:
+        """Synchronous start for tests and control-plane probes."""
+        return asyncio.run(self.start(thread_id))
 
     async def wait_until_running(self, thread_id: str, timeout: float = 5.0) -> None:
         event = self._running_events.get(thread_id)

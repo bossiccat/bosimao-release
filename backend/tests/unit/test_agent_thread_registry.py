@@ -185,3 +185,105 @@ def test_cancelled_late_approval_command_is_not_claimed(tmp_path):
 
     assert bridge_registry.claim_commands() == []
     assert bridge_registry.get(thread["thread_id"])["status"] == "cancelled"
+
+
+def test_approved_command_carries_pinned_worker_profile_binding(tmp_path):
+    """approve() 写入的 start_worker 命令必须携带 profile 绑定摘要（不含凭据）。"""
+    db = tmp_path / "threads.sqlite3"
+    registry = AgentThreadRegistry(str(db))
+    thread = registry.spawn("执行受控任务")
+    pending = registry.handle_tool("approve_reply", {
+        "thread_id": thread["thread_id"], "summary": "需要确认",
+    })
+    registry.approve(thread["thread_id"], pending["approval_id"])
+
+    commands = registry.claim_commands()
+
+    assert len(commands) == 1
+    payload = commands[0]["payload"]
+    assert payload.get("profile") == "probe_help"
+    assert tuple(payload.get("command_argv", [])) == ("hermes", "--help")
+    assert all("HERMES_CUSTOM_KKDMX_API_KEY" not in str(v) for v in payload.values())
+
+
+def test_approved_deepseek_profile_binding_pins_readonly_route(tmp_path):
+    """受限 profile 的绑定摘要必须锁定显式 DeepSeek 只读路由。"""
+    db = tmp_path / "threads.sqlite3"
+    registry = AgentThreadRegistry(str(db), default_worker_profile="deepseek_readonly")
+    thread = registry.spawn("执行受控任务")
+    pending = registry.handle_tool("approve_reply", {
+        "thread_id": thread["thread_id"], "summary": "需要确认",
+    })
+    registry.approve(thread["thread_id"], pending["approval_id"])
+
+    payload = registry.claim_commands()[0]["payload"]
+
+    assert payload.get("profile") == "deepseek_readonly"
+    assert tuple(payload.get("command_argv", [])) == (
+        "hermes", "-z",
+        "--model", "deepseek-v4-flash-0731",
+        "--provider", "kkdmx",
+        "--toolsets", "",
+        "ping",
+    )
+
+
+def test_command_payload_without_profile_binding_is_rejected_at_launch(tmp_path):
+    """旧格式命令（无 profile 绑定）必须在启动阶段被拒绝，不允许静默降级。"""
+    from app.brain.hermes_worker_runner import HermesWorkerRunner
+    import json as _json
+    import sqlite3 as _sqlite3
+    import time as _time
+    import uuid as _uuid
+
+    registry = AgentThreadRegistry(str(tmp_path / "threads.sqlite3"))
+    thread = registry.spawn("旧格式任务")
+    registry.handle_tool("approve_reply", {
+        "thread_id": thread["thread_id"], "summary": "需要确认",
+    })
+    pending = registry.get(thread["thread_id"])
+    registry.approve(thread["thread_id"], pending["approval_id"])
+    command = registry.claim_commands()[0]
+    # 手工把命令 payload 降级为无绑定的旧格式（模拟篡改/旧版本写入）
+    db = _sqlite3.connect(str(tmp_path / "threads.sqlite3"))
+    db.execute(
+        "UPDATE agent_commands SET payload=? WHERE command_id=?",
+        (_json.dumps({"thread_id": thread["thread_id"]}), command["command_id"]),
+    )
+    db.commit()
+    db.close()
+
+    runner = HermesWorkerRunner(registry, hermes_bin="hermes", profile="probe_help")
+    result = runner.start_sync(thread["thread_id"])
+
+    assert result["status"] == "failed"
+    assert "绑定" in result["summary"] or "binding" in result["summary"].lower()
+
+
+def test_worker_runner_refuses_command_with_tampered_profile_binding(tmp_path):
+    """命令 payload 的 profile 绑定与 runner 配置不一致时，启动必须失败。"""
+    from app.brain.hermes_worker_runner import HermesWorkerRunner
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    registry = AgentThreadRegistry(str(tmp_path / "threads.sqlite3"))
+    thread = registry.spawn("篡改场景")
+    registry.handle_tool("approve_reply", {
+        "thread_id": thread["thread_id"], "summary": "需要确认",
+    })
+    pending = registry.get(thread["thread_id"])
+    registry.approve(thread["thread_id"], pending["approval_id"])
+    command = registry.claim_commands()[0]
+    db = _sqlite3.connect(str(tmp_path / "threads.sqlite3"))
+    db.execute(
+        "UPDATE agent_commands SET payload=? WHERE command_id=?",
+        (_json.dumps({"thread_id": thread["thread_id"], "profile": "deepseek_readonly", "command_argv": ["hermes", "-z", "evil"]}), command["command_id"]),
+    )
+    db.commit()
+    db.close()
+
+    runner = HermesWorkerRunner(registry, hermes_bin="hermes", profile="probe_help")
+    result = runner.start_sync(thread["thread_id"])
+
+    assert result["status"] == "failed"
+    assert "绑定" in result["summary"] or "binding" in result["summary"].lower()

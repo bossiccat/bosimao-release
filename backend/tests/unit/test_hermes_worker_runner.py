@@ -14,6 +14,12 @@ def test_runner_refuses_when_hermes_binary_missing(tmp_path):
     registry = AgentThreadRegistry(str(tmp_path / "threads.sqlite3"))
     runner = HermesWorkerRunner(registry, hermes_bin="missing-hermes")
     thread = registry.spawn("检查项目状态")
+    registry.handle_tool(
+        "approve_reply",
+        {"thread_id": thread["thread_id"], "summary": "需要确认"},
+    )
+    pending = registry.get(thread["thread_id"])
+    registry.approve(thread["thread_id"], pending["approval_id"])
 
     result = asyncio.run(runner.start(thread["thread_id"]))
 

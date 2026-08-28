@@ -10,13 +10,20 @@ import time
 import uuid
 from pathlib import Path
 
+from .hermes_worker_profiles import worker_command_argv
+
 
 class AgentThreadRegistry:
-    def __init__(self, db_path: str | None = None) -> None:
+    def __init__(
+        self,
+        db_path: str | None = None,
+        default_worker_profile: str = "probe_help",
+    ) -> None:
         default_path = Path(__file__).resolve().parents[2] / "data" / "agent_threads.sqlite3"
         path = db_path or os.environ.get("AGENT_THREAD_DB") or default_path
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._default_worker_profile = default_worker_profile
         self._lock = threading.Lock()
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
@@ -105,7 +112,26 @@ class AgentThreadRegistry:
                 return {"error": "approval_not_pending"}
             db.execute(
                 "INSERT INTO agent_commands(command_id, thread_id, command, payload, status, created_at, claimed_at) VALUES (?, ?, ?, ?, ?, ?, NULL)",
-                (uuid.uuid4().hex, thread_id, "start_worker", json.dumps({"thread_id": thread_id}), "pending", time.time()),
+                (
+                    uuid.uuid4().hex,
+                    thread_id,
+                    "start_worker",
+                    json.dumps(
+                        {
+                            "thread_id": thread_id,
+                            "profile": self._default_worker_profile,
+                            # 绑定摘要：审批通过时刻锁定的规范化命令（含规范二进制名，
+                            # 不含凭据/用户文本/运行时绝对路径）。
+                            "command_argv": [
+                                "hermes",
+                                *worker_command_argv(self._default_worker_profile),
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "pending",
+                    time.time(),
+                ),
             )
         return self.get(thread_id) or {"error": "thread_not_found"}
 
@@ -117,6 +143,20 @@ class AgentThreadRegistry:
                 (command_id,),
             )
             return updated.rowcount == 1
+
+    def last_command_payload(self, thread_id: str) -> dict | None:
+        """Return the most recent start_worker command payload for a thread."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT payload FROM agent_commands WHERE thread_id=? AND command='start_worker' ORDER BY created_at DESC LIMIT 1",
+                (thread_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row["payload"] or "{}") or None
+        except json.JSONDecodeError:
+            return None
 
     def recover_commands(self) -> int:
         """Return commands left claimed by a bridge that was restarted."""
