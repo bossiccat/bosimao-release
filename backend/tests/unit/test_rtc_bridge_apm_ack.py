@@ -105,7 +105,9 @@ def _hello(session_id: str) -> dict:
 
 
 async def _start_server(reporter):
-    cfg = BridgeConfig(ws_port=0)
+    # 本测试族验证 APM 取消/终止上报语义：显式钉住 apm 引擎
+    # （主线默认 voice_engine=qwen，Qwen 分支不产生 FakeApm 实例）
+    cfg = BridgeConfig(ws_port=0, voice_engine="apm")
     state = {"sidecar_connected": False, "room_id": "", "device_id": "", "_session_ref": None}
     bridge = BridgeServer(cfg, state, redemption=FakeRedemption(), ack_reporter=reporter)
     server = await websockets.serve(bridge.handler, "127.0.0.1", 0)

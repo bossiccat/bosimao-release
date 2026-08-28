@@ -42,16 +42,10 @@ class BridgeServer:
     ) -> None:
         self.cfg = cfg
         self.state = state                       # 指标/健康共享字典（health.py 读取）
-        self._redemption = redemption or HelloRedemptionClient(
-            base_url=cfg.control_plane_base_url,
-            service_credential=cfg.control_plane_service_credential,
-            ca_file=cfg.control_plane_ca_file,
-            client_cert_file=cfg.control_plane_client_cert_file,
-            client_key_file=cfg.control_plane_client_key_file,
-            gateway_assertion=cfg.control_plane_gateway_assertion,
-            connect_timeout_s=cfg.control_plane_connect_timeout_s,
-            total_timeout_s=cfg.control_plane_total_timeout_s,
-        )
+        # redemption 客户端惰性构建（首次 hello 兑付时）：配置缺失不得阻断进程启动——
+        # 此时任何 hello 兑付都会失败，handler 走 fail-closed 拒绝会话（行为不变）。
+        self._redemption_override = redemption
+        self._redemption_client: HelloRedemptionClient | None = None
         self._ack_reporter = build_ack_reporter(cfg, ack_reporter)
         # 终止上下文注册表：sidecar 经 WS ctrl note_termination 中继注入；
         # 无注入 → drain 时不上报（跳过，不硬编码）。
@@ -118,6 +112,28 @@ class BridgeServer:
     @property
     def thread_registry(self) -> AgentThreadRegistry:
         return self._thread_registry
+
+    @property
+    def _redemption(self) -> HelloRedemptionClient:
+        """hello 兑付客户端：显式注入优先；否则按 cfg 惰性构建（配置缺失即抛，fail-closed）"""
+        if self._redemption_override is not None:
+            return self._redemption_override
+        if self._redemption_client is None:
+            self._redemption_client = HelloRedemptionClient(
+                base_url=self.cfg.control_plane_base_url,
+                service_credential=self.cfg.control_plane_service_credential,
+                ca_file=self.cfg.control_plane_ca_file,
+                client_cert_file=self.cfg.control_plane_client_cert_file,
+                client_key_file=self.cfg.control_plane_client_key_file,
+                gateway_assertion=self.cfg.control_plane_gateway_assertion,
+                connect_timeout_s=self.cfg.control_plane_connect_timeout_s,
+                total_timeout_s=self.cfg.control_plane_total_timeout_s,
+            )
+        return self._redemption_client
+
+    @_redemption.setter
+    def _redemption(self, value) -> None:
+        self._redemption_override = value
 
     @property
     def sidecar_connected(self) -> bool:
