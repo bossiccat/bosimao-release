@@ -17,7 +17,7 @@ QWEN_COORDINATION_TOOLS = [
     {"type": "function", "function": {"name": "spawn_agent_thread", "description": "Create a persistent background worker for a complex task.", "parameters": {"type": "object", "properties": {"user_speech": {"type": "string"}}, "required": ["user_speech"]}}},
     {"type": "function", "function": {"name": "agent_status", "description": "Read concise status of a background worker.", "parameters": {"type": "object", "properties": {"thread_id": {"type": "string"}}, "required": ["thread_id"]}}},
     {"type": "function", "function": {"name": "steer_agent_thread", "description": "Redirect or stop a running background worker.", "parameters": {"type": "object", "properties": {"thread_id": {"type": "string"}, "instruction": {"type": "string"}, "action": {"type": "string", "enum": ["steer", "cancel"]}}, "required": ["thread_id", "action"]}}},
-    {"type": "function", "function": {"name": "approve_reply", "description": "Ask the user to approve a risky local operation.", "parameters": {"type": "object", "properties": {"thread_id": {"type": "string"}, "approval_id": {"type": "string"}, "summary": {"type": "string"}}, "required": ["thread_id", "approval_id", "summary"]}}},
+    {"type": "function", "function": {"name": "approve_reply", "description": "Ask the user to approve a risky local operation. The server generates the approval identifier.", "parameters": {"type": "object", "properties": {"thread_id": {"type": "string"}, "summary": {"type": "string"}}, "required": ["thread_id", "summary"]}}},
 ]
 
 
@@ -87,6 +87,8 @@ class QwenRealtimeBridge:
             if isinstance(args, str):
                 args = json.loads(args or "{}")
             call_id = event.get("call_id", event.get("item_id", ""))
+            if name == "approve_reply" and "approval_id" in args:
+                args = {key: value for key, value in args.items() if key != "approval_id"}
             if self._on_tool_call:
                 output = await self._on_tool_call(name, args, call_id)
                 await self._ws.send(json.dumps({"type": "conversation.item.create", "item": {"type": "function_call_output", "call_id": call_id, "output": output}}))

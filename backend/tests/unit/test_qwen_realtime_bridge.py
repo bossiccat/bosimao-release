@@ -61,6 +61,13 @@ async def test_qwen_audio_event_decodes_pcm16_24k_to_16k(monkeypatch):
     assert len(out[0]) == 16000 * 2
 
 
+def test_qwen_approval_tool_schema_does_not_accept_model_approval_id():
+    approval = next(x for x in QWEN_COORDINATION_TOOLS if x["function"]["name"] == "approve_reply")
+    props = approval["function"]["parameters"]["properties"]
+    assert "approval_id" not in props
+    assert "approval_id" not in approval["function"]["parameters"].get("required", [])
+
+
 def test_pcm24k_to_pcm16k_preserves_pcm_format():
     assert len(pcm24k_to_pcm16k(b"\x00\x00" * 24000)) == 16000 * 2
 

@@ -24,6 +24,7 @@ from .brain.intent_service import IntentService
 from .brain.pipeline import BrainPipeline
 from .brain.store import TaskStore
 from .brain.task_service import TaskService
+from .brain.agent_thread_registry import AgentThreadRegistry
 from .config import config as app_config
 from .core.events import EventBus
 from .core.orchestrator import Orchestrator
@@ -68,6 +69,8 @@ def _build_secured_session_router():
     from .voice.rate_limit import RateLimitConfig, RateLimiter
     from .voice.rtc_session import RtcSessionConfig, RtcSessionService
     from .voice.storage import VoiceStore
+    from .brain.agent_thread_registry import AgentThreadRegistry
+    from .api.routes_agent_threads import create_agent_thread_router
 
     settings = app_config.settings
     sidecar_credentials: SidecarCredentialHashSet | None = None
@@ -112,7 +115,7 @@ def _build_secured_session_router():
     # 真实隐私 RuntimeActions（ADR-021 D4）：desktop_capture 走 late-bound orchestrator holder，
     # lifespan 里 privacy_runtime.bind(orch) 完成绑定；cloud/mic/background 为 no-op。
     privacy = PrivacyService(store, PrivacyRuntimeActions())
-    return routes_voice.create_secured_voice_router(
+    secured_router = routes_voice.create_secured_voice_router(
         store=store,
         service=service,
         validator=validator,
@@ -122,6 +125,11 @@ def _build_secured_session_router():
         devices=DeviceService(store),
         privacy=privacy,
     )
+    secured_router.include_router(create_agent_thread_router(
+        registry=AgentThreadRegistry(), validator=validator,
+        nonces=NonceService(store), limiter=RateLimiter(store, RateLimitConfig()),
+    ))
+    return secured_router
 
 
 @asynccontextmanager
@@ -152,6 +160,7 @@ async def lifespan(app: FastAPI):
         app_config.brain, deepseek, intent_svc, task_svc, brain_store, injector, bus
     )
     routes_brain.pipeline = brain_pipeline
+    app.state.agent_thread_registry = AgentThreadRegistry()
 
     # WS 路由依赖 bus，在 lifespan 内创建并挂载
     ws_router, _hub = routes_ws.create_ws_router(bus)

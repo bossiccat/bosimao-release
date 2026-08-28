@@ -16,6 +16,7 @@ import websockets
 from .session import PeerVoiceSession
 from app.brain.agent_thread_registry import AgentThreadRegistry
 from app.voice.qwen_realtime_bridge import QwenRealtimeBridge
+from app.brain.hermes_worker_runner import HermesWorkerRunner
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,8 @@ class BridgeServer:
         cfg,
         state: dict,
         on_voice_intent: Callable[[str], Awaitable[None]] | None = None,
+        thread_registry: AgentThreadRegistry | None = None,
+        worker_runner: HermesWorkerRunner | None = None,
     ) -> None:
         self.cfg = cfg
         self.state = state                       # 指标/健康共享字典（health.py 读取）
@@ -36,7 +39,57 @@ class BridgeServer:
         self._session_id = ""
         self._send_lock = asyncio.Lock()
         self._on_voice_intent = on_voice_intent   # AI 文本 → Brain 路由回调（可选）
-        self._thread_registry = AgentThreadRegistry()
+        self._thread_registry = thread_registry or AgentThreadRegistry()
+        # env 驱动装配（canary/feature-off 旋钮），flags 写入 state 供 health 观测。
+        self._worker_runner = worker_runner or HermesWorkerRunner.from_env(self._thread_registry)
+        flags_fn = getattr(self._worker_runner, "feature_flags", None)
+        if flags_fn is not None:
+            state.setdefault("worker_feature_flags", flags_fn())
+        self._worker_tasks: dict[str, asyncio.Task] = {}
+        self._command_consumer: asyncio.Task | None = None
+
+    async def start_command_consumer(self, interval: float = 0.2) -> None:
+        """Start durable approval command polling; safe to call after restart."""
+        if self._command_consumer is None:
+            self._thread_registry.recover_commands()
+            self._command_consumer = asyncio.create_task(self._consume_commands(interval))
+
+    async def stop_command_consumer(self) -> None:
+        task = self._command_consumer
+        self._command_consumer = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    def _schedule_claimed_command(self, command: dict) -> None:
+        """Gate worker launch on an atomic queued-to-running thread claim."""
+        thread_id = command["thread_id"]
+        if self._thread_registry.claim_queued(thread_id) is None:
+            self._thread_registry.complete_command(command["command_id"])
+            return
+        if thread_id in self._worker_tasks:
+            self._thread_registry.complete_command(command["command_id"])
+            return
+        self._worker_tasks[thread_id] = asyncio.create_task(
+            self._run_worker(thread_id, command["command_id"]),
+            name=f"hermes-worker-{thread_id}",
+        )
+
+    async def _consume_commands(self, interval: float) -> None:
+        while True:
+            try:
+                for command in self._thread_registry.claim_commands():
+                    if command.get("command") == "start_worker":
+                        self._schedule_claimed_command(command)
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.exception("approval command consumer failed")
+                await asyncio.sleep(interval)
 
     @property
     def thread_registry(self) -> AgentThreadRegistry:
@@ -146,8 +199,42 @@ class BridgeServer:
 
     async def _handle_agent_tool(self, name: str, args: dict, call_id: str) -> str:
         del call_id
+        if name == "spawn_agent_thread":
+            result = self._thread_registry.handle_tool(name, args)
+            return json.dumps(result, ensure_ascii=False)
+        if name == "steer_agent_thread" and str(args.get("action", "steer")) == "cancel":
+            thread_id = str(args.get("thread_id", ""))
+            cancelled = await self._worker_runner.cancel(thread_id)
+            result = self._thread_registry.get(thread_id)
+            if result is None:
+                result = {"error": "thread_not_found"}
+            elif not cancelled and result["status"] != "cancelled":
+                result = self._thread_registry.steer(thread_id, action="cancel") or result
+            return json.dumps(result, ensure_ascii=False)
         result = self._thread_registry.handle_tool(name, args)
         return json.dumps(result, ensure_ascii=False)
+
+    async def approve_agent_thread(self, thread_id: str, approval_id: str) -> dict:
+        result = self._thread_registry.approve(thread_id, approval_id)
+        if result.get("status") != "queued":
+            return result
+        for command in self._thread_registry.claim_commands():
+            if command.get("command") == "start_worker":
+                self._schedule_claimed_command(command)
+        return result
+
+    async def _run_worker(self, thread_id: str, command_id: str | None = None) -> None:
+        try:
+            await self._worker_runner.start(thread_id)
+        finally:
+            self._worker_tasks.pop(thread_id, None)
+            if command_id:
+                self._thread_registry.complete_command(command_id)
+
+    async def wait_for_worker(self, thread_id: str) -> None:
+        task = self._worker_tasks.get(thread_id)
+        if task is not None:
+            await task
 
     async def _dispatch(self, msg: dict) -> None:
         mtype = msg.get("type")

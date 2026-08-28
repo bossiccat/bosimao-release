@@ -57,13 +57,123 @@ def fake_apm(monkeypatch):
 
 
 async def _start_server():
-    cfg = BridgeConfig(ws_port=0)  # 端口 0 → 系统分配
+    cfg = BridgeConfig(ws_port=0, voice_engine="apm")  # 端口 0 → 系统分配
     state = {"sidecar_connected": False, "room_id": "", "device_id": "", "_session_ref": None}
     bridge = BridgeServer(cfg, state)
     # 手动起 websockets 服务（端口 0 由 websockets 分配）
     server = await websockets.serve(bridge.handler, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     return bridge, state, server, port
+
+
+class FakeWorkerRunner:
+    def __init__(self, registry) -> None:
+        self.registry = registry
+        self.started: list[str] = []
+        self.cancelled: list[str] = []
+
+    async def start(self, thread_id: str) -> dict:
+        self.started.append(thread_id)
+        await asyncio.sleep(0)
+        return self.registry.update(thread_id, "completed", "后台 Worker 已完成测试只读任务。")
+
+    async def cancel(self, thread_id: str) -> bool:
+        self.cancelled.append(thread_id)
+        self.registry.update(thread_id, "cancelled", "后台 Worker 已取消。")
+        return True
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_thread_schedules_worker_and_returns_persistent_thread(tmp_path):
+    cfg = BridgeConfig(ws_port=0)
+    state = {"sidecar_connected": False, "room_id": "", "device_id": "", "_session_ref": None}
+    from app.brain.agent_thread_registry import AgentThreadRegistry
+
+    registry = AgentThreadRegistry(str(tmp_path / "threads.sqlite3"))
+    worker = FakeWorkerRunner(registry)
+    bridge = BridgeServer(cfg, state, thread_registry=registry, worker_runner=worker)
+
+    raw = await bridge._handle_agent_tool(
+        "spawn_agent_thread", {"user_speech": "只读检查"}, "call-1"
+    )
+    initial = json.loads(raw)
+    restored = registry.get(initial["thread_id"])
+    assert initial["status"] == "awaiting_approval"
+    assert initial["thread_id"] not in worker.started
+    assert restored is not None
+    assert restored["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_cancel_agent_thread_cancels_owned_worker(tmp_path):
+    cfg = BridgeConfig(ws_port=0)
+    state = {"sidecar_connected": False, "room_id": "", "device_id": "", "_session_ref": None}
+    from app.brain.agent_thread_registry import AgentThreadRegistry
+
+    registry = AgentThreadRegistry(str(tmp_path / "threads.sqlite3"))
+    worker = FakeWorkerRunner(registry)
+    bridge = BridgeServer(cfg, state, thread_registry=registry, worker_runner=worker)
+    thread = registry.spawn("停止测试")
+
+    raw = await bridge._handle_agent_tool(
+        "steer_agent_thread", {"thread_id": thread["thread_id"], "action": "cancel"}, "call-2"
+    )
+    result = json.loads(raw)
+
+    assert worker.cancelled == [thread["thread_id"]]
+    assert result["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_approval_release_starts_only_matching_waiting_worker(tmp_path):
+    cfg = BridgeConfig(ws_port=0)
+    state = {"sidecar_connected": False, "room_id": "", "device_id": "", "_session_ref": None}
+    from app.brain.agent_thread_registry import AgentThreadRegistry
+
+    registry = AgentThreadRegistry(str(tmp_path / "threads.sqlite3"))
+    worker = FakeWorkerRunner(registry)
+    bridge = BridgeServer(cfg, state, thread_registry=registry, worker_runner=worker)
+    thread = registry.spawn("需审批任务")
+    pending = registry.handle_tool(
+        "approve_reply",
+        {"thread_id": thread["thread_id"], "summary": "确认后执行"},
+    )
+
+    wrong = await bridge.approve_agent_thread(thread["thread_id"], "wrong")
+    assert wrong["error"] == "approval_mismatch"
+    assert worker.started == []
+
+    released = await bridge.approve_agent_thread(thread["thread_id"], pending["approval_id"])
+    await bridge.wait_for_worker(released["thread_id"])
+    assert released["status"] == "queued"
+    assert worker.started == [thread["thread_id"]]
+    assert registry.get(thread["thread_id"])["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_bridge_consumes_approval_from_independent_registry_and_restarts(tmp_path):
+    cfg = BridgeConfig(ws_port=0)
+    state = {"sidecar_connected": False, "room_id": "", "device_id": "", "_session_ref": None}
+    from app.brain.agent_thread_registry import AgentThreadRegistry
+
+    db = str(tmp_path / "threads.sqlite3")
+    api_registry = AgentThreadRegistry(db)
+    bridge_registry = AgentThreadRegistry(db)
+    worker = FakeWorkerRunner(bridge_registry)
+    thread = api_registry.spawn("跨进程审批任务")
+    pending = api_registry.handle_tool("approve_reply", {
+        "thread_id": thread["thread_id"], "summary": "确认后执行",
+    })
+    api_registry.approve(thread["thread_id"], pending["approval_id"])
+
+    bridge = BridgeServer(cfg, state, thread_registry=bridge_registry, worker_runner=worker)
+    await bridge.start_command_consumer(interval=0.01)
+    await asyncio.sleep(0.05)
+    await bridge.wait_for_worker(thread["thread_id"])
+    await bridge.stop_command_consumer()
+
+    assert worker.started == [thread["thread_id"]]
+    assert bridge_registry.claim_commands() == []
 
 
 @pytest.mark.asyncio

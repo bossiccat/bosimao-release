@@ -83,6 +83,9 @@ audit-*.stdout.txt
 backend/data/*.db
 backend/data/*.db-wal
 backend/data/*.db-shm
+backend/data/*.sqlite3
+backend/data/*.sqlite3-wal
+backend/data/*.sqlite3-shm
 
 # QA/任务临时输出（一次性产物，禁止提交）
 qa-*/

@@ -127,14 +127,14 @@ if ($existing -and -not $Restart) {
         Start-Sleep -Seconds 2
     }
     $log = Join-Path $LogDir "relay_client.log"
+    # 2026-08-28 P1：凭据由子进程继承 env（RELAY_TOKEN/RELAY_E2EE_KEY），
+    # 不再经 --token/--e2ee-key 进 argv（WMI 对本机所有用户可见）。
     $relayArgs = @("-m", "backend.relay.relay_client",
         "--relay", $relayUrl,
         "--gateway", $gwUrl,
         "--gateway-ca", $gwCa,
-        "--pairing-code", $pairCode,
-        "--token", $token,
-        "--e2ee-key", $e2eeKey)
-    Write-Host ("[relay_client] start: $PyW " + ($relayArgs -join " ") + " (log $log)")
+        "--pairing-code", $pairCode)
+    Write-Host ("[relay_client] start: $PyW " + ($relayArgs -join " ") + " (凭据来自 env，不进 argv) (log $log)")
     Start-Process -FilePath $PyW -ArgumentList $relayArgs -WorkingDirectory $Root `
         -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden
     # Verify pairing via log (connect + pair takes a few seconds)

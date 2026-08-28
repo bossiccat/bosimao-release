@@ -322,11 +322,14 @@ class RelayClient:
         self.stats["control"] += 1
 
 
-async def main() -> None:
+def build_parser() -> "argparse.ArgumentParser":
+    """CLI 参数表。密钥类参数（--token/--e2ee-key）已被移除。
+
+    2026-08-28 P1 修复：凭据不得出现在 argv（进程命令行经 WMI 对本机所有用户可见）。
+    统一走 env：RELAY_TOKEN / RELAY_E2EE_KEY（见 resolve_credentials）。
+    """
     import argparse
     import os
-
-    from .relay_protocol import load_e2ee_key
 
     parser = argparse.ArgumentParser(description="PC 侧中继客户端（联调用）")
     parser.add_argument("--relay", default=os.environ.get("RELAY_URL", "ws://127.0.0.1:19090/relay/ws"))
@@ -335,14 +338,28 @@ async def main() -> None:
                         help="wss 网关的自签 CA 证书路径（certs/ca.crt），信任它用于 TLS 校验")
     parser.add_argument("--pairing-code", required=True)
     parser.add_argument("--device-id", default="jax-pc-01")
-    parser.add_argument("--token", default=os.environ.get("RELAY_TOKEN", ""))
-    parser.add_argument("--e2ee-key", default=os.environ.get("RELAY_E2EE_KEY", ""),
-                        help="E2EE 密钥：32 字节 base64 或明文 passphrase（SHA-256 派生，与 App VoiceCipher 对齐）")
-    args = parser.parse_args()
+    return parser
+
+
+def resolve_credentials(env: dict[str, str]) -> tuple[str, str]:
+    """从 env 读取 relay token 与 E2EE 密钥（密钥绝不进 argv）。"""
+    return (
+        (env.get("RELAY_TOKEN") or "").strip(),
+        (env.get("RELAY_E2EE_KEY") or "").strip(),
+    )
+
+
+async def main() -> None:
+    import os
+
+    from .relay_protocol import load_e2ee_key
+
+    args = build_parser().parse_args()
+    token, e2ee_key = resolve_credentials(dict(os.environ))
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    e2ee = RelayE2EE(load_e2ee_key(args.e2ee_key)) if args.e2ee_key else None
-    client = RelayClient(args.relay, args.token, args.device_id, args.pairing_code,
+    e2ee = RelayE2EE(load_e2ee_key(e2ee_key)) if e2ee_key else None
+    client = RelayClient(args.relay, token, args.device_id, args.pairing_code,
                          gateway_url=args.gateway, gateway_ca=args.gateway_ca or None, e2ee=e2ee)
     try:
         await client.start()

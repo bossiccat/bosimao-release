@@ -81,6 +81,7 @@ async def main_async() -> None:
         logger.info("voice intent routing disabled (BRAIN_API_URL not set)")
 
     bridge = BridgeServer(cfg, state, on_voice_intent=on_voice_intent)
+    await bridge.start_command_consumer()
     health = HealthServer(
         cfg.health_host,
         cfg.health_port,
@@ -116,6 +117,7 @@ async def main_async() -> None:
             await stop_event.wait()
         except asyncio.CancelledError:
             pass
+        await bridge.stop_command_consumer()
         await health.stop()
         logger.info("rtc_bridge stopped")
 
