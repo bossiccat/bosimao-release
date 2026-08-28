@@ -144,6 +144,28 @@ class AgentThreadRegistry:
             )
             return updated.rowcount == 1
 
+    def backup_to(self, dest_path: str) -> dict:
+        """Safe online backup via sqlite3 backup API (WAL-consistent, no file copy)."""
+        dest = Path(dest_path).expanduser().resolve()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as src_db:
+            src_db.execute("PRAGMA busy_timeout=5000")
+            dst_db = sqlite3.connect(str(dest))
+            try:
+                src_db.backup(dst_db)
+                dst_db.commit()
+            finally:
+                dst_db.close()
+        with sqlite3.connect(str(dest)) as verify_db:
+            threads = verify_db.execute("SELECT count(*) FROM agent_threads").fetchone()[0]
+            commands = verify_db.execute("SELECT count(*) FROM agent_commands").fetchone()[0]
+        return {
+            "source": str(self.path),
+            "dest": str(dest),
+            "threads": threads,
+            "commands": commands,
+        }
+
     def last_command_payload(self, thread_id: str) -> dict | None:
         """Return the most recent start_worker command payload for a thread."""
         with self._connect() as db:

@@ -287,3 +287,56 @@ def test_worker_runner_refuses_command_with_tampered_profile_binding(tmp_path):
 
     assert result["status"] == "failed"
     assert "绑定" in result["summary"] or "binding" in result["summary"].lower()
+
+
+def test_backup_restores_threads_commands_and_stays_operational(tmp_path):
+    """WAL 库备份→恢复后：线程/命令行集逐行一致，且恢复库可继续运行审批链路。"""
+    import sqlite3 as _sqlite3
+
+    source = AgentThreadRegistry(str(tmp_path / "threads.sqlite3"))
+    # 造含完整审批链路的样本：awaiting + approved 命令 + 已领取运行中
+    t_wait = source.spawn("等待审批样本")
+    source.handle_tool("approve_reply", {"thread_id": t_wait["thread_id"], "summary": "需要确认"})
+    t_approved = source.spawn("已审批样本")
+    source.handle_tool("approve_reply", {"thread_id": t_approved["thread_id"], "summary": "需要确认"})
+    source.approve(t_approved["thread_id"], source.get(t_approved["thread_id"])["approval_id"])
+    t_running = source.spawn("运行中样本")
+    source.handle_tool("approve_reply", {"thread_id": t_running["thread_id"], "summary": "需要确认"})
+    source.approve(t_running["thread_id"], source.get(t_running["thread_id"])["approval_id"])
+    source.claim_commands()
+    source.claim_queued(t_running["thread_id"])
+
+    backup_path = tmp_path / "backup" / "threads_backup.sqlite3"
+    result = source.backup_to(str(backup_path))
+
+    assert backup_path.is_file()
+    assert result["threads"] >= 3
+    assert result["commands"] >= 1
+
+    def snapshot(db_path):
+        db = _sqlite3.connect(str(db_path))
+        threads = db.execute(
+            "SELECT thread_id, status, user_speech, summary FROM agent_threads ORDER BY thread_id"
+        ).fetchall()
+        commands = db.execute(
+            "SELECT command_id, thread_id, command, status, payload FROM agent_commands ORDER BY command_id"
+        ).fetchall()
+        db.close()
+        return threads, commands
+
+    src_threads, src_commands = snapshot(tmp_path / "threads.sqlite3")
+    dst_threads, dst_commands = snapshot(backup_path)
+
+    assert src_threads == dst_threads
+    assert src_commands == dst_commands
+
+    # 恢复库必须可继续运行：按运维恢复路径先 recover（claimed→pending），再领取推进。
+    # 运行中样本的命令因线程已 running 会被自动取消（防重复执行），属预期行为。
+    restored = AgentThreadRegistry(str(backup_path))
+    assert restored.recover_commands() == 2
+    remaining = restored.claim_commands()
+    assert len(remaining) == 1
+    assert remaining[0]["thread_id"] == t_approved["thread_id"]
+    assert restored.claim_queued(t_approved["thread_id"]) is not None
+    assert restored.get(t_approved["thread_id"])["status"] == "running"
+    assert restored.get(t_running["thread_id"])["status"] == "running"
