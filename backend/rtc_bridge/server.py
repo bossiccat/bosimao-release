@@ -39,7 +39,11 @@ class BridgeServer:
         self._send_lock = asyncio.Lock()
         self._on_voice_intent = on_voice_intent   # AI 文本 → Brain 路由回调（可选）
         self._thread_registry = thread_registry or AgentThreadRegistry()
-        self._worker_runner = worker_runner or HermesWorkerRunner(self._thread_registry)
+        # env 驱动装配（canary/feature-off 旋钮），flags 写入 state 供 health 观测。
+        self._worker_runner = worker_runner or HermesWorkerRunner.from_env(self._thread_registry)
+        flags_fn = getattr(self._worker_runner, "feature_flags", None)
+        if flags_fn is not None:
+            state.setdefault("worker_feature_flags", flags_fn())
         self._worker_tasks: dict[str, asyncio.Task] = {}
         self._command_consumer: asyncio.Task | None = None
 

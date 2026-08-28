@@ -42,6 +42,43 @@ class HermesWorkerRunner:
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._running_events: dict[str, asyncio.Event] = {}
 
+    @classmethod
+    def from_env(
+        cls,
+        registry: AgentThreadRegistry,
+        env: dict[str, str] | None = None,
+        hermes_bin: str = "hermes",
+    ) -> "HermesWorkerRunner":
+        """env 驱动的装配工厂：canary / feature-off 旋钮的唯一入口。
+
+        - WORKER_PROFILE：只能在 allowlist 内选择；未知值安全回退 probe_help。
+        - WORKER_TIMEOUT_SECONDS：仅调数值（下限 0.1）；非法值回退默认；不可关闭超时。
+        - WORKER_BINDING_ENFORCE：0/false/off 关闭绑定校验（旧库兼容）；argv 仍由 allowlist 锁定。
+        """
+        import os
+
+        env = env if env is not None else dict(os.environ)
+        profile = env.get("WORKER_PROFILE", "").strip() or DEFAULT_PROFILE
+        if profile not in WORKER_PROFILES:
+            profile = DEFAULT_PROFILE
+        try:
+            timeout = max(0.1, float(env.get("WORKER_TIMEOUT_SECONDS", "").strip() or 120.0))
+        except ValueError:
+            timeout = 120.0
+        binding_enforce = env.get("WORKER_BINDING_ENFORCE", "").strip().lower() not in (
+            "0", "false", "off",
+        )
+        runner = cls(registry, hermes_bin=hermes_bin, profile=profile, timeout_seconds=timeout)
+        runner._binding_enforce = binding_enforce
+        return runner
+
+    def feature_flags(self) -> dict:
+        return {
+            "profile": self._profile,
+            "timeout_seconds": self._timeout_seconds,
+            "binding_enforce": getattr(self, "_binding_enforce", True),
+        }
+
     def _resolve_binary(self) -> str | None:
         candidate = Path(self._hermes_bin)
         if candidate.is_file():
@@ -62,8 +99,12 @@ class HermesWorkerRunner:
 
         返回错误摘要（无绑定/篡改/不匹配），None 表示通过。
         仅默认 profile 的测试缝隙（command_factory 注入）跳过校验。
+        feature-off（WORKER_BINDING_ENFORCE=0）时跳过校验以兼容旧库；
+        argv 仍由 allowlist 锁定，安全基线不受开关影响。
         """
         if self._command_factory is not None:
+            return None
+        if not getattr(self, "_binding_enforce", True):
             return None
         db_row = self._registry.last_command_payload(thread_id)
         if not db_row:
@@ -96,7 +137,10 @@ class HermesWorkerRunner:
                 "Hermes CLI 不可用，后台 Worker 未启动。",
             ) or {"error": "thread_not_found"}
 
-        command = tuple(self._command_factory(binary)) if self._build_command(binary) else ()
+        # 统一走 _build_command（含 factory 缝隙与 allowlist 两条路径）；
+        # 旧写法在 factory=None 且二进制可解析时会 None() 崩溃，线程卡 running。
+        built = self._build_command(binary)
+        command = tuple(built) if built else ()
         if not command:
             return self._registry.update(
                 thread_id,
