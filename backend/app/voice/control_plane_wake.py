@@ -69,6 +69,16 @@ class WakeLedgerMixin:
                     " VALUES (?, ?, ?, ?, 'SIGNING', ?, ?)",
                     (session_id, device_id, room_id, generation, now, now),
                 )
+                # 同事务入队 pending claim：sidecar 轮询 /session/pending 领取后
+                # 才能走 /session/sign → hello proof → redeem 链。claim 生命周期
+                # 与本代 user_sig 一致（wake 路由传入的 expires_at）。
+                conn.execute(
+                    "INSERT INTO pending_session_claims"
+                    " (session_id, device_id, room_id, generation, expires_at,"
+                    " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, device_id, room_id, generation,
+                     as_epoch(expires_at), now, now),
+                )
                 record = {
                     "wake_event_id": wake_event_id, "prior_session_id": prior_session_id,
                     "prior_generation": prior_generation, "session_id": session_id,

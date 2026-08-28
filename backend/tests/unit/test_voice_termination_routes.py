@@ -786,3 +786,94 @@ def test_wake_prior_refs_mismatch_returns_422(tmp_path: Path) -> None:
     resp = client.post("/api/v1/voice/sessions/wake", json=body)
 
     assert resp.status_code == 422
+
+
+# ---- POST /sessions/{session_id}/kws-ready ----
+
+
+def _kws_ready_body(session: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "session_id": session["session_id"],
+        "device_id": session["device_id"],
+        "generation": session["generation"],
+        "evidence": {"kws_model": "sherpa-onnx", "armed_at": "2026-08-29T02:00:00Z"},
+    }
+
+
+def _terminated_session(client: TestClient, ledger: SessionLedger) -> dict[str, Any]:
+    """ACTIVE → terminate → 五 ack 全确认 → TERMINATED（未标 KWS_READY）。"""
+    session = _create_session(ledger)
+    tid = _begin_termination(client, session)
+    _report_all(ledger, session, tid, "android_trtc_left")
+    _report_all(ledger, session, tid, "sidecar_trtc_left")
+    _report_all(ledger, session, tid, "bridge_drained_closed")
+    _report_all(ledger, session, tid, "apm_cancelled_closed")
+    _report_all(ledger, session, tid, "brain_turns_sealed")
+    return session
+
+
+def test_kws_ready_on_terminated_session_returns_201(tmp_path: Path) -> None:
+    """TERMINATED(complete) 会话上报 KWS 就绪 → KWS_READY，契约形状锁定。"""
+    client, ledger = _make_client(tmp_path)
+    session = _terminated_session(client, ledger)
+
+    resp = client.post(
+        f"/api/v1/voice/sessions/{session['session_id']}/kws-ready",
+        json=_kws_ready_body(session),
+    )
+
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["code"] == 0
+    assert body["message"] == ""
+    data = body["data"]
+    assert data["session_id"] == session["session_id"]
+    assert data["generation"] == session["generation"]
+    assert data["state"] == "KWS_READY"
+    assert data["kws_ready"] is True
+    recorded = ledger.get_kws_readiness(session["session_id"], session["generation"])
+    assert recorded and recorded[0]["reporter"] == "android"
+
+
+def test_kws_ready_on_active_session_returns_40917(tmp_path: Path) -> None:
+    """未完成终止的 ACTIVE 会话不得进入 KWS_READY。"""
+    client, ledger = _make_client(tmp_path)
+    session = _create_session(ledger)
+
+    resp = client.post(
+        f"/api/v1/voice/sessions/{session['session_id']}/kws-ready",
+        json=_kws_ready_body(session),
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["code"] == 40917
+
+
+def test_kws_ready_unknown_session_returns_40402(tmp_path: Path) -> None:
+    client, ledger = _make_client(tmp_path)
+    body = _kws_ready_body({
+        "session_id": str(uuid.uuid4()), "device_id": str(uuid.uuid4()),
+        "generation": 0,
+    })
+
+    resp = client.post(
+        f"/api/v1/voice/sessions/{body['session_id']}/kws-ready", json=body,
+    )
+
+    assert resp.status_code == 404
+    assert resp.json()["code"] == 40402
+
+
+def test_kws_ready_generation_mismatch_returns_40917(tmp_path: Path) -> None:
+    client, ledger = _make_client(tmp_path)
+    session = _terminated_session(client, ledger)
+    body = _kws_ready_body(session)
+    body["generation"] = session["generation"] + 5
+
+    resp = client.post(
+        f"/api/v1/voice/sessions/{session['session_id']}/kws-ready",
+        json=body,
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["code"] == 40917

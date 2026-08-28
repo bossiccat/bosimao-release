@@ -8,8 +8,8 @@ from fastapi import APIRouter, Request
 from ..voice.control_plane import IdempotencyConflict, InvalidTerminationState, SessionLedger
 from .routes_voice_wake import build_wake_router
 from .voice_termination_contract import (
-    AckReportRequest, RetryTerminationRequest, TerminateSessionRequest,
-    error_response, status_url, termination_status_data,
+    AckReportRequest, KwsReadyRequest, RetryTerminationRequest,
+    TerminateSessionRequest, error_response, status_url, termination_status_data,
 )
 
 logger = logging.getLogger(__name__)
@@ -132,6 +132,42 @@ def build_termination_router(*, ledger: SessionLedger, guard=None,
             "ack_result": record["acknowledgements"][req.acknowledgement],
             "result": record["result"],
             "status_url": status_url(record["session_id"], record["termination_id"]),
+        }, "message": ""}
+
+    @router.post("/api/v1/voice/sessions/{session_id}/kws-ready", status_code=201)
+    async def report_kws_ready(session_id: str, req: KwsReadyRequest,
+                               request: Request):
+        """KWS 就绪上报（device 主体）：TERMINATED(complete) → KWS_READY。
+
+        KWS_READY 是 /sessions/wake 的唯一受理前置（OpenAPI：仅 CP 可裁决）。
+        重复上报因状态已转移回 40917（账本 can_enter 语义，防 evidence 篡改）。
+        """
+        if guard is not None:
+            denied = guard(request, "kws_ready")
+            if denied is not None:
+                return denied
+        if req.session_id != session_id:
+            return error_response(40916)
+        try:
+            session = ledger.get_session(req.session_id)
+        except InvalidTerminationState as exc:
+            return error_response(exc.code)
+        except Exception:  # noqa: BLE001
+            logger.exception("kws-ready session lookup failed sid=%s", req.session_id)
+            return error_response(50301)
+        if session is None:
+            return error_response(40402)
+        if session["device_id"] != req.device_id:
+            return error_response(40917)
+        ok = ledger.mark_kws_ready(
+            req.session_id, req.generation,
+            reporter="android", evidence=req.evidence,
+        )
+        if not ok:
+            return error_response(40917)
+        return {"code": 0, "data": {
+            "session_id": req.session_id, "generation": req.generation,
+            "state": "KWS_READY", "kws_ready": True,
         }, "message": ""}
 
     router.include_router(build_wake_router(

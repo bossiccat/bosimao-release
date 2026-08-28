@@ -427,6 +427,61 @@ paths:
         '429': { $ref: '#/components/responses/RateLimited' }
         '503': { $ref: '#/components/responses/TerminationUnavailable' }
 
+  /api/v1/voice/sessions/{session_id}/kws-ready:
+    post:
+      tags: [Wake]
+      operationId: reportCommercialVoiceKwsReady
+      summary: 上报 KWS 重新武装就绪，将会话从 TERMINATED 迁移到 KWS_READY
+      x-error-codes: [40402, 40916, 40917, 50301]
+      description: |
+        仅 device 主体可上报。仅当 CP 账本中该 (session_id, generation) 处于 TERMINATED
+        且 termination result=complete 时可受理；账本以 control_plane_kws_readiness
+        记录 reporter 绑定的 evidence。KWS_READY 是 /api/v1/voice/sessions/wake 的唯一
+        受理前置。重复上报因状态已转移返回 40917。
+      security:
+        - deviceBearer: []
+      parameters:
+        - $ref: '#/components/parameters/RequestNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [session_id, device_id, generation]
+              properties:
+                session_id: { type: string, minLength: 1 }
+                device_id: { type: string, minLength: 1 }
+                generation: { type: integer, minimum: 0 }
+                evidence:
+                  type: object
+                  description: 标量键值对；由账本按 reporter 绑定持久化
+                  additionalProperties: { type: [string, number, boolean, 'null'] }
+      responses:
+        '201':
+          description: 已记录 KWS_READY；客户端此后可凭 wake_event_id 调用 wake
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, data, message]
+                properties:
+                  code: { type: integer, enum: [0] }
+                  data:
+                    type: object
+                    properties:
+                      session_id: { type: string }
+                      generation: { type: integer }
+                      state: { type: string, enum: [KWS_READY] }
+                      kws_ready: { type: boolean, enum: [true] }
+                  message: { type: string, enum: [''] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+        '409': { $ref: '#/components/responses/WakeStateConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/TerminationUnavailable' }
+
   /api/v1/voice/internal/rtc-bridge/hello-redeem:
     post:
       tags: [InternalBridge]

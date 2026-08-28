@@ -121,3 +121,12 @@ class WakeSessionRequest(BaseModel):
         if self.prior_session_id != self.previous_resource_refs.session_id:
             raise ValueError("prior_session_id must equal previous_resource_refs.session_id")
         return self
+
+
+class KwsReadyRequest(BaseModel):
+    """KWS 就绪上报：TERMINATED(complete) → KWS_READY（wake 的前置状态）。"""
+    model_config = ConfigDict(extra="forbid")
+    session_id: str = Field(..., min_length=1)
+    device_id: str = Field(..., min_length=1)
+    generation: int = Field(..., ge=0)
+    evidence: dict[str, str | int | float | bool | None] = Field(default_factory=dict)

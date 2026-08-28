@@ -790,3 +790,42 @@ def test_consume_wake_persists_across_rebuild(tmp_path: Path) -> None:
     replay = rebuilt.consume_wake(session_id=new_session_id,
                                   **_wake_kwargs(session, wake_event_id))
     assert replay == first
+
+
+def test_consume_wake_enqueues_pending_claim_for_sign_chain(tmp_path: Path) -> None:
+    """wake 事务必须同步入队 pending claim：sidecar 才能领 token → sign → hello proof。
+
+    缺失该入队时 wake 出的 SIGNING 会话卡死（sidecar 轮询 claim_one 永远为空，
+    /session/sign 因 claim 缺失拒绝）。
+    """
+    ledger = _ledger_factory(tmp_path)
+    session = _kws_ready_session(ledger)
+    new_session_id = str(uuid.uuid4())
+
+    record = ledger.consume_wake(
+        session_id=new_session_id,
+        **_wake_kwargs(session, str(uuid.uuid4()),
+                       expires_at=4102444800.0),
+    )
+
+    claim = ledger.store.claim_pending_session(now=100.0)
+    assert claim is not None
+    assert claim["session_id"] == record["session_id"]
+    assert claim["device_id"] == session["device_id"]
+    assert claim["room_id"] == record["room_id"]
+    assert claim["generation"] == record["generation"]
+    assert claim["expires_at"] == 4102444800.0
+    assert claim["claim_token"]
+
+    # 领取后 signing context 必须能查到（JOIN SIGNING 会话 + active 凭据闭环）
+    ledger.store.device_credentials.save(
+        device_id=session["device_id"], credential_id=f"cred-{uuid.uuid4()}",
+        device_name="test-phone", platform="android", secret="test-secret",
+        expires_at=4102444800.0, now=100.0,
+    )
+    context = ledger.store.consume_pending_sign_claim(
+        claim["session_id"], claim["device_id"], claim["claim_token"], now=100.0,
+    )
+    assert context is not None
+    assert context["session_id"] == record["session_id"]
+    assert context["claim_token_hash"]
