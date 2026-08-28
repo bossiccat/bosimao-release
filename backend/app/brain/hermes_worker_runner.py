@@ -9,6 +9,24 @@ from pathlib import Path
 from .agent_thread_registry import AgentThreadRegistry
 
 
+# 服务端锁定的只读 profile allowlist。任何新 profile 必须先过安全审查再入表。
+_WORKER_PROFILES: dict[str, tuple[str, ...]] = {
+    # 默认安全模式：纯 CLI 帮助，零网络、零副作用。
+    "probe_help": ("--help",),
+    # 受控只读 DeepSeek 推理：显式 model+provider 路由（隐式 provider 推断已证实不可靠，
+    # 会命中 HTTP 401），空 toolsets 禁用一切工具副作用，oneshot 单轮、提示词固定为 ping。
+    "deepseek_readonly": (
+        "-z",
+        "--model", "deepseek-v4-flash-0731",
+        "--provider", "kkdmx",
+        "--toolsets", "",
+        "ping",
+    ),
+}
+
+_DEFAULT_PROFILE = "probe_help"
+
+
 class HermesWorkerRunner:
     """Run only an allowlisted Hermes probe and persist its lifecycle."""
 
@@ -17,10 +35,18 @@ class HermesWorkerRunner:
         registry: AgentThreadRegistry,
         hermes_bin: str = "hermes",
         command_factory: Callable[[str], Sequence[str]] | None = None,
+        profile: str | None = None,
     ) -> None:
+        if command_factory is not None and (profile or _DEFAULT_PROFILE) != _DEFAULT_PROFILE:
+            raise ValueError(
+                "command_factory 仅供测试注入默认 probe_help profile；"
+                "受限 profile 不允许命令覆盖。"
+            )
         self._registry = registry
         self._hermes_bin = hermes_bin
-        self._command_factory = command_factory or (lambda binary: [binary, "--help"])
+        # 全量命令覆盖仅限测试缝隙（默认 profile）；生产装配不得传入。
+        self._command_factory = command_factory
+        self._profile = profile or _DEFAULT_PROFILE
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._running_events: dict[str, asyncio.Event] = {}
 
@@ -29,6 +55,15 @@ class HermesWorkerRunner:
         if candidate.is_file():
             return str(candidate)
         return shutil.which(self._hermes_bin)
+
+    def _build_command(self, binary: str) -> tuple[str, ...] | None:
+        """按 allowlist 组装命令；未知 profile 返回 None（启动阶段拒绝）。"""
+        if self._command_factory is not None:
+            return tuple(self._command_factory(binary))
+        args = _WORKER_PROFILES.get(self._profile)
+        if args is None:
+            return None
+        return (binary, *args)
 
     async def start(self, thread_id: str) -> dict:
         thread = self._registry.get(thread_id)
@@ -43,12 +78,12 @@ class HermesWorkerRunner:
                 "Hermes CLI 不可用，后台 Worker 未启动。",
             ) or {"error": "thread_not_found"}
 
-        command = tuple(self._command_factory(binary))
+        command = tuple(self._command_factory(binary)) if self._build_command(binary) else ()
         if not command:
             return self._registry.update(
                 thread_id,
                 "failed",
-                "Hermes CLI 命令配置无效，后台 Worker 未启动。",
+                f"Worker profile 配置无效（{self._profile}），后台 Worker 未启动。",
             ) or {"error": "thread_not_found"}
 
         current = self._registry.get(thread_id)
