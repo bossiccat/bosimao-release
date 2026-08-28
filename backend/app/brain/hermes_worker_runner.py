@@ -25,6 +25,7 @@ class HermesWorkerRunner:
         hermes_bin: str = "hermes",
         command_factory: Callable[[str], Sequence[str]] | None = None,
         profile: str | None = None,
+        timeout_seconds: float = 120.0,
     ) -> None:
         if command_factory is not None and (profile or DEFAULT_PROFILE) != DEFAULT_PROFILE:
             raise ValueError(
@@ -36,6 +37,8 @@ class HermesWorkerRunner:
         # 全量命令覆盖仅限测试缝隙（默认 profile）；生产装配不得传入。
         self._command_factory = command_factory
         self._profile = profile or DEFAULT_PROFILE
+        # 硬超时：到期 terminate→kill，线程标记 failed，防止挂死进程无限占用。
+        self._timeout_seconds = max(0.1, float(timeout_seconds))
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._running_events: dict[str, asyncio.Event] = {}
 
@@ -126,8 +129,19 @@ class HermesWorkerRunner:
 
         self._processes[thread_id] = process
         running_event.set()
+        timed_out = False
         try:
-            exit_code = await process.wait()
+            try:
+                exit_code = await asyncio.wait_for(process.wait(), timeout=self._timeout_seconds)
+            except asyncio.TimeoutError:
+                timed_out = True
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+                exit_code = process.returncode
         finally:
             self._processes.pop(thread_id, None)
             self._running_events.pop(thread_id, None)
@@ -135,6 +149,12 @@ class HermesWorkerRunner:
         current = self._registry.get(thread_id)
         if current is not None and current["status"] == "cancelled":
             return current
+        if timed_out:
+            return self._registry.update(
+                thread_id,
+                "failed",
+                f"后台 Worker 执行超时（>{self._timeout_seconds:g}s），进程已终止。",
+            ) or {"error": "thread_not_found"}
         if exit_code == 0:
             return self._registry.update(
                 thread_id,
