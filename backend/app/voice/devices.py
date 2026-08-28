@@ -14,6 +14,7 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from .errors import VoiceError
 from .storage import VoiceStore
@@ -23,12 +24,28 @@ PAIRING_TTL_SECONDS = 300
 CREDENTIAL_TTL_DAYS = 30
 
 
+def to_iso_expires(epoch_seconds: float) -> str:
+    """epoch 秒 → ISO8601 UTC 字符串。
+
+    客户端契约（A6 修复，2026-08-21）：register 响应的 expires_at 一律 ISO 字符串，
+    手机端 Kotlin requiredString 对 number 返回 "" 导致 IOException。
+    仅用于响应序列化边界；内部 TTL 比对（storage/_active_sessions 等）保持 float。
+    """
+    return datetime.fromtimestamp(float(epoch_seconds), tz=timezone.utc).isoformat(
+        timespec="seconds"
+    ).replace("+00:00", "Z")
+
+
 @dataclass(frozen=True)
 class DeviceRegistration:
     device_id: str
     credential_id: str
     credential_secret: str
     expires_at: float
+
+    @property
+    def expires_at_iso(self) -> str:
+        return to_iso_expires(self.expires_at)
 
 
 class DeviceNotFoundError(VoiceError):
@@ -61,8 +78,11 @@ class DeviceService:
         """生成一次性配对码：明文只返回一次，库中只存哈希；TTL<=300"""
         if not 1 <= ttl_seconds <= PAIRING_TTL_SECONDS:
             raise ValueError("pairing TTL 必须在 (0, 300] 秒内")
-        return self._store.create_pairing_code(owner_id, platform, ttl_seconds,
-                                               now=now)
+        code, meta = self._store.create_pairing_code(owner_id, platform, ttl_seconds,
+                                                     now=now)
+        # 契约：响应里的 expires_at 是 ISO8601 字符串（对齐云函数 devices.js / 手机端）
+        meta["expires_at"] = to_iso_expires(meta["expires_at"])
+        return code, meta
 
     # ---- register ----
 
@@ -96,7 +116,7 @@ class DeviceService:
     # ---- list ----
 
     def list_devices(self) -> list[dict]:
-        """设备列表：绝不返回 credential_secret / credential_hash"""
+        """设备列表：绝不返回 credential_secret / credential_hash；expires_at 输出 ISO 字符串"""
         rows = self._store.list_devices()
         return [
             {
@@ -104,7 +124,7 @@ class DeviceService:
                 "device_name": row.device_name,
                 "platform": row.platform,
                 "status": row.status,
-                "expires_at": row.expires_at,
+                "expires_at": to_iso_expires(row.expires_at),
                 "last_seen_at": row.last_seen_at,
                 "created_at": row.created_at,
             }

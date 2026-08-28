@@ -48,6 +48,7 @@ class DownlinkShaper:
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._closed = False
+        self._loop = asyncio.get_event_loop()  # 绝对时间表节拍用（monotonic clock）
 
     def start(self) -> None:
         if self._task is None:
@@ -80,19 +81,36 @@ class DownlinkShaper:
         return m
 
     async def _run(self) -> None:
+        # 绝对时间表节拍（v0.6.7 P0 修复卡顿）：目标发送时刻 t_n = t0 + n*frame_s。
+        # 原 sleep(frame_s) 在 Windows 上精度 ~15.6ms，每帧实睡 30ms+ → 下行速率仅
+        # 60-70% 标称值，手机端 jitter buffer 欠载 → 周期性卡顿。改为按绝对时间补偿：
+        # 落后则连发追赶（不睡），超前则睡到目标时刻，长期速率精确锁频。
+        t0 = None
+        n = 0
         while not self._closed:
             entry = self._q.pop()
             if entry is None:
                 self._wake.clear()
                 await self._wake.wait()
+                t0 = None  # 空转后重建基准（防长时间积压基准漂移）
+                n = 0
                 continue
             if self._closed:
                 return
+            now = self._loop.time()
+            if t0 is None:
+                t0 = now
+                n = 0
+            target = t0 + n * self._frame_s
+            n += 1
+            lag = now - target
+            if lag < -0.002:  # 超前 >2ms：睡到目标时刻（一次性补偿，无累积误差）
+                await asyncio.sleep(-lag)
+            # lag >= 0：已落后（消费慢/网络抖动），立即发不睡，靠后续帧追赶
             try:
                 await self._send_frame(entry.payload)
             except Exception as e:  # noqa: BLE001 - sidecar 断线不阻塞整形器
                 logger.warning("shaper send frame failed: %s", e)
-            await asyncio.sleep(self._frame_s)  # 节拍：20ms/帧
 
     async def stop(self) -> None:
         if self._closed:

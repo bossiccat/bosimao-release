@@ -9,9 +9,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import sys
+import uuid
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# A10（2026-08-21）：/health 带进程身份签名（proc_name/pid/run_id）。
+# rtc_bridge 正常即由 pythonw.exe 承载（脚本不按进程名校验 relay/bridge），
+# 此签名供排障时核对"应答进程 = 期望进程"，防止端口被外来进程冒名。
+_PROC_NAME = os.path.basename(sys.executable) or "unknown"
+_PROC_PID = os.getpid()
+_RUN_ID = uuid.uuid4().hex[:8]
 
 
 class HealthServer:
@@ -43,6 +53,9 @@ class HealthServer:
                     "status": "ok",
                     "sidecar_connected": bool(self.state.get("sidecar_connected")),
                     "rooms": 1 if self.state.get("room_id") else 0,
+                    "proc_name": _PROC_NAME,
+                    "pid": _PROC_PID,
+                    "run_id": _RUN_ID,
                 }, ensure_ascii=False)
             elif path == "/metrics":
                 body = json.dumps(self._metrics(), ensure_ascii=False)

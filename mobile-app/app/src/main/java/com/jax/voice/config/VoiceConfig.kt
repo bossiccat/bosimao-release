@@ -143,12 +143,25 @@ object VoiceConfig {
     const val TRTC_ROOM_PREFIX = "jax-"
 
     /**
-     * 会话签发接口 base URL（设置页填写，默认留空提示填写）。
+     * 会话签发接口 base URL（设置页可改，出厂默认 = 商业化云端网关）。
      * 形如 https://<云函数域名> 或 https://<host>/<prefix>；客户端拼 /api/v1/voice/session。
+     * 云网关地址为公开非密信息（鉴权靠设备凭证），内置默认实现零配置开箱即用。
      */
-    fun sessionBaseUrl(context: Context): String =
-        prefs(context).getString("session_base_url", "") ?: ""
+    const val DEFAULT_SESSION_BASE_URL = "https://jinhong-d2g55ycl591208475-1436773060.ap-shanghai.app.tcloudbase.com"
 
+    fun sessionBaseUrl(context: Context): String =
+        customSessionBaseUrl(context).ifBlank { DEFAULT_SESSION_BASE_URL }
+
+    /**
+     * 用户自定义的签发地址原始存储值（A7 修复，2026-08-21）：
+     * 返回空串 = 未自定义（出厂默认生效）。设置页回填用它而非 sessionBaseUrl()——
+     * 否则默认 URL 被回填进输入框，用户一保存就把出厂默认固化进 prefs，
+     * 未来换域名时已分发 APK 无法通过留空回落新默认。
+     */
+    fun customSessionBaseUrl(context: Context): String =
+        prefs(context).getString("session_base_url", "")?.trim() ?: ""
+
+    /** 空串 = 清除自定义（sessionBaseUrl() 回落出厂默认）。 */
     fun setSessionBaseUrl(context: Context, url: String) {
         prefs(context).edit().putString("session_base_url", url.trim()).apply()
     }

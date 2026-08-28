@@ -7,12 +7,20 @@ param(
     [switch]$Restart
 )
 $ErrorActionPreference = "Stop"
+# 与 jax-services.ps1 共用全局命名互斥体，禁止两个服务入口并发 spawn。
+$ServiceMutex = New-Object System.Threading.Mutex($false, "Global\JaxServicesStartStop")
+if (-not $ServiceMutex.WaitOne(0)) {
+    Write-Error "[services][busy] 另一份服务启停操作正在进行，拒绝并发执行"
+    exit 2
+}
+try {
 $Root = Split-Path -Parent $PSScriptRoot
 $Py = Join-Path $Root ".venv\Scripts\python.exe"
 $PyW = Join-Path $Root ".venv\Scripts\pythonw.exe"   # GUI 子系统，无命令窗（relay 用）
 $BackendExe = Join-Path $Root "jax-backend.exe"      # 阶段 D 品牌化：后端不再裸 pythonw -m uvicorn
 $LogDir = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+. (Join-Path $PSScriptRoot "lib-common.ps1")
 
 # ---------- owner credential 首启 provision（ADR-022：backend 之前、Load-Env 之前，fail-closed） ----------
 function Invoke-OwnerCredentialProvision {
@@ -52,50 +60,64 @@ if (Test-Path $envFile) {
 # ---------- 1) Model service :19080 (start-model.ps1 logic: idempotent + health wait) ----------
 Write-Host "==> [1/3] model http://127.0.0.1:19080/health"
 # 2026-08-13 无窗口修复：隐藏窗口调用 start-model.ps1（不再 & powershell 弹窗）
-Start-Process -FilePath "powershell" -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File",(Join-Path $PSScriptRoot "start-model.ps1") -WindowStyle Hidden -Wait
-if ($LASTEXITCODE -ne 0) { Write-Error "[1/3] model start failed"; exit 1 }
+# 2026-08-21 修复：Start-Process 不设置 $LASTEXITCODE（它残留上次原生命令的值 → 模型健康也误判失败）。
+# 改用 -PassThru 拿真实进程退出码。
+$modelProc = Start-Process -FilePath "powershell" -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File",(Join-Path $PSScriptRoot "start-model.ps1") -WindowStyle Hidden -Wait -PassThru
+if ($modelProc.ExitCode -ne 0) { Write-Error "[1/3] model start failed (exit=$($modelProc.ExitCode))"; exit 1 }
 Write-Host "[ok] model ready (start-model.ps1 waited for /health)"
 
 # ---------- 2) Backend uvicorn :8000 (cwd=backend/, idempotent) ----------
 Write-Host "==> [2/3] backend http://127.0.0.1:8000/health"
+$backendProcs = @(Get-BackendProcesses)
 $listening = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
-if ($listening -and -not $Restart) {
-    Write-Host ("[backend] port 8000 already listening, skip (idempotent). PID=" + ($listening.OwningProcess -join ","))
+if (($listening -or $backendProcs.Count -gt 0) -and -not $Restart) {
+    Write-Host ("[backend] already active, skip (idempotent). listener PID=" + (($listening | Select-Object -ExpandProperty OwningProcess) -join ",") + "; process count=" + $backendProcs.Count)
 } else {
-    if ($listening -and $Restart) {
-        Write-Host ("[backend] -Restart: kill PID " + ($listening.OwningProcess -join ","))
-        Stop-Process -Id $listening.OwningProcess -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
+    if (($listening -or $backendProcs.Count -gt 0) -and $Restart) {
+        Write-Host ("[backend] -Restart: stop onefile process tree (" + $backendProcs.Count + " processes)")
+        if (-not (Stop-BackendProcesses)) { Write-Error '[backend] onefile process tree did not exit'; exit 1 }
+        $deadlineStop = (Get-Date).AddSeconds(15)
+        while ((Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadlineStop) { Start-Sleep -Milliseconds 500 }
     }
     $log = Join-Path $LogDir "backend.log"
     if (-not (Test-Path $BackendExe)) { Write-Error "[2/3] jax-backend.exe 不存在: $BackendExe（请先 cd backend/packaging 打包）"; exit 1 }
     Write-Host "[backend] start: $BackendExe --host 127.0.0.1 --port 8000 (log $log)"
-    Start-Process -FilePath $BackendExe -ArgumentList "--host", "127.0.0.1", "--port", "8000" `
-        -WorkingDirectory $Root -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden
+    $p = Start-Process -FilePath $BackendExe -ArgumentList "--host", "127.0.0.1", "--port", "8000" `
+        -WorkingDirectory $Root -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden -PassThru
     $deadline = (Get-Date).AddSeconds(90)
     $ready = $false
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 2
-        try {
-            $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -UseBasicParsing -TimeoutSec 3
-            if ($r.StatusCode -eq 200) { $ready = $true; break }
-        } catch {}
+        if (Test-Health 'https://127.0.0.1:8000/health') {
+            $owner = Test-PortOwner -Port 8000 -ExpectedProcName 'jax-backend.exe'
+            $all = @(Get-BackendProcesses)
+            if ($owner.Match -eq $true -and $all.Count -le 2) { $ready = $true; break }
+        }
     }
-    if (-not $ready) { Write-Error "[2/3] backend not ready in 90s, see $log / $log.err"; exit 1 }
-    Write-Host "[ok] backend ready"
+    if (-not $ready) {
+        Write-Error "[2/3] backend not ready or duplicate process tree in 90s, see $log / $log.err"
+        Stop-BackendProcesses
+        exit 1
+    }
+    Write-Host "[ok] backend ready (listener PID=$($owner.Pid), onefile process count=$($all.Count))"
 }
 
 # ---------- 3) relay_client (bridge public relay <-> local voice gateway, idempotent) ----------
 Write-Host "==> [3/3] relay_client (public relay <-> local voice gateway)"
 $relayUrl = "wss://jax-relay-283963-7-1436773060.sh.run.tcloudbase.com/relay/ws"
-$gwUrl    = "ws://127.0.0.1:8000/ws/voice"
+# 2026-08-21 (audit A3): gateway is wss self-signed on :8000 -> must pass --gateway-ca
+# (aligned with jax-services.ps1 Start-RelayService; plain ws:// caused TLS handshake failure)
+$gwUrl    = "wss://127.0.0.1:8000/ws/voice"
+$gwCa     = Join-Path $Root "certs\ca.crt"
 $pairCode = "JAX2026"
 $token    = $env:RELAY_TOKEN
 $e2eeKey  = $env:RELAY_E2EE_KEY
 if (-not $token)  { Write-Warning "[relay_client] RELAY_TOKEN empty; relay will reject pair (must configure)" }
 if (-not $e2eeKey){ Write-Warning "[relay_client] RELAY_E2EE_KEY empty; plaintext mode (phone must match)" }
+if (-not (Test-Path $gwCa)) { Write-Warning "[relay_client] gateway CA not found: $gwCa (wss verify will fail)" }
 
-$existing = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+# relay runs via pythonw.exe (GUI subsystem) -> must match BOTH process names (audit A11)
+$existing = Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -match "relay_client" }
 if ($existing -and -not $Restart) {
     Write-Host ("[relay_client] already running, skip (idempotent). PID=" + ($existing.ProcessId -join ","))
@@ -108,6 +130,7 @@ if ($existing -and -not $Restart) {
     $relayArgs = @("-m", "backend.relay.relay_client",
         "--relay", $relayUrl,
         "--gateway", $gwUrl,
+        "--gateway-ca", $gwCa,
         "--pairing-code", $pairCode,
         "--token", $token,
         "--e2ee-key", $e2eeKey)
@@ -129,3 +152,7 @@ if ($existing -and -not $Restart) {
 }
 
 Write-Host "==> ALL STARTED. Phone app config: relay mode + pairing code JAX2026 + dev key jax-voice-dev-e2ee-20260803-0001"
+} finally {
+    $ServiceMutex.ReleaseMutex() | Out-Null
+    $ServiceMutex.Dispose()
+}

@@ -71,7 +71,9 @@ class SettingsActivity : AppCompatActivity() {
         swOverlay = findViewById(R.id.swOverlay)
 
         // 回填当前配置
-        etSessionUrl.setText(VoiceConfig.sessionBaseUrl(this))
+        // A7 修复（2026-08-21）：只回填用户自定义值（空 = 用出厂默认），绝不回填默认 URL——
+        // 否则用户一保存就把出厂默认固化进 prefs，未来换域名时已分发 APK 无法迁移。
+        etSessionUrl.setText(VoiceConfig.customSessionBaseUrl(this))
         tvDeviceId.text = VoiceConfig.deviceId(this)
         swWake.isChecked = VoiceConfig.wakeEnabled(this)
         swOverlay.isChecked = VoiceConfig.overlayEnabled(this)
@@ -117,10 +119,12 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun pairDevice() {
+        // 空 = 未自定义 → 回落出厂默认网关（配对与会话签发同一 base URL）
         val baseUrl = etSessionUrl.text.toString().trim()
+            .ifBlank { VoiceConfig.sessionBaseUrl(this) }
         val pairingCode = pairingCodeInput.text.toString().trim()
         val deviceName = deviceNameInput.text.toString().trim()
-        if (baseUrl.isBlank() || pairingCode.isBlank() || deviceName.isBlank()) {
+        if (pairingCode.isBlank() || deviceName.isBlank()) {
             Toast.makeText(this, R.string.settings_pairing_required, Toast.LENGTH_SHORT).show()
             return
         }

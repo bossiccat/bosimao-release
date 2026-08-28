@@ -1,5 +1,18 @@
 'use strict';
 
+// 2026-08-21 根治：宿主环境（如 WorkBuddy 注入的 ELECTRON_RUN_AS_NODE=1 +
+// NODE_OPTIONS=--use-system-ca）会让 Electron 退化为纯 Node 模式或直接拒绝启动。
+// 在任何 Electron API 使用前净化 process.env；renderer/GPU 子进程继承净化后的环境。
+// 必须在 require('electron') 之前执行——ELECTRON_RUN_AS_NODE 在进程引导期就被读取。
+if (process.env.ELECTRON_RUN_AS_NODE) delete process.env.ELECTRON_RUN_AS_NODE;
+if (process.env.NODE_OPTIONS) {
+  // 只剔除 Electron 不允许的项（--use-system-ca 等 TLS 类开关），保留其余合法项
+  const banned = /--use-system-ca|--use-openssl-ca|--tls-min|--tls-max/;
+  const kept = process.env.NODE_OPTIONS.split(/\s+/).filter((f) => f && !banned.test(f));
+  if (kept.length) process.env.NODE_OPTIONS = kept.join(' ');
+  else delete process.env.NODE_OPTIONS;
+}
+
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');

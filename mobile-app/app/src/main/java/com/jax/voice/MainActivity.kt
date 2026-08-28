@@ -202,7 +202,9 @@ class MainActivity : AppCompatActivity() {
                         btnToggleListen.text = getString(
                             if (running) R.string.btn_stop_listen else R.string.btn_start_listen
                         )
-                        btnTalk.isEnabled = running
+                        // 立即对话是独立入口：首次点击负责拉起前台服务并投递 ACTION_TALK，
+                        // 不能因监听服务尚未 RUNNING 而把按钮禁用，否则用户只能重复点击。
+                        btnTalk.isEnabled = true
 
                         waveform.pushRms(if (state.phase == VoicePhase.MONITORING) state.rms * 0.5f else state.rms)
 

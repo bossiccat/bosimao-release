@@ -46,9 +46,9 @@ class VoiceSessionCoordinatorTest {
     private lateinit var enterGate: CompletableDeferred<Unit>
     private lateinit var exitGate: CompletableDeferred<Unit>
 
-    private fun session(id: String) = VoiceSessionInfo(
+    private fun session(id: String, expiresAtEpochMs: Long = System.currentTimeMillis() + 600_000L) = VoiceSessionInfo(
         roomId = "room-$id", userId = "user-$id", userSig = "sig-$id",
-        sdkAppId = 1600155678, sessionId = "sid-$id"
+        sdkAppId = 1600155678, sessionId = "sid-$id", expiresAtEpochMs = expiresAtEpochMs
     )
 
     @Before
@@ -120,6 +120,45 @@ class VoiceSessionCoordinatorTest {
         assertEquals("overlay", signSources[1])
         coordinator.cancel()
         awaitState(VoiceSessionState.IDLE)
+    }
+
+    @Test
+    fun `near expiry session schedules one refresh request`() = runBlocking<Unit> {
+        coordinator = buildCoordinator()
+        coordinator.start("main")
+        awaitState(VoiceSessionState.SIGNING)
+        awaitAnySignGate().complete(session("expiring", System.currentTimeMillis() + 30_000L))
+        awaitState(VoiceSessionState.ENTERING)
+        enterGate.complete(Unit)
+        coordinator.postEnterSucceeded(1)
+        awaitState(VoiceSessionState.IN_ROOM)
+        awaitState(VoiceSessionState.EXITING)
+        awaitExitCalls(1)
+        exitGate.complete(Unit)
+        withTimeout(3_000) { while (signCalls.get() < 2) delay(10) }
+        awaitSignGate(2).complete(session("refreshed"))
+        awaitState(VoiceSessionState.ENTERING)
+        coordinator.postEnterSucceeded(2)
+        awaitState(VoiceSessionState.IN_ROOM)
+        assertEquals("续签触发后只能产生一次新的签发", 2, signCalls.get())
+        assertEquals("续签必须重新进房", 2, enterCalls.get())
+    }
+
+    @Test
+    fun `repeated expiry failures are coalesced into one refresh`() = runBlocking<Unit> {
+        coordinator = buildCoordinator()
+        coordinator.start("main")
+        awaitState(VoiceSessionState.SIGNING)
+        awaitAnySignGate().complete(session("active"))
+        awaitState(VoiceSessionState.ENTERING)
+        enterGate.complete(Unit)
+        coordinator.postEnterSucceeded(1)
+        awaitState(VoiceSessionState.IN_ROOM)
+        coordinator.postFailure("usersig_expired", "userSig 已过期")
+        coordinator.postFailure("usersig_expired", "userSig 已过期")
+        awaitState(VoiceSessionState.EXITING)
+        awaitExitCalls(1)
+        assertEquals("重复过期错误不得重复退房", 1, exitCalls.get())
     }
 
     // ---- AC-05: SIGNING 取消直接回 IDLE，不等待退房回调（修复永久退出锁）----

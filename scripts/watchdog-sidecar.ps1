@@ -1,44 +1,17 @@
-# watchdog-sidecar.ps1 —— sidecar 看门狗（v0.6.4）
-# 每 30s 检查 sidecar 健康（19093 /health 的 sidecar_connected），不健康则：
-#   1. 强杀所有 electron 残留（含僵尸壳）
-#   2. 重新拉起 sidecar（--in-process-gpu --hold=86400 常驻）
-# 运行方式：powershell -WindowStyle Hidden -File watchdog-sidecar.ps1（脱离会话常驻）
+﻿# ============================================================
+# watchdog-sidecar.ps1 —— 【已废弃 DEPRECATED】sidecar 看门狗
+# 废弃日期：2026-08-21（审计 A4 修复）
+# 废弃原因：
+#   1. 本脚本拉起 sidecar 时传 --device=sidecar-dev-1，而 sidecar/main.js 对
+#      role=sidecar 禁止 --device 参数 → 启动即 fatal SIDECAR_UNEXPECTED_DEVICE_ARG
+#      → 无限拉起无限死循环。
+#   2. 健康判定用 sidecar_connected（空闲态本就是 false）→ 每 30s 误杀健康空闲 sidecar。
+#   3. 系统已有计划任务 Jax-Watchdog-Every5Min / Jax-Watchdog-AtStartup 统一运行
+#      jax-watchdog.ps1（含 sidecar 拉起，参数正确无 --device）——双看门狗同时管
+#      sidecar 会互相冲突。
+# 替代方案：scripts/jax-watchdog.ps1（单一看门狗，由 install-scheduled-tasks.ps1 注册）
+# 本文件保留仅作考古，直接退出，不执行任何拉起/杀进程动作。
+# ============================================================
 $ErrorActionPreference = 'SilentlyContinue'
-
-$Root      = Split-Path -Parent $PSScriptRoot
-$SidecarDir = Join-Path $Root "sidecar"
-$Electron  = Join-Path $SidecarDir "node_modules\.bin\electron.cmd"
-$SignUrl   = "https://jinhong-d2g55ycl591208475-1436773060.ap-shanghai.app.tcloudbase.com"
-$LogDir    = Join-Path $Root "logs"
-$WatchLog  = Join-Path $LogDir "watchdog.log"
-
-function Write-WatchLog($msg) {
-    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $msg"
-    Add-Content -Path $WatchLog -Value $line
-}
-
-Write-WatchLog "watchdog started (poll 30s, sidecar dir: $SidecarDir)"
-
-while ($true) {
-    $healthy = $false
-    try {
-        $r = Invoke-RestMethod -Uri "http://127.0.0.1:19093/health" -TimeoutSec 3
-        if ($r.sidecar_connected -eq $true) { $healthy = $true }
-    } catch { }
-
-    if (-not $healthy) {
-        Write-WatchLog "sidecar 不健康（sidecar_connected=$healthy），开始恢复"
-        # 1. 清理所有 electron 残留（僵尸壳/半死实例）
-        Get-Process -Name electron -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 3
-        # 2. 重新拉起 sidecar
-        $ts = Get-Date -Format "yyyyMMdd-HHmmss"
-        $out = Join-Path $LogDir "sidecar_wd_$ts.out"
-        $err = Join-Path $LogDir "sidecar_wd_$ts.err"
-        Start-Process -FilePath $Electron -ArgumentList @(".", "--in-process-gpu", "--role=sidecar", "--device=sidecar-dev-1", "--sign-url=$SignUrl", "--bridge-url=ws://127.0.0.1:19092", "--hold=86400") -WorkingDirectory $SidecarDir -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden
-        Write-WatchLog "已重新拉起 sidecar（out=$out）"
-        Start-Sleep -Seconds 10
-    }
-
-    Start-Sleep -Seconds 30
-}
+Write-Warning "[deprecated] watchdog-sidecar.ps1 已废弃（审计 A4）：sidecar 看门狗已收敛到 scripts/jax-watchdog.ps1（计划任务 Jax-Watchdog-* 统一驱动）。本脚本不执行任何动作。"
+exit 1

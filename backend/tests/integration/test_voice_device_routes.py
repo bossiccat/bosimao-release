@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -32,6 +34,9 @@ OWNER_SECRET = "owner-secret-0123456789abcdef0123"
 SIDECAR_SECRET = "sidecar-secret-0123456789abcdef"
 FAKE_SDK_APP_ID = 1600155678
 FAKE_SECRET_KEY = "fake-secret-key-for-test-only-0123456789"
+
+# A6 契约：响应 expires_at 一律 ISO8601 UTC 字符串（对齐云函数 devices.js 与手机端）
+_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
 
 
 def _scan_for(store: VoiceStore, secrets: list[str]) -> list[str]:
@@ -142,7 +147,12 @@ def test_owner_pairing_code_ttl_bounded_and_hash_only(fx: _Fixture) -> None:
     assert len(code) >= 20
     assert meta["max_uses"] == 1
     assert 1 <= meta["ttl_seconds"] <= 300
-    assert meta["expires_at"] - time.time() <= 300
+    # A6 契约：expires_at 是 ISO8601 UTC 字符串（对齐手机端 requiredString）
+    assert isinstance(meta["expires_at"], str)
+    assert _ISO_RE.match(meta["expires_at"]), meta["expires_at"]
+    assert datetime.fromisoformat(
+        meta["expires_at"].replace("Z", "+00:00")
+    ).timestamp() - time.time() <= 300
     assert _scan_for(fx.store, [code]) == []
     with fx.store.connect() as conn:
         row = conn.execute(
@@ -170,7 +180,12 @@ def test_register_success_secret_returned_once_and_usable(fx: _Fixture) -> None:
     assert data["device_id"]
     assert data["credential_id"]
     assert len(data["credential_secret"]) >= 32
-    assert data["expires_at"] > time.time()
+    # A6 契约：expires_at 是 ISO8601 UTC 字符串且未过期（number 会让手机端 IOException）
+    assert isinstance(data["expires_at"], str)
+    assert _ISO_RE.match(data["expires_at"]), data["expires_at"]
+    assert datetime.fromisoformat(
+        data["expires_at"].replace("Z", "+00:00")
+    ).timestamp() > time.time()
     # Secret 只展示一次：列表不含、DB 字节不含、服务端 API 不返回明文
     assert _scan_for(fx.store, [data["credential_secret"]]) == []
     # 新 credential 可直接签发会话（端到端）

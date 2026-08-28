@@ -33,8 +33,14 @@ function isFresh(ts) {
 }
 
 /** 手机唤醒：记录会话意图（upsert 幂等；同设备重复唤醒刷新保鲜） */
-async function issue(deviceId) {
-  const doc = { room_id: roomOf(deviceId), ts: Date.now(), consumed: false };
+async function issue(deviceId, sessionId) {
+  const room = roomOf(deviceId);
+  const doc = {
+    room_id: room,
+    session_id: typeof sessionId === 'string' && sessionId ? sessionId : room, // 契约：sidecar sessionHello 必填，缺省回落 room_id
+    ts: Date.now(),
+    consumed: false,
+  };
   await db().collection(COLL).doc(deviceId).set(doc);
   return doc.room_id;
 }
@@ -49,7 +55,7 @@ async function listPending() {
       cleanup.push(it._id);
       continue;
     }
-    out.push({ device_id: it._id, room_id: it.room_id, ts: it.ts });
+    out.push({ device_id: it._id, room_id: it.room_id, session_id: it.session_id || it.room_id, ts: it.ts });
   }
   if (cleanup.length) {
     // 过期意图清理（尽力而为）
@@ -73,7 +79,16 @@ async function consume(deviceId, userId) {
   // SDK 返回 { updated: number }（顶层字段，非 stats.updated——v1.1 曾误读 stats 导致
   // 数据库已消费但接口误报 40401，PC 不跟进进房，压测 S3 实锤）
   if (!up || Number(up.updated) !== 1) return null;
-  return { room_id: roomOf(deviceId), user_id: userId };
+  // 回读意图文档拿 session_id（老数据缺省回落 room_id），sidecar bridge 契约必填
+  let sessionId = roomOf(deviceId);
+  try {
+    const got = await db().collection(COLL).doc(deviceId).get();
+    const d = got && (got.data || got);
+    if (d && d[0]) sessionId = d[0].session_id || sessionId;
+    else if (d && d.session_id) sessionId = d.session_id;
+  } catch (_e) { /* 回读失败回落 room_id，不阻断签证 */
+  }
+  return { room_id: roomOf(deviceId), session_id: sessionId, user_id: userId };
 }
 
 module.exports = { issue, listPending, consume, roomOf, _setDbForTest: (d) => { _db = d; } };

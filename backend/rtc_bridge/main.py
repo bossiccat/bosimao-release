@@ -3,14 +3,18 @@
 运行（cwd=backend）：
     python -m rtc_bridge.main
     # 环境变量：RTC_BRIDGE_WS_PORT(19092) / RTC_BRIDGE_HEALTH_PORT(19093) / APM_* 可选
+    # BRAIN_API_URL 可选（如 http://127.0.0.1:8000/api/v1/brain），设则 AI 文本路由到 Brain
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import signal
 import sys
 import time
+import urllib.request
 
 import websockets
 
@@ -19,6 +23,43 @@ from .health import HealthServer
 from .server import BridgeServer
 
 logger = logging.getLogger(__name__)
+
+
+def _make_brain_callback(api_url: str):
+    """创建异步回调：AI 文本 → Brain API /intent 做意图提取。
+
+    Brain 不可用时降级为日志（不影响语音会话）。
+    """
+    base = api_url.rstrip("/")
+
+    async def on_voice_intent(text: str) -> None:
+        payload = json.dumps({
+            "text": text[:2000],
+            "source": "voice",
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}/intent",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=5.0)
+            body = json.loads(resp.read())
+            task_id = body.get("data", {}).get("task_id", "?")
+            logger.info("voice intent routed to brain: task=%s", task_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("voice intent brain API call failed (degraded): %s", e)
+
+    return on_voice_intent
+
+
+async def _make_agent_tool_callback(registry):
+    async def handle(name: str, args: dict, call_id: str) -> str:
+        del call_id
+        result = registry.handle_tool(name, args)
+        return json.dumps(result, ensure_ascii=False)
+    return handle
 
 
 async def main_async() -> None:
@@ -31,7 +72,15 @@ async def main_async() -> None:
         "started_ts": time.time(),
     }
 
-    bridge = BridgeServer(cfg, state)
+    # Brain API 路由（可选）：设 BRAIN_API_URL 则 AI 文本自动路由到 Brain 做意图提取
+    brain_api_url = os.environ.get("BRAIN_API_URL", "").strip()
+    on_voice_intent = _make_brain_callback(brain_api_url) if brain_api_url else None
+    if on_voice_intent:
+        logger.info("voice intent routing enabled: brain_api=%s", brain_api_url)
+    else:
+        logger.info("voice intent routing disabled (BRAIN_API_URL not set)")
+
+    bridge = BridgeServer(cfg, state, on_voice_intent=on_voice_intent)
     health = HealthServer(
         cfg.health_host,
         cfg.health_port,

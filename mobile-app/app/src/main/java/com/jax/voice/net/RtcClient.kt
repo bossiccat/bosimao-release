@@ -31,6 +31,8 @@ class RtcClient(
     private val onPhase: (VoicePhase) -> Unit,
     private val onRms: (Float) -> Unit,
     private val onError: (code: String, msg: String) -> Unit,
+    /** 本地采集帧检测到用户开口；由服务接入 BargeInController，非播放态幂等忽略。 */
+    private val onLocalVoiceActivity: () -> Unit = {},
     /** 真实 SDK onEnterRoom(result >= 0) 后触发，不能用 enterRoom() 同步返回替代。 */
     private val onEntered: () -> Unit = {},
     /** 退房完成回调（onExitRoom 触发；超时兜底也会触发）：调用方在此重启 MicRecorder 恢复"一直在听" */
@@ -57,7 +59,10 @@ class RtcClient(
     @Volatile private var lastVolLogTs = 0L // 非零音量降频记录（3s 一条）
     @Volatile private var remoteUserId: String? = null // 最近远端用户（打断 flush 目标）
 
-    private val audioRms = RtcAudioFrameRms(onRms = { onRms(it) }) // 本地采集帧 RMS（波形兜底源）
+    private val audioRms = RtcAudioFrameRms(
+        onRms = { onRms(it) },
+        onVoiceActivity = { onLocalVoiceActivity() }
+    ) // 本地采集帧 RMS（波形兜底源）
 
     /** TRTC 引擎（默认 App 进程级单例 sharedInstance）；懒加载：首次 enterRoom 才创建实例 */
     private val cloud: TRTCCloud by lazy {

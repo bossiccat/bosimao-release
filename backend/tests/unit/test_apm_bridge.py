@@ -32,7 +32,7 @@ def test_f32_24k_to_s16_16k_silence():
     assert all(b == 0 for b in out)
 
 
-# ---------- 上行分块（1s 累积） ----------
+# ---------- 上行分块（200ms 累积） ----------
 class FakeWs:
     """模拟 API 服务端：记录收到的 input.append"""
 
@@ -66,8 +66,8 @@ async def _fake_connect(url, **kw):
     return ws
 
 
-def test_bridge_uplink_chunks_1s(monkeypatch):
-    """1s 块累积：喂 2.5s 音频应产生 2 个上行块（2 满块 + 0.5s 残留）"""
+def test_bridge_uplink_chunks_200ms(monkeypatch):
+    """200ms 块累积：喂 2.5s 音频应产生 12 个上行块（2.4s 满块 + 0.1s 残留）"""
     import websockets
 
     async def fake_connect(url, **kw):
@@ -92,8 +92,8 @@ def test_bridge_uplink_chunks_1s(monkeypatch):
         await bridge.close()
 
     asyncio.run(run())
-    assert len(sent) == 2, f"2 满块，实际 {sent}"
-    assert sent[0] == 16000 * 2
+    assert len(sent) == 12, f"12 个 200ms 满块，实际 {sent}"
+    assert sent[0] == 16000 * 2 // 5
 
 
 async def _noop(*a, **k):

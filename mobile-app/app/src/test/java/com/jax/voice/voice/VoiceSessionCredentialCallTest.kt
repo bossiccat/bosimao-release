@@ -26,21 +26,23 @@ class VoiceSessionCredentialCallTest {
         assertEquals(VoiceSessionApi.EntryPoint.OVERLAY, sessionEntryPoint("overlay"))
         assertEquals(VoiceSessionApi.EntryPoint.NOTIFICATION, sessionEntryPoint("notification"))
         assertEquals(VoiceSessionApi.EntryPoint.NOTIFICATION, sessionEntryPoint("notification_talk"))
-        assertTrue(runCatching { sessionEntryPoint("wake:persian-cat") }.isFailure)
+        assertEquals(VoiceSessionApi.EntryPoint.MAIN, sessionEntryPoint("wake:persian-cat"))
     }
 
     @Test
-    fun `ordinary wake detection leaves real coordinator idle without signing`() = runBlocking<Unit> {
+    fun `wake detection starts a real coordinator session with wake source`() = runBlocking<Unit> {
         val dispatcher = Executors.newSingleThreadExecutor { runnable ->
-            Thread(runnable, "wake-idle-chain-test").apply { isDaemon = true }
+            Thread(runnable, "wake-start-chain-test").apply { isDaemon = true }
         }.asCoroutineDispatcher()
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
         val signCalls = AtomicInteger(0)
+        val sources = mutableListOf<String>()
         val coordinator = VoiceSessionCoordinator(
             scope = scope,
             actorDispatcher = dispatcher,
-            signSession = { _, _ ->
+            signSession = { _, source ->
                 signCalls.incrementAndGet()
+                sources += source
                 CompletableDeferred<VoiceSessionInfo>().await()
             },
             enterRoom = { _, _ -> Unit },
@@ -52,16 +54,12 @@ class VoiceSessionCredentialCallTest {
             setPrivateField(service, "coordinator", coordinator)
 
             invokeTriggerWake(service, "persian-cat")
-            delay(100)
-
-            assertEquals(VoiceSessionState.IDLE, coordinator.model.value.state)
-            assertEquals("普通 KWS 命中不得进入签发效果", 0, signCalls.get())
-
-            coordinator.start("main")
             withTimeout(3_000) {
                 coordinator.model.first { it.state == VoiceSessionState.SIGNING }
             }
-            assertEquals("显式 P0 入口仍须正常进入签发", 1, signCalls.get())
+
+            assertEquals("唤醒词命中必须进入真实签发效果", 1, signCalls.get())
+            assertEquals(listOf("wake:persian-cat"), sources)
         } finally {
             scope.cancel()
             dispatcher.close()

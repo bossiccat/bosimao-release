@@ -61,6 +61,70 @@ class DeviceCredentialStoreTest {
         assertTrue(storage.cleared)
     }
 
+    @Test
+    fun `restart promotes active value when process died after active promotion`() {
+        val storage = TransactionalRecordingCredentialStorage()
+        val cipher = FakeCredentialCipher()
+        val old = encrypted(storage, cipher, "device-123", "old-secret")
+        val replacement = encrypted(storage, cipher, "device-123", "new-secret")
+        storage.put(CredentialSlot.ACTIVE, old)
+        storage.put(CredentialSlot.STAGING, replacement)
+
+        val restartedVault = DeviceCredentialVault(storage, cipher)
+
+        assertEquals("new-secret", restartedVault.credential())
+        assertNull(storage.get(CredentialSlot.STAGING))
+        assertNull(storage.get(CredentialSlot.BACKUP))
+    }
+
+    @Test
+    fun `restart restores backup when process died with three divergent slots`() {
+        val storage = TransactionalRecordingCredentialStorage()
+        val cipher = FakeCredentialCipher()
+        val old = encrypted(storage, cipher, "device-123", "old-secret")
+        val replacement = encrypted(storage, cipher, "device-123", "new-secret")
+        val partial = encrypted(storage, cipher, "device-123", "partial-secret")
+        storage.put(CredentialSlot.ACTIVE, partial)
+        storage.put(CredentialSlot.STAGING, replacement)
+        storage.put(CredentialSlot.BACKUP, old)
+
+        val restartedVault = DeviceCredentialVault(storage, cipher)
+
+        assertEquals("old-secret", restartedVault.credential())
+        assertNull(storage.get(CredentialSlot.STAGING))
+        assertNull(storage.get(CredentialSlot.BACKUP))
+    }
+
+    @Test
+    fun `restart fails closed and retains transaction slots when active is missing`() {
+        val storage = TransactionalRecordingCredentialStorage()
+        val cipher = FakeCredentialCipher()
+        val replacement = encrypted(storage, cipher, "device-123", "new-secret")
+        val old = encrypted(storage, cipher, "device-123", "old-secret")
+        storage.put(CredentialSlot.STAGING, replacement)
+        storage.put(CredentialSlot.BACKUP, old)
+
+        val restartedVault = DeviceCredentialVault(storage, cipher)
+
+        assertNull(restartedVault.credential())
+        assertEquals(replacement, storage.get(CredentialSlot.STAGING))
+        assertEquals(old, storage.get(CredentialSlot.BACKUP))
+    }
+
+    private fun encrypted(
+        storage: TransactionalRecordingCredentialStorage,
+        cipher: CredentialCipher,
+        deviceId: String,
+        credential: String
+    ): StoredCredential {
+        val encrypted = cipher.encrypt(credential.encodeToByteArray(), deviceId.encodeToByteArray())
+        return StoredCredential(
+            deviceId = deviceId,
+            iv = java.util.Base64.getEncoder().encodeToString(encrypted.iv),
+            ciphertext = java.util.Base64.getEncoder().encodeToString(encrypted.ciphertext)
+        )
+    }
+
     private class RecordingCredentialStorage : CredentialStorage {
         var deviceId: String? = null
         var iv: String? = null
@@ -89,6 +153,37 @@ class DeviceCredentialStoreTest {
             ciphertext = null
             cleared = true
         }
+    }
+
+    private class TransactionalRecordingCredentialStorage : CredentialStorage {
+        override val supportsTransactions: Boolean = true
+        private val slots = linkedMapOf<CredentialSlot, StoredCredential>()
+
+        override fun save(deviceId: String, iv: String, ciphertext: String) {
+            put(CredentialSlot.ACTIVE, StoredCredential(deviceId, iv, ciphertext))
+        }
+
+        override fun load(): StoredCredential? = get(CredentialSlot.ACTIVE)
+
+        override fun clear() {
+            slots.remove(CredentialSlot.ACTIVE)
+        }
+
+        override fun save(slot: CredentialSlot, credential: StoredCredential) {
+            put(slot, credential)
+        }
+
+        override fun load(slot: CredentialSlot): StoredCredential? = get(slot)
+
+        override fun clear(slot: CredentialSlot) {
+            slots.remove(slot)
+        }
+
+        fun put(slot: CredentialSlot, credential: StoredCredential) {
+            slots[slot] = credential
+        }
+
+        fun get(slot: CredentialSlot): StoredCredential? = slots[slot]
     }
 
     private class FakeCredentialCipher : CredentialCipher {

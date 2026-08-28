@@ -11,8 +11,8 @@ android {
         applicationId = "com.jax.voice"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.6.5"
+        versionCode = 13
+        versionName = "0.6.7"
 
         // TRTC 官方要求指定 CPU 架构（缩包体；ADR-012 R2 版本锁定）
         ndk {

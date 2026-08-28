@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlin.math.max
 
 /**
  * 串行会话生命周期协调器（SPEC §4.2 / ADR-016）。
@@ -37,7 +38,9 @@ class VoiceSessionCoordinator(
     private val onConflict: (String) -> Unit = {},
     private val signTimeoutMs: Long = 10_000L,
     private val enterTimeoutMs: Long = 15_000L,
-    private val exitTimeoutMs: Long = 5_000L
+    private val exitTimeoutMs: Long = 5_000L,
+    private val refreshLeadMs: Long = 60_000L,
+    private val nowMs: () -> Long = { System.currentTimeMillis() }
 ) {
     /** actor 内部事件：带 generation 的完成事件由 [handle] 按当前代数校验 */
     sealed class Event {
@@ -61,6 +64,9 @@ class VoiceSessionCoordinator(
     private var enterJob: Job? = null
     private var exitJob: Job? = null
     private var timeoutJob: Job? = null
+    private var refreshJob: Job? = null
+    private var refreshRequested = false
+    private var lastStartSource = "main"
 
     @Volatile
     var conflicts: Int = 0
@@ -119,6 +125,8 @@ class VoiceSessionCoordinator(
             return
         }
         generation++
+        lastStartSource = source
+        refreshRequested = false
         publish(m.copy(
             state = VoiceSessionState.SIGNING,
             generation = generation,
@@ -138,7 +146,8 @@ class VoiceSessionCoordinator(
         cancelTimeout()
         publish(m.copy(
             state = VoiceSessionState.ENTERING,
-            sessionId = e.session.sessionId ?: e.session.roomId
+            sessionId = e.session.sessionId ?: e.session.roomId,
+            sessionExpiresAtEpochMs = e.session.expiresAtEpochMs
         ))
         scheduleTimeout(enterTimeoutMs, VoiceSessionState.ENTERING)
         launchEnter(e.generation, e.session)
@@ -152,6 +161,7 @@ class VoiceSessionCoordinator(
         }
         cancelTimeout()
         publish(m.copy(state = VoiceSessionState.IN_ROOM))
+        scheduleRefresh(m.generation, m.sessionExpiresAtEpochMs)
     }
 
     private fun handleExitSucceeded(e: Event.ExitSucceeded) {
@@ -161,7 +171,15 @@ class VoiceSessionCoordinator(
             return
         }
         cancelTimeout()
-        publish(m.copy(state = VoiceSessionState.IDLE, sessionId = null, error = null))
+        if (refreshRequested) {
+            refreshRequested = false
+            generation++
+            publish(_model.value.copy(state = VoiceSessionState.SIGNING, generation = generation, sessionId = null, sessionExpiresAtEpochMs = 0L, error = null))
+            scheduleTimeout(signTimeoutMs, VoiceSessionState.SIGNING)
+            launchSign(generation, lastStartSource)
+        } else {
+            publish(m.copy(state = VoiceSessionState.IDLE, sessionId = null, sessionExpiresAtEpochMs = 0L, error = null))
+        }
     }
 
     private fun handleCancel() {
@@ -198,21 +216,48 @@ class VoiceSessionCoordinator(
     private fun handleFailure(e: Event.Failure) {
         val m = _model.value
         if (e.generation != m.generation) return
+        if (isUserSigExpiry(e.code)) {
+            if (m.state == VoiceSessionState.IN_ROOM) requestRefresh(e.generation)
+            else if (refreshRequested) return
+            return
+        }
         when (m.state) {
             VoiceSessionState.SIGNING -> {
                 cancelActiveWork()
-                publish(m.copy(state = VoiceSessionState.IDLE, sessionId = null, error = e.message))
+                refreshRequested = false
+                publish(m.copy(state = VoiceSessionState.IDLE, sessionId = null, sessionExpiresAtEpochMs = 0L, error = e.message))
             }
             VoiceSessionState.ENTERING, VoiceSessionState.IN_ROOM -> enterExiting()
             VoiceSessionState.EXITING -> {
                 cancelActiveWork()
-                publish(m.copy(state = VoiceSessionState.IDLE, sessionId = null, error = e.message))
+                refreshRequested = false
+                publish(m.copy(state = VoiceSessionState.IDLE, sessionId = null, sessionExpiresAtEpochMs = 0L, error = e.message))
             }
             else -> recordConflict("failure while ${m.state}")
         }
     }
 
     /** 进入 EXITING：取消进行中的效果并等待退房（退出超时兜底回 IDLE） */
+    private fun isUserSigExpiry(code: String): Boolean = code == "usersig_expired" || code == "-1001" || code == "70001"
+
+    private fun requestRefresh(gen: Long) {
+        if (refreshRequested || _model.value.generation != gen || _model.value.state != VoiceSessionState.IN_ROOM) return
+        refreshRequested = true
+        refreshJob?.cancel()
+        refreshJob = null
+        enterExiting()
+    }
+
+    private fun scheduleRefresh(gen: Long, expiresAtEpochMs: Long) {
+        refreshJob?.cancel()
+        if (expiresAtEpochMs <= 0L) return
+        val delayMs = max(0L, expiresAtEpochMs - refreshLeadMs - nowMs())
+        refreshJob = scope.launch {
+            delay(delayMs)
+            channel.send(Event.Failure(gen, "usersig_expired", "userSig 即将过期，准备续签"))
+        }
+    }
+
     private fun enterExiting() {
         val m = _model.value
         cancelActiveWork()
@@ -278,6 +323,7 @@ class VoiceSessionCoordinator(
     }
 
     private fun cancelActiveWork() {
+        refreshJob?.cancel(); refreshJob = null
         signJob?.cancel(); signJob = null
         enterJob?.cancel(); enterJob = null
         exitJob?.cancel(); exitJob = null

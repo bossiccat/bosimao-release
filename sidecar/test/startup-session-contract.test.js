@@ -7,6 +7,7 @@ const path = require('path');
 const { parseArgList, validateStartup } = require('../config');
 const { BridgeClient } = require('../bridge');
 const { startPollingRuntime } = require('../rtc-startup');
+const { selectPendingIntent } = require('../intent-selection');
 
 const RTC_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'rtc.js'), 'utf8');
 const PHONE_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'phone.js'), 'utf8');
@@ -137,4 +138,18 @@ test('pending/sign flow checks room before bridge hello and signs the Android in
   assert.match(RTC_SOURCE, /bridge\.startSession\(/);
   assert.ok(RTC_SOURCE.indexOf('cred.room_id !== intent.room_id') < RTC_SOURCE.indexOf('bridge.startSession('));
   assert.doesNotMatch(RTC_SOURCE, /bridge\.start\(/);
+});
+
+test('pending intent selection skips the current room and supports multiple devices', () => {
+  const intents = [
+    { device_id: 'device-a', room_id: 'jax-device-a', session_id: 'session-a' },
+    { device_id: 'device-b', room_id: 'jax-device-b', session_id: 'session-b' },
+  ];
+  assert.deepEqual(selectPendingIntent(intents, 'jax-device-a'), intents[1]);
+  assert.deepEqual(selectPendingIntent(intents, 'jax-device-c'), intents[0]);
+});
+
+test('sidecar does not hard-code the first pending intent', () => {
+  assert.match(RTC_SOURCE, /selectPendingIntent\(intents,\s*currentRoom\)/);
+  assert.doesNotMatch(RTC_SOURCE, /const intent = intents\[0\]/);
 });

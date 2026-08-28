@@ -11,12 +11,12 @@ import com.tencent.trtc.TRTCCloudListener
  * 直接计算 RMS 驱动波形，与 onUserVoiceVolume 互补（本地音量 + 远端音量双源）。
  */
 class RtcAudioFrameRms(
-    private val onRms: (Float) -> Unit
+    private val onRms: (Float) -> Unit,
+    private val onVoiceActivity: (Float) -> Unit = {}
 ) {
     private val listener = object : TRTCCloudListener.TRTCAudioFrameListener {
         override fun onCapturedAudioFrame(frame: TRTCCloudDef.TRTCAudioFrame) {
-            val rms = computeRms(frame)
-            if (rms > 0.003f) onRms(rms) // 静音帧（低于 -50dB）不推，避免波形抖动
+            processCapturedBytes(frame.data)
         }
 
         override fun onLocalProcessedAudioFrame(frame: TRTCCloudDef.TRTCAudioFrame) {}
@@ -28,9 +28,20 @@ class RtcAudioFrameRms(
 
     fun listener(): TRTCCloudListener.TRTCAudioFrameListener = listener
 
+    /** 供 SDK 回调与 JVM 测试共用的本地 PCM 处理入口。 */
+    fun processCapturedBytes(bytes: ByteArray?) {
+        val rms = computeRms(bytes)
+        if (rms > 0.003f) {
+            onRms(rms) // 静音帧（低于 -50dB）不推，避免波形抖动
+            onVoiceActivity(rms)
+        }
+    }
+
     /** 从 TRTCAudioFrame 计算 RMS（0~1）：data 为 byte[] PCM16 小端，16bit 满刻度 32768 */
-    fun computeRms(frame: TRTCCloudDef.TRTCAudioFrame): Float {
-        val bytes = frame.data ?: return 0f
+    fun computeRms(frame: TRTCCloudDef.TRTCAudioFrame): Float = computeRms(frame.data)
+
+    fun computeRms(bytes: ByteArray?): Float {
+        bytes ?: return 0f
         if (bytes.size < 2) return 0f
         var sum = 0.0
         var count = 0

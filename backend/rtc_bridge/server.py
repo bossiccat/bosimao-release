@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import websockets
 
 from .session import PeerVoiceSession
+from app.brain.agent_thread_registry import AgentThreadRegistry
+from app.voice.qwen_realtime_bridge import QwenRealtimeBridge
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +23,24 @@ logger = logging.getLogger(__name__)
 class BridgeServer:
     """sidecar ↔ rtc_bridge 桥接服务端"""
 
-    def __init__(self, cfg, state: dict) -> None:
+    def __init__(
+        self,
+        cfg,
+        state: dict,
+        on_voice_intent: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
         self.cfg = cfg
         self.state = state                       # 指标/健康共享字典（health.py 读取）
         self._ws: Any = None
         self._session: PeerVoiceSession | None = None
         self._session_id = ""
         self._send_lock = asyncio.Lock()
+        self._on_voice_intent = on_voice_intent   # AI 文本 → Brain 路由回调（可选）
+        self._thread_registry = AgentThreadRegistry()
+
+    @property
+    def thread_registry(self) -> AgentThreadRegistry:
+        return self._thread_registry
 
     @property
     def sidecar_connected(self) -> bool:
@@ -90,6 +103,11 @@ class BridgeServer:
                 apm_api_url=self.cfg.apm_api_url,
                 apm_system_prompt=self.cfg.apm_system_prompt,
                 apm_token=self.cfg.apm_token,
+                voice_engine=self.cfg.voice_engine,
+                qwen_api_url=self.cfg.qwen_api_url,
+                qwen_token=self.cfg.qwen_token,
+                qwen_system_prompt=self.cfg.qwen_system_prompt,
+                on_agent_tool=lambda name, args, call_id: self._handle_agent_tool(name, args, call_id),
                 down_frame_ms=self.cfg.down_frame_ms,
                 sample_rate=self.cfg.sample_rate,
                 up_max_frames=self.cfg.up_max_frames,
@@ -98,6 +116,7 @@ class BridgeServer:
                 down_max_frames=self.cfg.down_max_frames,
                 down_max_bytes=self.cfg.down_max_bytes,
                 down_max_frame_age_ms=self.cfg.down_max_frame_age_ms,
+                on_voice_intent=self._on_voice_intent,
             )
             await self._session.start()
             self._session_id = session_id
@@ -124,6 +143,11 @@ class BridgeServer:
             logger.warning("sidecar handler error: %s", e)
         finally:
             await self._cleanup(ws)
+
+    async def _handle_agent_tool(self, name: str, args: dict, call_id: str) -> str:
+        del call_id
+        result = self._thread_registry.handle_tool(name, args)
+        return json.dumps(result, ensure_ascii=False)
 
     async def _dispatch(self, msg: dict) -> None:
         mtype = msg.get("type")

@@ -73,9 +73,20 @@ data class VoiceUiModel(
         }
 }
 
+/** 将跨端错误码归一到用户可见的脱敏错误模型。 */
+fun classifyVoiceError(code: String, detail: String = ""): VoiceError = when (code) {
+    "apm_reconnect_gave_up" -> VoiceErrors.apmReconnectGaveUp()
+    else -> VoiceError(code, detail.ifBlank { "语音连接失败，请重试" }, VoiceAction.RETRY)
+}
+
 /** 常见分类错误工厂（错误码与 SPEC §5 一致；message 为脱敏用户文案） */
 object VoiceErrors {
     fun authFailed() = VoiceError("40101", "无法验证此设备，请重新配对", VoiceAction.RE_PAIR)
+    fun apmReconnectGaveUp() = VoiceError(
+        "apm_reconnect_gave_up",
+        "语音服务暂时不可用，请重试",
+        VoiceAction.RETRY
+    )
     fun revoked() = VoiceError("40103", "此设备已被撤销，当前会话已结束", VoiceAction.RE_PAIR)
     fun handshakeTimeout() = VoiceError("40801", "连接电脑超时", VoiceAction.RECONNECT)
     fun stateConflict() = VoiceError("40901", "上一个会话操作仍在处理", VoiceAction.RETRY)

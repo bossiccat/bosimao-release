@@ -36,6 +36,13 @@ object VoiceController {
         _ui.update { it.copy(lastError = msg) }
     }
 
+    /** 发布跨端错误；旧诊断总线与统一 UI 模型保持同步。 */
+    fun publishError(code: String, detail: String = "") {
+        val error = classifyVoiceError(code, detail)
+        setLastError("${error.message}${if (detail.isBlank()) "" else " ($detail)"}")
+        publishModel(_uiModel.value.copy(experience = ExperienceState.ERROR, error = error))
+    }
+
     fun setService(state: ServiceState) {
         _ui.update { it.copy(service = state) }
     }

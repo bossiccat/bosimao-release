@@ -1,8 +1,10 @@
 package com.jax.voice.net
 
 import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
@@ -131,11 +133,55 @@ class VoiceSessionApiTest {
         assertNotEquals(first, second)
     }
 
+    @Test
+    fun `session response preserves expires_at as epoch milliseconds`() {
+        val requests = mutableListOf<Request>()
+        val api = VoiceSessionApi(respondingClient(requests, """{
+            "code":0,
+            "data":{
+                "room_id":"jax-device-123",
+                "user_id":"device-123",
+                "user_sig":"fresh-user-sig",
+                "sdk_app_id":1600155678,
+                "session_id":"session-1",
+                "expires_at":"2099-08-22T12:00:00Z",
+                "scene":"trtc_full_duplex"
+            },
+            "message":""
+        }""")) { "nonce-0123456789abcdef" }
+
+        val session = api.fetchSession(
+            baseUrl = "https://voice.example",
+            deviceId = "device-123",
+            credential = "device-123.device-credential",
+            entryPoint = VoiceSessionApi.EntryPoint.MAIN
+        )
+
+        assertEquals(4091083200000L, session.expiresAtEpochMs)
+        assertEquals("session-1", session.sessionId)
+        assertEquals(1, requests.size)
+    }
+
     private fun recordingClient(requests: MutableList<Request>): OkHttpClient {
         return OkHttpClient.Builder()
             .addInterceptor(Interceptor { chain ->
                 requests += chain.request()
                 throw IOException(INTERCEPTED)
+            })
+            .build()
+    }
+
+    private fun respondingClient(requests: MutableList<Request>, body: String): OkHttpClient {
+        return OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                requests += chain.request()
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
             })
             .build()
     }

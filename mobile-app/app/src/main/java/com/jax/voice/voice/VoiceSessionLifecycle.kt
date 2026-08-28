@@ -22,6 +22,7 @@ data class VoiceSessionModel(
     val state: VoiceSessionState = VoiceSessionState.IDLE,
     val generation: Long = 0L,
     val sessionId: String? = null,
+    val sessionExpiresAtEpochMs: Long = 0L,
     val error: String? = null
 )
 
@@ -31,5 +32,6 @@ data class VoiceSessionInfo(
     val userId: String,
     val userSig: String,
     val sdkAppId: Int,
-    val sessionId: String? = null
+    val sessionId: String? = null,
+    val expiresAtEpochMs: Long = 0L
 )

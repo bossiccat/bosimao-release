@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -200,8 +203,24 @@ app.include_router(routes_brain.router)
 app.include_router(_build_secured_session_router())
 
 
+# A10（2026-08-21 numpy 事故）：/health 带进程身份签名。
+# 事故机制：临时 python 进程占用 :8000 且 /health 返回 200 → 启动脚本幂等放行，
+# 模型服务实际不可用但被判定健康。修复：响应携带 proc_name/pid/run_id，
+# 消费方可核对"应答进程是否就是期望进程"，防止端口被外来进程劫持后冒名。
+# 模块级只算一次（进程生命周期内不变；uvicorn reload 模式重启 worker 会换新 run_id，属预期）。
+_PROC_NAME = os.path.basename(sys.executable) or "unknown"
+_PROC_PID = os.getpid()
+_RUN_ID = uuid.uuid4().hex[:8]
+
+
 @app.get("/health")
 async def health() -> dict:
     orch: Orchestrator | None = getattr(app.state, "orchestrator", None)
     model_server = "up" if orch else "unknown"
-    return {"status": "ok", "model_server": model_server}
+    return {
+        "status": "ok",
+        "model_server": model_server,
+        "proc_name": _PROC_NAME,
+        "pid": _PROC_PID,
+        "run_id": _RUN_ID,
+    }

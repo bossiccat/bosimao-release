@@ -84,6 +84,14 @@ class VoiceUiModelTest {
 
     // ---- 分类错误模型（SPEC §6 / §5 错误码）----
     @Test
+    fun `apm reconnect give up becomes a visible retryable error`() {
+        val error = classifyVoiceError("apm_reconnect_gave_up", "model connection unavailable")
+        assertEquals("apm_reconnect_gave_up", error.code)
+        assertEquals("语音服务暂时不可用，请重试", error.message)
+        assertEquals(VoiceAction.RETRY, error.action)
+    }
+
+    @Test
     fun `classified error model carries recovery action`() {
         assertEquals("40101", VoiceErrors.authFailed().code)
         assertEquals(VoiceAction.RE_PAIR, VoiceErrors.authFailed().action)

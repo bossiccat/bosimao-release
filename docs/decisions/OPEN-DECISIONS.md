@@ -179,3 +179,18 @@
 - 边界：staging/backup只是同一credential事务副本，不是第二sidecar identity或第二长期store。安全最小实现必须先补Win32故障注入RED，再实现固定A/S/B槽、双层锁、限权mutex、RAII`CredFree`与`Zeroizing<Vec<u8>>`；但这不替代O-018安装供给，也不替代真实externalBin打包。
 - 生产就绪记分卡（2026-08-09运维范围，目标Silver）：测试+回归Bronze（Node打包篡改门与Rust hash单测已补，但无安装/崩溃/跨用户E2E或CI）；契约Silver（Spec/ADR/实现契约明确）；安全Bronze以下（fresh-install、mutex ACL、三槽、零化未实现）；无障碍Bronze（不受本地installer优先级改变，但全项目仍缺E2E）；性能Bronze（无Windows真机/启动预算证据）；可观测Bronze（provenance与稳定错误码已补，安装/轮换审计未闭环）；发布安全Bronze（externalBin可重复构建/hash门已补，但无真实installer/custom action、签名与回滚演练）。总档Bronze以下，取最低档，未达商业Silver。
 - Resolves when：stage/backup/promote/verify/cleanup逐点崩溃注入、双进程并发、WAIT_ABANDONED、A/S/B损坏/拒读/拒删、跨用户ACL、relogin persistence与泄露扫描在Windows真机通过；真实Node/Electron externalBin、校验hash与NSIS/MSI产物由可重复构建链生成并完成安装/回滚验收。本次保持OPEN。
+
+### O-021 远程真机调试通道（UU远程端口映射 + 无线ADB，L2 远程变体）（2026-08-20 提出）
+- 类别：technical / 真机验证方案（L1 云真机 WeTest / L2 WiFi adb / L3 在场 三选一的 L2 变体）
+- 描述：UU远程无 USB 重定向，透传物理 USB 不可行（向日葵专业版才有，收费）；可行路径 = 本地电脑（与手机同 LAN）经 UU 端口映射把手机 adbd 端口穿透到本开发机，本机 adb connect 127.0.0.1:5555
+- Current Leaning：采用，但必须修正两处：(1) 无线调试端口是随机的（每次开关/重连 WiFi 漂移），映射规则会天天失效 → 首次配对后用 `adb tcpip 5555` 锁定固定端口，映射规则一次配好永久有效；(2) 本地电脑配对只授权本地 adbkey，穿透后本开发机首次 connect 手机会弹"允许调试"授权框，必须手动点允许（文章未提，不点则永远 unauthorized）
+- 边界：纯"装 APK 自用"不需要 adb——已签名 APK（v0.6.5，指纹同 v0.6.4 可覆盖升级）文件传输到手机直接安装即可；adb 链路仅服务 logcat/断点/双工 harness 真机双轮
+- 已交付：scripts/adb-setup-phone.bat（一次性锁 5555）、scripts/adb-keepalive.bat（远端自动重连，5s 轮询）
+- Resolves when：用户在本机实测 adb connect 127.0.0.1:5555 出现 device 且能 install/logcat；或用户改选 L1/L3
+
+### O-022 分层语音 Agent 大脑层模型选型（2026-08-26 22:47 用户采纳三层架构后提出）
+- 类别：technical / 模型选型
+- 描述：语音前台 qwen-audio-3.0-realtime（Flash 起步）+ 桥接层 + 独立 Worker Thread 大脑层的架构已裁决采纳；大脑层模型未定。候选与核实数据（2026-08-26 WebSearch）：A) DeepSeek V4（api.deepseek.com，OpenAI 兼容，input $0.30 / output $0.50 /1M tok，cache-hit $0.03，1M ctx，SWE-bench Verified 81%，V4-Pro 75 折至 2026-05-31 后恢复）；B) Qwen3.5-Plus（百炼北京，0-128K input 0.8 / output 4.8 元每 1M tok，thinking 同价，128K→1M 分档，Batch 半价）；C) 本地 llama-server（MiniCPM-o-4.5 GGUF Q4，当前 Brain 用的，零 API 成本，能力最弱）。
+- Current Leaning：语音前台不等大脑选型——用户先开百炼拿 90 天免费额度把 QwenRealtimeAdapter 调通；大脑层 Phase 1 用 A/B 对比（同一组语音意图→任务拆解用例，评拆解质量+成本），本地 llama-server 保留为离线兜底。注意旧名 deepseek-chat/reasoner 将弃用，新代码直接用 deepseek-v4-flash/pro；百炼 DASHSCOPE_API_KEY 是地域绑定（北京 key 不能打新加坡端点）。
+- 影响：QwenRealtimeAdapter 需在会话 config 注册 spawn_agent_thread/agent_status/steer_agent_thread/approve_reply 四自定义工具（Qwen 原生 FunctionCall），取代 [STANDBY]/[ACTIVE] 文本标记协议（根治标记被 TTS 念出）；rtc_bridge 需新增线程注册表（thread 状态本地持久化，与语音 WS 生命周期解耦）。
+- Resolves when：用户开通百炼并提供 DASHSCOPE_API_KEY（语音前台联调）+ 大脑层 A/B 对比数据出炉后定档

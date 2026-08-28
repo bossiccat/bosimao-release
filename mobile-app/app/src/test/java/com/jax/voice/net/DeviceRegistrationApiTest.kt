@@ -11,6 +11,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
+import java.time.Instant
 
 class DeviceRegistrationApiTest {
 
@@ -50,6 +51,72 @@ class DeviceRegistrationApiTest {
         assertEquals("credential-123", result.credentialId)
         assertEquals("secret-with-at-least-thirty-two-characters", result.credentialSecret)
         assertEquals("2026-08-09T00:00:00Z", result.expiresAt)
+    }
+
+    /**
+     * A6（2026-08-21）：expires_at 双形状兜底。历史事故：云端下发 epoch 秒 number 时
+     * Android optString 返回 "" → requiredString 抛 IOException → 配对 100% 失败。
+     * 契约首选 ISO8601 字符串（devices.js toIso），但客户端必须容忍 number 漂移。
+     */
+    @Test
+    fun `register accepts epoch seconds number for expires_at and normalizes to iso`() {
+        val epochSeconds = 1_818_856_872L // 2027-09-19T09:07:52Z（任意未来时间）
+        val body = successBody()
+            .replace("\"expires_at\":\"2026-08-09T00:00:00Z\"", "\"expires_at\":$epochSeconds")
+        val api = DeviceRegistrationApi(clientReturning(response(201, body))) {
+            "nonce-0123456789abcdef"
+        }
+
+        val result = api.register("https://voice.example", VALID_PAIRING_CODE, "Jax Pixel")
+
+        assertEquals(Instant.ofEpochSecond(epochSeconds).toString(), result.expiresAt)
+    }
+
+    @Test
+    fun `register accepts epoch milliseconds number for expires_at`() {
+        val epochMillis = 1_818_856_872_456L
+        val body = successBody()
+            .replace("\"expires_at\":\"2026-08-09T00:00:00Z\"", "\"expires_at\":$epochMillis")
+        val api = DeviceRegistrationApi(clientReturning(response(201, body))) {
+            "nonce-0123456789abcdef"
+        }
+
+        val result = api.register("https://voice.example", VALID_PAIRING_CODE, "Jax Pixel")
+
+        assertEquals(Instant.ofEpochMilli(epochMillis).toString(), result.expiresAt)
+    }
+
+    @Test
+    fun `register accepts numeric epoch string for expires_at and normalizes to iso`() {
+        // 漂移形状：后端把秒级时间戳当字符串下发（桌面 org.json 对 number 也会隐式转成此形状）
+        val epochSeconds = 1_818_856_872L
+        val body = successBody()
+            .replace("\"expires_at\":\"2026-08-09T00:00:00Z\"", "\"expires_at\":\"$epochSeconds\"")
+        val api = DeviceRegistrationApi(clientReturning(response(201, body))) {
+            "nonce-0123456789abcdef"
+        }
+
+        val result = api.register("https://voice.example", VALID_PAIRING_CODE, "Jax Pixel")
+
+        assertEquals(Instant.ofEpochSecond(epochSeconds).toString(), result.expiresAt)
+    }
+
+    @Test
+    fun `register fails closed on zero or negative epoch expires_at`() {
+        val invalidValues = listOf(0L, -1L)
+        invalidValues.forEach { value ->
+            val body = successBody()
+                .replace("\"expires_at\":\"2026-08-09T00:00:00Z\"", "\"expires_at\":$value")
+            val api = DeviceRegistrationApi(clientReturning(response(201, body))) {
+                "nonce-0123456789abcdef"
+            }
+            assertTrue(
+                "epoch $value should fail closed",
+                runCatching {
+                    api.register("https://voice.example", VALID_PAIRING_CODE, "Jax Pixel")
+                }.exceptionOrNull() is IOException
+            )
+        }
     }
 
     @Test

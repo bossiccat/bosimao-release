@@ -126,7 +126,8 @@ def build_device_router(*, store, validator, nonces, limiter,
             "device_id": reg.device_id,
             "credential_id": reg.credential_id,
             "credential_secret": reg.credential_secret,
-            "expires_at": reg.expires_at,
+            # 契约（A6 修复）：expires_at 返回 ISO8601 字符串，手机端 requiredString 才能解析
+            "expires_at": reg.expires_at_iso,
         }
         return {"code": 0, "data": data, "message": ""}
 

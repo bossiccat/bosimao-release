@@ -7,6 +7,8 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
+import java.time.Instant
+import java.time.format.DateTimeParseException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -50,7 +52,8 @@ class VoiceSessionApi(
         val userSig: String,
         val sdkAppId: Int,
         val scene: String,
-        val sessionId: String? = null
+        val sessionId: String? = null,
+        val expiresAtEpochMs: Long = 0L
     )
 
     /**
@@ -124,15 +127,44 @@ class VoiceSessionApi(
                 ?: throw IOException("响应缺 user_sig")
             val sdkAppId = data.optInt("sdk_app_id", 0)
             if (sdkAppId <= 0) throw IOException("响应缺 sdk_app_id")
+            val expiresAtEpochMs = parseExpiresAtEpochMs(data)
             return VoiceSession(
                 roomId = roomId,
                 userId = data.optString("user_id", deviceId),
                 userSig = userSig,
                 sdkAppId = sdkAppId,
                 scene = data.optString("scene", "trtc_full_duplex"),
-                sessionId = data.optString("session_id").takeIf { it.isNotBlank() }
+                sessionId = data.optString("session_id").takeIf { it.isNotBlank() },
+                expiresAtEpochMs = expiresAtEpochMs
             )
         }
+    }
+
+    private fun parseExpiresAtEpochMs(data: JSONObject): Long {
+        if (!data.has("expires_at") || data.isNull("expires_at")) {
+            throw IOException("响应缺 expires_at")
+        }
+        val raw = data.get("expires_at")
+        val epochMs = when (raw) {
+            is Number -> normalizeEpoch(raw.toLong())
+            is String -> {
+                val text = raw.trim()
+                if (text.isEmpty()) throw IOException("expires_at 为空")
+                text.toLongOrNull()?.let(::normalizeEpoch) ?: try {
+                    Instant.parse(text).toEpochMilli()
+                } catch (e: DateTimeParseException) {
+                    throw IOException("expires_at 非法", e)
+                }
+            }
+            else -> throw IOException("expires_at 类型非法")
+        }
+        if (epochMs <= System.currentTimeMillis()) throw IOException("expires_at 已过期")
+        return epochMs
+    }
+
+    private fun normalizeEpoch(value: Long): Long {
+        if (value <= 0L) throw IOException("expires_at 非法")
+        return if (value < 1_000_000_000_000L) value * 1000L else value
     }
 
     private fun jsonString(value: String): String {

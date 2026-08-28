@@ -16,6 +16,7 @@ const { BridgeClient } = require('./bridge');
 const { controlPlaneHeaders } = require('./security');
 const { requestRendererExit } = require('./exit-protocol');
 const { startPollingRuntime } = require('./rtc-startup');
+const { selectPendingIntent } = require('./intent-selection');
 const { frameToS16Mono16k, makeAudioFrame16k } = require('./audio');
 const TRTCCloud = require('trtc-electron-sdk').default;
 const { TRTCParams, TRTCAppScene } = require('trtc-electron-sdk');
@@ -89,8 +90,23 @@ function runSidecar() {
   });
 
   cloud.on('onEnterRoom', (result) => {
-    if (result > 0) log('ROOM', `进房成功（elapsed=${result}ms）`);
-    else log('ROOM', `进房失败 errCode=${result}`);
+    if (result > 0) {
+      log('ROOM', `进房成功（elapsed=${result}ms）`);
+      // v0.6.7 P0 修复：每次进房成功后重新启用自定义音频采集。
+      // 根因（2026-08-22 真机实锤）：enableCustomAudioCapture(true) 原来只在进程启动时调一次，
+      // 而 TRTC SDK exitRoom 会重置采集管线——sidecar 长驻进程多次进出房后
+      // sendCustomAudioData 的帧被 SDK 静默丢弃（调用不报错、计数照涨），
+      // 手机端 is_playing=0、FirstAudioFrameReceived 永不触发 → 用户听不到 AI 回复。
+      try { cloud.stopLocalAudio(); } catch (e) { /* ignore */ }
+      try {
+        cloud.enableCustomAudioCapture(true);
+        log('ROOM', '自定义采集已重新启用（进房后）');
+      } catch (e) {
+        log('ERR', `进房后 enableCustomAudioCapture 失败: ${e.message}`);
+      }
+    } else {
+      log('ROOM', `进房失败 errCode=${result}`);
+    }
   });
   cloud.on('onExitRoom', (reason) => log('ROOM', `退房 reason=${reason}`));
   cloud.on('onRemoteUserEnterRoom', (userId) => {
@@ -114,6 +130,16 @@ function runSidecar() {
   cloud.on('onError', (errCode, errMsg) => log('ERR', `onError errCode=${errCode} msg=${errMsg}`));
   cloud.on('onUserAudioAvailable', (userId, available) => {
     log('AUDIO', `远端音频可用 userId=${userId} available=${available}`);
+    // 回音抑制（2026-08-26 真机实锤：PC 扬声器播出手机声音）：
+    // sidecar 是无头对端，只经 setAudioFrameCallback 拿远端 PCM 送 rtc_bridge，
+    // 不应在 PC 本地播放远端音频。TRTC 默认 autoRecvAudio=true 会自动拉流并播放，
+    // 这里显式把该路远端音量清零（回调仍触发、PCM 仍上行，只是不进扬声器）。
+    try {
+      cloud.setRemoteAudioVolume(userId, 0);
+      if (available) log('AUDIO', `远端播放已静音（回音抑制） userId=${userId}`);
+    } catch (e) {
+      log('ERR', `setRemoteAudioVolume 失败 userId=${userId}: ${e.message}`);
+    }
   });
   cloud.on('onUserSigExpired', () => {
     log('SIG', 'userSig 过期回调；由 rtc_bridge 侧重新签发后重进房（MVP 记录日志）');
@@ -159,8 +185,8 @@ async function pollAndJoin() {
     const parsed = await resp.json();
     const intents = (parsed.data && parsed.data.intents) || [];
     if (intents.length === 0) { pollingBusy = false; return; }
-    const intent = intents[0];
-    if (currentRoom === intent.room_id) { pollingBusy = false; return; }
+    const intent = selectPendingIntent(intents, currentRoom);
+    if (!intent) { pollingBusy = false; return; }
     log('SIG', '发现会话意图');
     if (currentRoom) {
       try { cloud.exitRoom(); } catch (e) { /* ignore */ }
@@ -172,7 +198,7 @@ async function pollAndJoin() {
       throw new Error('SIDECAR_SESSION_ROOM_MISMATCH');
     }
     bridge.startSession({
-      session_id: intent.session_id,
+      session_id: intent.session_id || intent.room_id, // 云端 v1.2 前老意图缺省回落 room_id
       device_id: intent.device_id,
       room_id: cred.room_id,
       user_id: cred.user_id,

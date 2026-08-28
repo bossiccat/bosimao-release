@@ -17,6 +17,12 @@ param(
     [string]$Service = "all"
 )
 $ErrorActionPreference = "Stop"
+# 跨 jax-services.ps1 / start-all.ps1 的单实例闸门：避免两个入口同时通过“端口未监听”检查后各自 spawn。
+$ServiceMutex = New-Object System.Threading.Mutex($false, "Global\JaxServicesStartStop")
+if (-not $ServiceMutex.WaitOne(0)) {
+    Write-Host "[services][busy] 另一份服务启停操作正在进行，拒绝并发执行"
+    exit 2
+}
 $Root    = Split-Path -Parent $PSScriptRoot
 $PidDir  = Join-Path $Root "data\pids"
 $LogDir  = Join-Path $Root "logs"
@@ -26,6 +32,11 @@ $PyW     = Join-Path $Root ".venv\Scripts\pythonw.exe"
 # 改为 jax-backend.exe / jax-model.exe（任务管理器显示品牌化进程名，消除杀毒误报面）。
 $BackendExe = Join-Path $Root "jax-backend.exe"
 New-Item -ItemType Directory -Force -Path $PidDir, $LogDir | Out-Null
+
+# ---------------- 共享函数（单一实现，消除双份定义漂移） ----------------
+# 2026-08-21（审计 A2/A11）：Test-Health（含自签 https 兜底）与 Get-RelayProcesses
+# 统一抽取到 lib-common.ps1，与 jax-watchdog.ps1 共用，防止两脚本再次漂移。
+. (Join-Path $PSScriptRoot "lib-common.ps1")
 
 # ---------------- 基础工具函数 ----------------
 function Test-PortListen([int]$Port) {
@@ -44,12 +55,7 @@ function Get-PortProcCommandLine([int]$Port) {
     if ($p) { return $p.CommandLine }
     return ""
 }
-function Test-Health([string]$Url, [int]$TimeoutSec = 3) {
-    try {
-        $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec
-        return ($r.StatusCode -eq 200)
-    } catch { return $false }
-}
+# Test-Health：见 lib-common.ps1（单一实现，含自签 https TcpClient 兜底）
 function Get-PidFile([string]$Name) {
     $f = Join-Path $PidDir "$Name.pid"
     if (Test-Path $f) {
@@ -100,10 +106,7 @@ function Invoke-OwnerCredentialProvision {
     Write-Host "[owner-credential][ok] owner credential 已就绪"
     return $true
 }
-function Get-RelayProcesses {
-    Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "relay_client" }
-}
+# Get-RelayProcesses：见 lib-common.ps1（单一实现，python.exe OR pythonw.exe）
 function Get-RelayTopLevel {
     # 顶层 relay 实例：父进程不是 relay_client 的进程（排除 .venv 重定向器拉起的子 python）
     $all = @(Get-RelayProcesses)
@@ -139,9 +142,15 @@ function Start-ModelService {
     if (-not (Test-Path $Model))     { Write-Host "[model][x] 模型不存在: $Model";     return $false }
     # 幂等：已健康 → 跳过（采纳现有进程 PID，保持 PID 文件一致）
     if (Test-PortListen $Port -and (Test-Health "http://127.0.0.1:$Port/health")) {
+        # 审计 A10 同款机制加固：健康 200 后核对监听进程名（期望 jax-model.exe）
+        $owner = Test-PortOwner -Port $Port -ExpectedProcName "jax-model.exe"
+        if ($owner.Match -eq $false) {
+            Write-Host "[model][!] 端口被非预期进程占用: $($owner.ProcName) PID=$($owner.Pid)（期望 jax-model.exe），不复用"
+            return $false
+        }
         $cur = Get-PortPid $Port
         if ($cur) { Set-PidFile "model" $cur }
-        Write-Host "[model][ok] 已在运行（幂等跳过，PID=$cur）"
+        Write-Host "[model][ok] 已在运行（幂等跳过，PID=$cur，进程=$($owner.ProcName)）"
         return $true
     }
     # 启动前清理旧 PID 残留：PID 文件指向的进程已死 → 清文件
@@ -178,18 +187,61 @@ function Start-BackendService {
     $Log = Join-Path $LogDir "backend.log"
     # owner credential 首启 provision（ADR-022）：backend 启动前，失败即中止（fail-closed）
     if (-not (Invoke-OwnerCredentialProvision)) { return $false }
-    if (Test-PortListen $Port) {
-        # 端口已监听：健康则幂等跳过（采纳 PID）；不健康则报告（不盲杀）
-        if (Test-Health "http://127.0.0.1:$Port/health") {
+    $backendProcs = @(Get-BackendProcesses)
+    if (Test-PortListen $Port -or $backendProcs.Count -gt 0) {
+        # 端口已监听或 onefile bootstrap 尚在：健康则幂等跳过；不健康则报告（不盲杀）
+        # 审计 A2 修复：:8000 是 https 自签端口（uvicorn ssl_certfile=certs/server.crt），
+        # 原 http:// 探测必失败（Invoke-WebRequest 对 https 端口发 http 会抛异常）→ 改 https
+        if (Test-Health "https://127.0.0.1:$Port/health") {
+            # 审计 A10 修复（2026-08-21）：健康 200 ≠ 期望进程在服务。
+            # 事故：临时 python 进程占 :8000 且 /health 200 → 幂等放行 → 服务实际不可用。
+            # 现在：健康通过后追加核对监听进程名（期望 jax-backend.exe），不匹配则
+            # 警告 + 不复用（跳过幂等采纳，走下方"端口被占用"分支报告，不盲杀）。
+            $owner = Test-PortOwner -Port $Port -ExpectedProcName "jax-backend.exe"
+            if ($owner.Match -eq $true) {
+                $allBackend = @(Get-BackendProcesses)
+                if ($allBackend.Count -gt 2) {
+                    Write-Host "[backend][!] 检测到重复 onefile 实例（进程数=$($allBackend.Count)，监听 PID=$($owner.Pid)），拒绝幂等放行；请执行 restart backend"
+                    return $false
+                }
+                $cur = Get-PortPid $Port
+                if ($cur) { Set-PidFile "backend" $cur }
+                Write-Host "[backend][ok] 已在运行（幂等跳过，PID=$cur，进程=$($owner.ProcName)，onefile 进程数=$($allBackend.Count)）"
+                return $true
+            }
+            if ($owner.Match -eq $false) {
+                Write-Host "[backend][!] 端口被非预期进程占用: $($owner.ProcName) PID=$($owner.Pid)（期望 jax-backend.exe），不复用"
+                Write-Host "[backend][!] /health 虽返回 200 但应答方非 jax-backend——可能是外来 python/临时进程劫持（numpy 事故同款机制）"
+                Write-Host "[backend][!] 不自动清理（强杀有风险）；如确认可手工: Stop-Process -Id $($owner.Pid)，再重启本服务"
+                return $false
+            }
+            # Match=$null：端口健康但进程身份查不到（竞态/权限）——退回旧行为（幂等跳过），仅提示
             $cur = Get-PortPid $Port
             if ($cur) { Set-PidFile "backend" $cur }
-            Write-Host "[backend][ok] 已在运行（幂等跳过，PID=$cur）"
+            Write-Host "[backend][ok] 已在运行（幂等跳过，PID=$cur；进程身份未能核对: $($owner.Message)）"
             return $true
         }
         $cmd = Get-PortProcCommandLine $Port
-        Write-Host "[backend][!] 端口 $Port 被占用但 /health 未通过，跳过启动（不盲杀）"
-        Write-Host "           占用进程: $cmd"
-        return $false
+        # 2026-08-22 修复（弹窗事故根因之二）：backend 卡死（TCP 在、HTTP 空回复）时
+        # 原逻辑"跳过启动不盲杀"→ 端口被僵尸永久占用 → watchdog 每 5min 拉新实例
+        # → 新实例抢不到端口 → PyInstaller 引导窗反复弹出（用户看到的弹窗）。
+        # 现在：占用者确认是 jax-backend.exe（我们自己的进程）且 unhealthy → 温和重启：
+        # 杀掉全部 onefile 进程树 → 端口释放 → 顺序往下走正常启动。
+        $ownerHanging = Test-PortOwner -Port $Port -ExpectedProcName "jax-backend.exe"
+        if ($ownerHanging.Match -eq $true) {
+            Write-Host "[backend][!] backend 卡死（端口在但 /health 不通过），执行温和重启（杀 jax-backend 进程树后重拉）"
+            if (Stop-BackendProcesses) {
+                Clear-PidFile "backend"
+                Start-Sleep -Seconds 2   # 端口 TIME_WAIT 释放
+            } else {
+                Write-Host "[backend][x] 卡死进程树未能停止，放弃本轮（防风暴）"
+                return $false
+            }
+        } else {
+            Write-Host "[backend][!] 端口 $Port 被占用但 /health 未通过，跳过启动（不盲杀外来进程）"
+            Write-Host "           占用进程: $cmd"
+            return $false
+        }
     }
     $oldProcId = Get-PidFile "backend"
     if ($oldProcId -and -not (Test-ProcessAlive $oldProcId)) { Clear-PidFile "backend" }
@@ -202,10 +254,37 @@ function Start-BackendService {
     Write-Host "[backend] PID=$($p.Id) 等待 /health（最多 90s）..."
     $deadline = (Get-Date).AddSeconds(90)
     while ((Get-Date) -lt $deadline) {
-        if (Test-Health "http://127.0.0.1:$Port/health") { Write-Host "[backend][ok] 就绪"; return $true }
+        if (Test-Health "https://127.0.0.1:$Port/health") {
+            $owner = Test-PortOwner -Port $Port -ExpectedProcName "jax-backend.exe"
+            if ($owner.Match -eq $true) {
+                # PyInstaller onefile 允许监听 PID 是本次 bootstrap 的子进程；进程树中
+                # 若只有一组 jax-backend.exe，则这是合法的单实例，不要求 PID 相等。
+                $allBackend = @(Get-BackendProcesses)
+                if ($allBackend.Count -le 2) {
+                    $listener = [int]$owner.Pid
+                    $known = @($allBackend | ForEach-Object { [int]$_.ProcessId })
+                    if ($known -contains $listener) {
+                        Write-Host "[backend][ok] 就绪（onefile 单实例，监听 PID=$listener，进程数=$($allBackend.Count)）"
+                        return $true
+                    }
+                }
+                Write-Host "[backend][x] 检测到重复 backend 进程（监听 PID=$($owner.Pid)，进程数=$($allBackend.Count)）；终止本次进程树"
+                Stop-BackendProcesses
+                Clear-PidFile "backend"
+                return $false
+            }
+            if ($owner.Match -eq $false) {
+                Write-Host "[backend][x] 端口被非预期进程占用: $($owner.ProcName) PID=$($owner.Pid)；终止当前启动"
+                Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+                Clear-PidFile "backend"
+                return $false
+            }
+        }
         Start-Sleep -Seconds 2
     }
-    Write-Host "[backend][x] 90s 内未就绪，查看 $Log"
+    Write-Host "[backend][x] 90s 内未就绪，终止当前 PID=$($p.Id)，查看 $Log"
+    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    Clear-PidFile "backend"
     return $false
 }
 
@@ -263,6 +342,7 @@ function Get-RtcBridgeProcesses {
         Where-Object { $_.CommandLine -match "rtc_bridge" }
 }
 function Start-RtcBridgeService {
+    Load-Env
     $Port = 19092
     $HealthPort = 19093
     $Log = Join-Path $LogDir "rtc_bridge.log"
@@ -310,6 +390,19 @@ function Stop-ServiceByName([string]$Name) {
         }
         Write-Host "[relay][ok] 未运行"
         Clear-PidFile "relay"; return $true
+    }
+    if ($Name -eq "backend") {
+        $backendProcs = @(Get-BackendProcesses)
+        if ($backendProcs.Count -gt 0) {
+            Write-Host "[backend] 停止 onefile 进程树（$($backendProcs.Count) 个 jax-backend.exe）"
+            if (-not (Stop-BackendProcesses)) {
+                Write-Host "[backend][x] onefile 进程树未完全退出"
+                return $false
+            }
+            Clear-PidFile "backend"
+            Write-Host "[backend][ok] 已停止（进程树已收敛）"
+            return $true
+        }
     }
     if ($procId -and (Test-ProcessAlive $procId)) {
         Write-Host "[$Name] 停止 PID=$procId"
@@ -372,7 +465,7 @@ function Show-Status {
     Write-Host ("[model]   :19080    {0}{1}" -f $mState, $(if ($mProcId) { "  PID=$mProcId" } else { "" }))
     # backend
     $bProcId = Get-PidFile "backend"; $bAlive = Test-ProcessAlive $bProcId
-    $bPort = Test-PortListen 8000; $bHealth = Test-Health "http://127.0.0.1:8000/health"
+    $bPort = Test-PortListen 8000; $bHealth = Test-Health "https://127.0.0.1:8000/health"
     $bState = if ($bHealth) { "OK" } elseif ($bPort) { "PORT-NOHEALTH" } elseif ($bAlive) { "PID-ALIVE" } else { "DOWN" }
     Write-Host ("[backend] :8000     {0}{1}" -f $bState, $(if ($bProcId) { "  PID=$bProcId" } else { "" }))
     # relay
@@ -394,21 +487,27 @@ function Show-Status {
 $svcs = @()
 if ($Service -eq "all") { $svcs = @("model","backend","relay","rtc-bridge") } else { $svcs = @($Service) }
 
-switch ($Action) {
-    "start" {
-        foreach ($s in $svcs) { Invoke-SvcStart $s | Out-Null }
-    }
-    "stop" {
-        foreach ($s in $svcs) { Stop-ServiceByName $s | Out-Null }
-    }
-    "restart" {
-        foreach ($s in $svcs) {
-            Stop-ServiceByName $s | Out-Null
-            Start-Sleep -Seconds 1
-            Invoke-SvcStart $s | Out-Null
+try {
+    switch ($Action) {
+        "start" {
+            foreach ($s in $svcs) { Invoke-SvcStart $s | Out-Null }
+        }
+        "stop" {
+            foreach ($s in $svcs) { Stop-ServiceByName $s | Out-Null }
+        }
+        "restart" {
+            foreach ($s in $svcs) {
+                Stop-ServiceByName $s | Out-Null
+                # Stop-ServiceByName 已等待 PID 退出；此处只给端口/句柄释放一个短暂稳定窗口。
+                Start-Sleep -Seconds 1
+                Invoke-SvcStart $s | Out-Null
+            }
+        }
+        "status" {
+            Show-Status
         }
     }
-    "status" {
-        Show-Status
-    }
+} finally {
+    $ServiceMutex.ReleaseMutex() | Out-Null
+    $ServiceMutex.Dispose()
 }

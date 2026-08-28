@@ -45,13 +45,13 @@
     <!-- 设置页 -->
     <string name="settings_title">设置</string>
     <string name="settings_session_label">会话服务器（TRTC 签发）</string>
-    <string name="settings_session_hint">https://&lt;云函数域名&gt;（不带 /api/v1/voice/session）</string>
+    <string name="settings_session_hint">留空 = 出厂默认；或填 https://&lt;云函数域名&gt;（不带 /api/v1/voice/session）</string>
     <string name="settings_session_sub">手机唤醒后从此接口拉取 TRTC 进房凭证（room_id/user_sig），客户端自动拼接 /api/v1/voice/session；SecretKey 不在 App 内</string>
     <string name="settings_pairing_title">配对 Android 设备</string>
     <string name="settings_pairing_code_hint">输入 Windows 端生成的一次性配对码</string>
     <string name="settings_device_name_hint">设备名称，例如 工作手机</string>
     <string name="settings_pairing_action">配对设备</string>
-    <string name="settings_pairing_required">请填写会话服务器、配对码和设备名称</string>
+    <string name="settings_pairing_required">请填写配对码和设备名称（会话服务器留空则用默认）</string>
     <string name="settings_pairing_success">设备已安全配对</string>
     <string name="settings_pairing_failed">配对失败，请检查配对码和网络后重试</string>
     <string name="settings_device_id_label">设备 ID</string>

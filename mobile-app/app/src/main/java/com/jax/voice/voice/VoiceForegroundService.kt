@@ -21,8 +21,7 @@ internal fun sessionEntryPoint(source: String): VoiceSessionApi.EntryPoint = whe
     source == "overlay" -> VoiceSessionApi.EntryPoint.OVERLAY
     source == "notification" || source == "notification_talk" ->
         VoiceSessionApi.EntryPoint.NOTIFICATION
-    source.startsWith("wake:") ->
-        throw IllegalStateException("wake word is not a P0 session entry point")
+    source.startsWith("wake:") -> VoiceSessionApi.EntryPoint.MAIN
     else -> throw IllegalArgumentException("unsupported P0 voice entry point: $source")
 }
 
@@ -48,6 +47,7 @@ class VoiceForegroundService : Service() {
     private var wakeEngine: WakeWordEngine? = null
     private var dispatcher: FrameDispatcher? = null
     private var rtcClient: RtcClient? = null
+    private var bargeInController: BargeInController? = null
     private var coordinator: VoiceSessionCoordinator? = null
     private var notifications: VoiceServiceNotifications? = null
     private var exitGate: CompletableDeferred<Unit>? = null
@@ -67,6 +67,8 @@ class VoiceForegroundService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_TALK -> {
+                // 播放中点击同样是显式打断；非 SPEAKING 时由控制器幂等忽略。
+                bargeInController?.interrupt("tap")
                 // P0 独立入口（悬浮窗/通知，§5.3）：保证管线后投递同一 Start 命令
                 if (micRecorder == null) startPipeline()
                 // Task 8：三入口统一命令，source 来自 Intent（main/overlay/notification）
@@ -101,15 +103,26 @@ class VoiceForegroundService : Service() {
             onState = { VoiceController.setConnection(it) },
             onPhase = {
                 VoiceController.setPhase(it)
-                VoiceController.publishExperience(ExperienceState.fromPhase(it))
+                val experience = ExperienceState.fromPhase(it)
+                bargeInController?.onExperienceChange(experience)
+                VoiceController.publishExperience(experience)
             },
             onRms = { VoiceController.setRms(it) },
+            onLocalVoiceActivity = { bargeInController?.interrupt("user_voice") },
             onError = { code, msg ->
-                VoiceController.setLastError("进房失败: $code $msg")
+                if (code == "apm_reconnect_gave_up") {
+                    VoiceController.publishError(code, msg)
+                } else {
+                    VoiceController.setLastError("进房失败: $code $msg")
+                }
                 coordinator?.postFailure(code, msg)
             },
             onExited = { exitGate?.complete(Unit) },
             onEntered = { enterGate?.complete(Unit) }
+        )
+        bargeInController = BargeInController(
+            interruptPlayback = { rtcClient?.interruptRemotePlayback() },
+            onExperience = { VoiceController.publishExperience(it) }
         )
         coordinator = buildCoordinator()
 
@@ -158,7 +171,14 @@ class VoiceForegroundService : Service() {
                     credential = sessionCredential.wireCredential,
                     entryPoint = sessionEntryPoint(source)
                 )
-                VoiceSessionInfo(s.roomId, s.userId, s.userSig, s.sdkAppId, s.sessionId)
+                VoiceSessionInfo(
+                    roomId = s.roomId,
+                    userId = s.userId,
+                    userSig = s.userSig,
+                    sdkAppId = s.sdkAppId,
+                    sessionId = s.sessionId,
+                    expiresAtEpochMs = s.expiresAtEpochMs
+                )
             },
             enterRoom = { gen, session ->
                 val client = rtcClient ?: throw IllegalStateException("rtc client not ready")
@@ -225,11 +245,12 @@ class VoiceForegroundService : Service() {
         micRecorder = null
         dispatcher = null
     }
-    /** 唤醒词属于 P1 Beta：普通 KWS 命中只更新本地状态，不触发 P0 签发/进房。 */
+    /** KWS 命中后直接进入真实会话；命令词仍优先处理，不得误触发签发。 */
     private fun triggerWake(keyword: String) {
         if (micRecorder == null) return
         if (handleCommandWord(keyword)) return
         VoiceController.onWake(keyword)
+        coordinator?.start("wake:$keyword")
     }
 
     /** 命令词（Phase B 预留）：说"退下" = 取消当前会话 */
