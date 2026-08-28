@@ -20,21 +20,42 @@ EXPECTED_OPERATIONS = {
     ("post", "/api/v1/voice/session"),
     ("get", "/api/v1/voice/session/pending"),
     ("post", "/api/v1/voice/session/sign"),
+    ("post", "/api/v1/voice/sessions/{session_id}/terminate"),
+    ("get", "/api/v1/voice/sessions/{session_id}/termination/{termination_id}"),
+    ("post", "/api/v1/voice/sessions/{session_id}/termination/{termination_id}/retry"),
+    ("post", "/api/v1/voice/sessions/{session_id}/termination/{termination_id}/acknowledgements"),
+    ("post", "/api/v1/voice/sessions/wake"),
+    ("post", "/api/v1/voice/internal/rtc-bridge/hello-redeem"),
     ("get", "/api/v1/voice/status"),
     ("get", "/api/v1/voice/stream"),
 }
 EXPECTED_ERROR_CODES = {
     40001,
+    40021,
     40101,
     40102,
     40103,
+    40111,
+    40112,
+    40113,
+    40114,
     40401,
+    40402,
+    40403,
     40801,
     40901,
+    40911,
+    40912,
+    40913,
+    40914,
+    40916,
+    40917,
     41301,
     42901,
     50300,
-    50301,  # 2026-08-13 新增：termination_unconfirmed（revoke 外部终止未确认，可重试）
+    50301,
+    50302,
+    50303,
     50401,
 }
 ADRS = range(13, 19)
@@ -65,7 +86,7 @@ def test_openapi_locks_control_plane_capabilities_and_error_codes() -> None:
     assert set(document["paths"]) == {op[1] for op in EXPECTED_OPERATIONS}
     operations = _operation_set(document)
     assert operations == EXPECTED_OPERATIONS
-    assert len(operations) == 9
+    assert len(operations) == 15
     assert set(document["components"]["schemas"]["ErrorCode"]["enum"]) == EXPECTED_ERROR_CODES
 
 

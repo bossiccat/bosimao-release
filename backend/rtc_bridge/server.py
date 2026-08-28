@@ -13,6 +13,11 @@ from typing import Any, Awaitable, Callable
 
 import websockets
 
+from .drain_ack import (
+    DrainAcknowledger, TerminationRegistry, build_ack_reporter,
+    parse_note_termination,
+)
+from .redemption import HelloRedemptionClient, HelloRedemptionError, validate_hello
 from .session import PeerVoiceSession
 from app.brain.agent_thread_registry import AgentThreadRegistry
 from app.voice.qwen_realtime_bridge import QwenRealtimeBridge
@@ -31,9 +36,27 @@ class BridgeServer:
         on_voice_intent: Callable[[str], Awaitable[None]] | None = None,
         thread_registry: AgentThreadRegistry | None = None,
         worker_runner: HermesWorkerRunner | None = None,
+        *,
+        redemption=None,
+        ack_reporter=None,
     ) -> None:
         self.cfg = cfg
         self.state = state                       # 指标/健康共享字典（health.py 读取）
+        self._redemption = redemption or HelloRedemptionClient(
+            base_url=cfg.control_plane_base_url,
+            service_credential=cfg.control_plane_service_credential,
+            ca_file=cfg.control_plane_ca_file,
+            client_cert_file=cfg.control_plane_client_cert_file,
+            client_key_file=cfg.control_plane_client_key_file,
+            gateway_assertion=cfg.control_plane_gateway_assertion,
+            connect_timeout_s=cfg.control_plane_connect_timeout_s,
+            total_timeout_s=cfg.control_plane_total_timeout_s,
+        )
+        self._ack_reporter = build_ack_reporter(cfg, ack_reporter)
+        # 终止上下文注册表：sidecar 经 WS ctrl note_termination 中继注入；
+        # 无注入 → drain 时不上报（跳过，不硬编码）。
+        self._terminations = TerminationRegistry()
+        self._drain_ack: DrainAcknowledger | None = None
         self._ws: Any = None
         self._session: PeerVoiceSession | None = None
         self._session_id = ""
@@ -47,6 +70,7 @@ class BridgeServer:
             state.setdefault("worker_feature_flags", flags_fn())
         self._worker_tasks: dict[str, asyncio.Task] = {}
         self._command_consumer: asyncio.Task | None = None
+        self._activation_lock = asyncio.Lock()
 
     async def start_command_consumer(self, interval: float = 0.2) -> None:
         """Start durable approval command polling; safe to call after restart."""
@@ -99,60 +123,58 @@ class BridgeServer:
     def sidecar_connected(self) -> bool:
         return self._ws is not None and self._session is not None
 
+    def note_termination(self, session_id: str, termination_id: str) -> None:
+        """进程内注入终止上下文（与 WS ctrl 中继等价的接缝，测试/未来接线用）。"""
+        self._terminations.note(session_id, termination_id)
+
     async def _send(self, msg: dict) -> None:
         """向当前 sidecar 发送 JSON（带锁；连接断开时静默失败）"""
-        ws = self._ws
+        await self._send_to(self._ws, msg)
+
+    async def _send_to(self, ws, msg: dict) -> None:
         if ws is None:
             raise ConnectionError("sidecar 未连接")
         async with self._send_lock:
             await ws.send(json.dumps(msg, ensure_ascii=False))
 
     async def handler(self, ws) -> None:
-        # 顶替旧连接（MVP 单 sidecar）——必须先接管 self._ws 再 close 旧连接：
-        # 否则 await old.close() 握手期间 self._ws 仍指向旧连接，旧 handler 的 finally
-        # 清理会通过身份检查误伤新连接（压测 S6 实锤的顶替竞态窗口）。
-        old = self._ws
-        old_session = self._session
-        self._ws = ws
-        if old is not None and old is not ws:
-            try:
-                await old.close(code=1000, reason="replaced")
-            except Exception:  # noqa: BLE001
-                pass
-        # 旧 session 显式释放（旧 handler 的 _cleanup 会因身份检查跳过，这里必须兜底，防泄漏）
-        if old_session is not None:
-            try:
-                await old_session.close()
-            except Exception:  # noqa: BLE001
-                pass
-            self._session = None
         logger.info("sidecar ws connected %s", ws.remote_address)
 
         try:
             # 首帧 hello
             raw = await asyncio.wait_for(ws.recv(), timeout=10)
             hello = json.loads(raw)
-            if hello.get("type") != "hello":
-                await self._send({"type": "ctrl", "action": "exit", "reason": "bad_hello"})
-                return
-            session_id = hello.get("session_id")
-            device_id = hello.get("device_id")
-            room_id = hello.get("room_id")
-            if not all(
-                isinstance(value, str) and bool(value.strip())
-                for value in (session_id, device_id, room_id)
-            ):
-                await self._send(
-                    {"type": "ctrl", "action": "exit", "reason": "invalid_session_hello"}
+            try:
+                hello = validate_hello(hello)
+            except HelloRedemptionError:
+                await self._send_to(
+                    ws, {"type": "ctrl", "action": "exit", "reason": "invalid_session_hello"}
                 )
                 return
+            try:
+                await self._redemption.redeem(hello)
+            except Exception:  # noqa: BLE001 - any redemption failure is fail-closed
+                logger.warning("sidecar hello redemption rejected")
+                await self._send_to(
+                    ws, {"type": "ctrl", "action": "exit", "reason": "hello_redemption_failed"}
+                )
+                return
+            session_id = hello["session_id"]
+            device_id = hello["device_id"]
+            room_id = hello["room_id"]
             sdk_version = hello.get("sdk_version", "")
-            self.state["sidecar_sdk_version"] = sdk_version
 
-            self._session = PeerVoiceSession(
+            # 终止上下文上报器先于会话创建（APM 取消回调需引用）
+            drain_ack = DrainAcknowledger(
+                session_id=session_id, device_id=device_id, room_id=room_id,
+                generation=hello["generation"], reporter=self._ack_reporter,
+                terminations=self._terminations,
+            )
+
+            candidate = PeerVoiceSession(
                 device_id=device_id,
                 room_id=room_id,
-                send_msg=self._send,
+                send_msg=lambda msg: self._send_to(ws, msg),
                 apm_api_url=self.cfg.apm_api_url,
                 apm_system_prompt=self.cfg.apm_system_prompt,
                 apm_token=self.cfg.apm_token,
@@ -170,14 +192,48 @@ class BridgeServer:
                 down_max_bytes=self.cfg.down_max_bytes,
                 down_max_frame_age_ms=self.cfg.down_max_frame_age_ms,
                 on_voice_intent=self._on_voice_intent,
+                on_apm_cancelled=lambda clean: drain_ack.report_apm_cancel(
+                    closed_cleanly=clean
+                ),
             )
-            await self._session.start()
-            self._session_id = session_id
-            self.state["room_id"] = room_id
-            self.state["device_id"] = device_id
-            self.state["sidecar_connected"] = True
-            self.state["_session_ref"] = self._session   # health /metrics 读取实时指标
-            await self._send({"type": "ready"})
+            try:
+                await candidate.start()
+            except Exception:
+                try:
+                    await candidate.close()
+                except Exception:  # noqa: BLE001
+                    logger.debug("candidate session cleanup failed", exc_info=True)
+                raise
+            async with self._activation_lock:
+                old = self._ws
+                old_session = self._session
+                old_drain_ack = self._drain_ack
+                self._ws = ws
+                self._session = candidate
+                self._drain_ack = drain_ack
+                self._session_id = session_id
+                self.state["sidecar_sdk_version"] = sdk_version
+                self.state["room_id"] = room_id
+                self.state["device_id"] = device_id
+                self.state["sidecar_connected"] = True
+                self.state["_session_ref"] = candidate   # health /metrics 读取实时指标
+            if old is not None and old is not ws:
+                try:
+                    await old.close(code=1000, reason="replaced")
+                except Exception:  # noqa: BLE001
+                    logger.debug("best-effort bridge cleanup failed", exc_info=True)
+            if old_session is not None and old_session is not candidate:
+                try:
+                    await old_session.close()
+                except Exception:  # noqa: BLE001
+                    logger.debug("best-effort bridge cleanup failed", exc_info=True)
+                # 旧会话被顶替 = 它的 drain 已发生 → 补一次上报（fire-once 幂等）
+                if old_drain_ack is not None:
+                    try:
+                        await old_drain_ack.report_drain(closed_cleanly=True)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("replaced drain ack failed", exc_info=True)
+            await self._send_to(ws, {"type": "ready"})
 
             # 接收循环
             async for raw in ws:
@@ -256,8 +312,26 @@ class BridgeServer:
                 await session.on_peer_enter(user_id)
             elif state == "leave":
                 await session.on_peer_leave(user_id)
+        elif mtype == "ctrl":
+            self._handle_sidecar_ctrl(msg)
         else:
             logger.debug("ignored sidecar msg type=%s", mtype)
+
+    def _handle_sidecar_ctrl(self, msg: dict) -> None:
+        """sidecar 上行 ctrl：note_termination 终止上下文中继（fail-safe）。
+
+        仅接受与当前活动会话匹配的注入；畸形/不匹配只记 debug，不影响主链路。
+        """
+        parsed = parse_note_termination(msg)
+        if parsed is None:
+            logger.debug("ignored sidecar ctrl type=%s action=%s",
+                         msg.get("type"), msg.get("action"))
+            return
+        session_id, termination_id = parsed
+        if session_id != self._session_id or self._session is None:
+            logger.debug("note_termination session mismatch sid=%s", session_id)
+            return
+        self._terminations.note(session_id, termination_id)
 
     async def _cleanup(self, ws) -> None:
         # 身份检查：仅当 self._ws 仍指向本 handler 的连接时才清理。
@@ -269,11 +343,27 @@ class BridgeServer:
         self.state["_session_ref"] = None
         self.state["room_id"] = ""
         self.state["device_id"] = ""
+        closed_cleanly = True
         if self._session is not None:
-            await self._session.close()
+            try:
+                await self._session.close()
+            except Exception:  # noqa: BLE001
+                closed_cleanly = False
+                logger.debug("session close failed during drain", exc_info=True)
             self._session = None
+        drain_ack = self._drain_ack
+        self._drain_ack = None
         self._ws = None
         self._session_id = ""
+        if drain_ack is not None:
+            try:
+                await drain_ack.report_drain(
+                    closed_cleanly=closed_cleanly,
+                    error_code=None if closed_cleanly
+                    else "bridge_session_close_failed",
+                )
+            except Exception:  # noqa: BLE001 - 上报绝不影响清理与主链路
+                logger.debug("drain acknowledgement failed", exc_info=True)
 
     async def terminate_device(self, device_id: str,
                                session_ids: list[str]) -> list[str]:
@@ -288,7 +378,7 @@ class BridgeServer:
         try:
             await self._send({"type": "ctrl", "action": "exit", "reason": "device_revoked"})
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("device revoke notification failed", exc_info=True)
         await ws.close(code=1008, reason="device revoked")
         await self._cleanup(ws)
         return [session_id]

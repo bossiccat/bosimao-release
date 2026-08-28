@@ -103,7 +103,7 @@ pytest_*.txt
 .cargo-target-*/
 gradle-home*/
 META-INF/
-net/
+/net/
 
 # 审计临时
 audit-*.json

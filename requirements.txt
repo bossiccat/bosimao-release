@@ -1,33 +1,37 @@
-# 贾克斯模式 - 后端 Python 依赖
-# 精确版本来自项目 .venv 的实际已解析环境（2026-08-07），禁止范围版本。
-
+# Backend Python dependencies. Exact versions are frozen by contract tests.
 fastapi==0.141.1
 uvicorn[standard]==0.52.1
 pydantic==2.13.4
 pydantic-settings==2.14.2
 pyyaml==6.0.3
 
-# 窗口捕获
+# Window capture
 windows-capture==2.0.0
 psutil==7.2.2
 pywin32==312
 pillow==12.3.0
 numpy==2.4.6
 
-# 语音（V1.1）
+# Voice
 silero-vad==6.2.1
 sherpa-onnx==1.13.2
 edge-tts==7.2.8
 sounddevice==0.5.5
 soundfile==0.14.0
 
-# 模型客户端
+# Model clients
 httpx==0.28.1
 websockets==17.0.1
 
-# 中继端到端加密
+# Security and proof signing
 cryptography==50.0.0
+PyJWT==2.10.1
 
-# 测试
+# OpenAPI contract validation
+jsonschema==4.26.0
+openapi-schema-validator==0.9.0
+openapi-spec-validator==0.9.0
+
+# Tests
 pytest==9.1.1
 pytest-asyncio==1.4.0

@@ -152,6 +152,11 @@ class ApmBridge:
                     await self._on_state("reconnected")
             return ok
 
+    @property
+    def started(self) -> bool:
+        """APM 实时会话是否已真实建立（懒初始化完成后为 True）"""
+        return self._started
+
     async def start(self) -> None:
         """连接 API + 会话初始化 + 启动接收循环（阻塞直到就绪）"""
         self._ws, self._session_id = await connect_and_handshake(

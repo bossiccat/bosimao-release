@@ -83,7 +83,9 @@ test('SIGTERM 后 Electron 主进程退出', { timeout: 60000 }, async () => {
   const childEnv = {
     ...process.env,
     ELECTRON_DISABLE_SECURITY_WARNINGS: 'true',
+    NODE_EXTRA_CA_CERTS: path.resolve(SIDECAR, '..', 'certs', 'ca.crt'),
     VOICE_SIDECAR_CREDENTIAL: 'test-only-sidecar-credential-value',
+    NODE_EXTRA_CA_CERTS: path.join(SIDECAR, '..', 'certs', 'ca.crt'),
   };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   delete childEnv.NODE_OPTIONS;

@@ -8,6 +8,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -15,6 +17,8 @@ from app.api.routes_voice import create_secured_voice_router
 from app.voice.auth import CredentialValidator
 from app.voice.config import VoiceSecurityConfig, build_sidecar_credential_hashes
 from app.voice.devices import DeviceService, RevokeTerminationError
+from app.voice.hello_proof import HelloProofSigner
+from app.voice.hello_service import HelloProofService
 from app.voice.nonce import NonceService
 from app.voice.rate_limit import RateLimitConfig, RateLimiter
 from app.voice.rtc_session import RtcSessionConfig, RtcSessionService
@@ -59,6 +63,19 @@ def _fixture(tmp_path: Path) -> tuple[VoiceStore, TestClient]:
         trtc_secret_key=TRTC_SECRET,
         rtc_termination_enabled=True,
     )
+    private_key = Ed25519PrivateKey.generate()
+    private_pem = private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    public_pem = private_key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+    hello_service = HelloProofService(
+        store.hello_proofs, HelloProofSigner(private_pem), public_pem
+    )
     app = FastAPI()
     app.include_router(create_secured_voice_router(
         store=store,
@@ -69,6 +86,8 @@ def _fixture(tmp_path: Path) -> tuple[VoiceStore, TestClient]:
         nonces=NonceService(store),
         limiter=RateLimiter(store, RateLimitConfig(device_limit=1000, ip_limit=1000)),
         security=security,
+        hello_service=hello_service,
+        hello_certificate_binding="sha256:test-gateway-binding",
     ))
     return store, TestClient(app)
 

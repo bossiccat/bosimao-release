@@ -65,10 +65,13 @@ class PeerVoiceSession:
         down_max_bytes: int = 200 * 640,
         down_max_frame_age_ms: int = 1000,
         on_voice_intent: Callable[[str], Awaitable[None]] | None = None,
+        on_apm_cancelled: Callable[[bool], Awaitable[None]] | None = None,
     ) -> None:
         self.device_id = device_id
         self.room_id = room_id
         self._send_msg = send_msg
+        # APM 会话被取消关闭后的回调（apm_cancelled_closed 上报钩子；可空）
+        self._on_apm_cancelled = on_apm_cancelled
         self._apm_api_url = apm_api_url
         self._apm_system_prompt = apm_system_prompt
         self._apm_token = apm_token
@@ -410,17 +413,21 @@ class PeerVoiceSession:
         self._peer_entered = False
         self._peer_user_id = ""
         logger.info("peer leave device=%s peer=%s", self.device_id, user_id)
+        closed_cleanly = True
         try:
             await self.apm.close()
         except Exception as e:  # noqa: BLE001
             logger.warning("apm close on peer leave failed: %s", e)
+            closed_cleanly = False
         self.stats["apm_session_state"] = "closed"
+        await self._notify_apm_cancelled(closed_cleanly)
 
     # ---------- 关闭 ----------
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        closed_cleanly = True
         self._standby = False
         self._standby_pending = False
         if self._router is not None:
@@ -428,7 +435,8 @@ class PeerVoiceSession:
         try:
             await self.apm.close()
         except Exception:  # noqa: BLE001
-            pass
+            closed_cleanly = False
+        await self._notify_apm_cancelled(closed_cleanly)
         await self.shaper.stop()
         if self._consumer is not None:
             self._consumer.cancel()
@@ -437,3 +445,12 @@ class PeerVoiceSession:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         logger.info("rtc session closed device=%s", self.device_id)
+
+    async def _notify_apm_cancelled(self, closed_cleanly: bool) -> None:
+        """APM 取消关闭后回调上报钩子：仅当 APM 曾真实激活；失败不冒泡"""
+        if self._on_apm_cancelled is None or not getattr(self.apm, "started", False):
+            return
+        try:
+            await self._on_apm_cancelled(closed_cleanly)
+        except Exception:  # noqa: BLE001
+            logger.debug("apm cancelled callback failed", exc_info=True)

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from app.voice.timefmt import iso8601_to_epoch
 from app.voice.usersig import parse_user_sig
 from .voice_security_fixture import (
     DEVICE_A,
@@ -60,7 +61,8 @@ def test_session_valid_device_and_nonce_returns_201(fx: _Fixture) -> None:
     assert int(data["sdk_app_id"]) == FAKE_SDK_APP_ID
     assert parse_user_sig(data["user_sig"])["TLS.identifier"] == DEVICE_A
     assert int(parse_user_sig(data["user_sig"])["TLS.expire"]) <= 600
-    assert data["expires_at"] > time.time()
+    # OpenAPI SessionData.expires_at 为 date-time 字符串；解析后比较
+    assert iso8601_to_epoch(data["expires_at"]) > time.time()
 
 
 def test_device_a_credential_cannot_request_device_b(fx: _Fixture) -> None:
@@ -121,10 +123,71 @@ def test_sidecar_sign_success(fx: _Fixture) -> None:
     )
     assert resp.status_code == 201
     data = resp.json()["data"]
-    assert data["room_id"] == f"jax-{DEVICE_A}"
+    assert data["session_id"] == claim["session_id"]
+    assert data["generation"] == claim["generation"]
+    assert data["room_id"] == claim["room_id"] == f"jax-{DEVICE_A}"
     assert data["user_id"] == "jax-pc-sidecar"
     assert parse_user_sig(data["user_sig"])["TLS.identifier"] == "jax-pc-sidecar"
     assert int(parse_user_sig(data["user_sig"])["TLS.expire"]) <= 600
+    assert data["hello_expires_at"].endswith("Z")
+    assert data["hello"] == {
+        **data["hello"],
+        "type": "hello",
+        "session_id": claim["session_id"],
+        "device_id": claim["device_id"],
+        "room_id": claim["room_id"],
+        "sidecar_user_id": "jax-pc-sidecar",
+        "generation": claim["generation"],
+        "protocol_version": "1.0",
+    }
+    assert set(data["hello"]) == {
+        "type", "proof", "nonce", "jti", "session_id", "device_id", "room_id",
+        "sidecar_user_id", "generation", "protocol_version", "audio_format",
+    }
+    with fx.store.connect() as conn:
+        state = conn.execute(
+            "SELECT state FROM control_plane_sessions WHERE session_id = ?",
+            (claim["session_id"],),
+        ).fetchone()[0]
+    assert state == "ENTERING"
+
+
+def test_proof_insert_failure_rolls_back_claim_and_session_state(fx: _Fixture) -> None:
+    second_claim = fx.create_pending_claim()
+    with fx.store.connect() as conn:
+        conn.execute(
+            "CREATE TRIGGER fail_hello_insert BEFORE INSERT ON control_plane_hello_proofs "
+            "BEGIN SELECT RAISE(ABORT, 'forced proof insert failure'); END"
+        )
+        conn.commit()
+    failed = fx.client.post(
+        "/api/v1/voice/session/sign",
+        json=fx.sign_payload(second_claim),
+        headers={"Authorization": f"Bearer {SIDECAR_SECRET}", "X-Request-Nonce": _nonce()},
+    )
+    assert failed.status_code == 503
+    assert failed.json()["code"] == 50303
+    with fx.store.connect() as conn:
+        claim_state = conn.execute(
+            "SELECT signed_at FROM pending_session_claims WHERE session_id = ?",
+            (second_claim["session_id"],),
+        ).fetchone()
+        session_state = conn.execute(
+            "SELECT state FROM control_plane_sessions WHERE session_id = ?",
+            (second_claim["session_id"],),
+        ).fetchone()
+    assert claim_state["signed_at"] is None
+    assert session_state["state"] == "SIGNING"
+
+    with fx.store.connect() as conn:
+        conn.execute("DROP TRIGGER fail_hello_insert")
+        conn.commit()
+    retried = fx.client.post(
+        "/api/v1/voice/session/sign",
+        json=fx.sign_payload(second_claim),
+        headers={"Authorization": f"Bearer {SIDECAR_SECRET}", "X-Request-Nonce": _nonce()},
+    )
+    assert retried.status_code == 201
 
 
 def test_current_and_next_both_sign_with_unchanged_response(tmp_path: Path) -> None:

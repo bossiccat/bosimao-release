@@ -179,11 +179,9 @@ class Settings(BaseSettings):
 
     backend_port: int = 8000
 
-    # 应用版本号（崩溃诊断落盘用，可经 .env APP_VERSION 覆盖）
     app_version: str = "1.0.0"
 
-    # TLS 商业级安全底座（2026-08-13）：证书路径由 .env 注入，空 = 明文（开发态）
-    # 生产（voice_production=true）必须同时配置 cert/key 并在 uvicorn 启用 HTTPS/WSS。
+    # Production voice requires both TLS paths and HTTPS/WSS uvicorn configuration.
     tls_certfile: str = ""     # 服务端证书（如 certs/server.crt）
     tls_keyfile: str = ""      # 服务端私钥（如 certs/server.key）
     tls_ca_certfile: str = ""  # CA 根证书（四端信任分发用，如 certs/ca.crt）
@@ -192,27 +190,22 @@ class Settings(BaseSettings):
     ntfy_server: str = "https://ntfy.sh"
     ntfy_topic: str = ""
 
-    # 飞书（O-002 主通道）：webhook/自建应用凭据仅存 .env，禁止入库/日志
     feishu_webhook_url: str = ""
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
 
-    # DeepSeek（V1.5 大脑，O-011/O-013）：key 仅存 .env，禁止入库/日志
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_model: str = "deepseek-v4-flash"
 
-    # voice 网关鉴权（mobile-voice-spec §7/§8）：仅存 .env，禁止入库/日志
     voice_token: str = ""
     # LAN 直连 E2EE 密钥（32B base64 或明文 passphrase，SHA-256 派生；App VoiceCipher 对齐）
     voice_e2ee_key: str = ""
 
-    # TRTC 实时音视频（ADR-012 / PC-INTEGRATION §2.3）：仅存 .env，禁止入库/日志
     trtc_sdkappid: int = 0
     trtc_secretkey: str = ""
     trtc_room_prefix: str = "jax-"
 
-    # 商业语音安全（ADR-014 fail-closed）：仅存 .env，禁止入库/日志
     voice_db_path: str = str(PROJECT_ROOT / "backend" / "data" / "voice.db")
     voice_owner_credential: str = ""      # 本机 owner 凭证（配对码生成用）
     voice_sidecar_credential: str = ""    # 独立 sidecar 当前凭证（不得与 device 复用）
@@ -222,6 +215,13 @@ class Settings(BaseSettings):
     voice_sidecar_config_revision: str = ""
     voice_production: bool = False        # 生产模式：缺 TLS/validator/限流/TRTC 任一拒绝启动
     voice_tls_enabled: bool = False       # 生产必须 TLS；http/ws 明文端点视为缺失
+    # 方案 B ack 上报服务凭证（契约 brainService/rtcBridgeService；仅 .env）
+    voice_brain_service_credential: str = ""   # Brain ingress/outbox 上报 brain_turns_sealed
+    voice_rtc_bridge_credential: str = ""      # bounded rtc_bridge 上报 A3/A4
+    voice_hello_private_key_pem: str = ""       # CP-only Ed25519 PKCS8 PEM
+    voice_hello_public_key_pem: str = ""        # rtc_bridge redemption verifier PEM
+    voice_rtc_bridge_cert_binding: str = ""     # trusted gateway derived certificate binding
+    voice_gateway_shared_assertion: str = ""    # internal gateway assertion, never client-derived
 
     log_level: str = "INFO"
 

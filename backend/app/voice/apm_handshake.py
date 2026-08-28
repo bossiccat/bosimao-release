@@ -23,6 +23,7 @@ async def connect_ws(api_url: str, token: str) -> Any:
     # 绕过系统代理：本机 Clash(127.0.0.1:7890) 未运行会劫持全部外连（2026-08-05 实测）
     for k in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
         os.environ.pop(k, None)
+
     import websockets
 
     headers = {"Authorization": f"Bearer {token}"} if token else None

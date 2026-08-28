@@ -17,7 +17,9 @@ const { controlPlaneHeaders } = require('./security');
 const { requestRendererExit } = require('./exit-protocol');
 const { startPollingRuntime } = require('./rtc-startup');
 const { selectPendingIntent } = require('./intent-selection');
+const { CMD_ID_TERMINATE, makeTerminationCmdHandler } = require('./rtc-termination');
 const { frameToS16Mono16k, makeAudioFrame16k } = require('./audio');
+const { injectTestAudio } = require('./rtc-test-audio');
 const TRTCCloud = require('trtc-electron-sdk').default;
 const { TRTCParams, TRTCAppScene } = require('trtc-electron-sdk');
 
@@ -64,7 +66,12 @@ function runSidecar() {
       if (action === 'exit' && !exited) exitSidecar(reason || 'ctrl_exit');
       // E2E 测试（v0.6.4）：注入 2s 440Hz 测试音频上行 → TRTC 分发给手机端，
       // 用于验证「AI 音频 → 手机端播放」链路（手机端 DiagLog 应出现 firstAudioFrame/voiceVolume）
-      if (action === 'test_audio') injectTestAudio();
+      if (action === 'test_audio') injectTestAudio(cloud, makeAudioFrame16k, log);
+    },
+    () => {
+      currentRoom = null;
+      log('WS', 'rtc_bridge disconnected; one-time hello discarded');
+      exitSidecar('bridge_disconnected');
     },
   );
   // 远端音频回调 → 16k s16 → WS 上行
@@ -123,6 +130,7 @@ function runSidecar() {
     if (ARGS.role === 'sidecar' && !exited) {
       log('ROOM', '对端已离开，退房回待命（保持轮询）');
       currentRoom = null;
+      currentSessionId = null; // Task #23：清对账键，此后终止通知退化为 no-op
       if (bridge) bridge.clearSession();
       try { cloud.exitRoom(); } catch (e) { /* ignore */ }
     }
@@ -144,6 +152,13 @@ function runSidecar() {
   cloud.on('onUserSigExpired', () => {
     log('SIG', 'userSig 过期回调；由 rtc_bridge 侧重新签发后重进房（MVP 记录日志）');
   });
+  // Task #23：手机端退房前的终止通知（cmdId=1）→ bridge.noteTermination 中继 rtc_bridge。
+  // fail-safe：畸形消息/无 bridge 一律静默，见 rtc-termination.js。
+  cloud.on('onRecvCustomCmdMsg', makeTerminationCmdHandler(
+    () => bridge,
+    () => currentSessionId,
+    log,
+  ));
 
   // v0.6.1：进房由意图轮询 pollAndJoin 触发（不再启动即进房）
 
@@ -157,14 +172,20 @@ function runSidecar() {
 
 // ---------- 意图轮询（v0.6.1）：PC 不知道手机 device_id，枚举 pending 进对应房间 ----------
 let currentRoom = null;
+let currentSessionId = null; // Task #23：当前会话 ID（terminate 中继对账键；进房赋值/离开清空）
 let pollingBusy = false;
 
-async function fetchSigForDevice(deviceId) {
+async function fetchSigForDevice(intent) {
   // sign_for_sidecar 会消费意图（防重复进房），返回同一房间的 PC userSig
   const resp = await fetch(`${ARGS.signUrl}/api/v1/voice/session/sign`, {
     method: 'POST',
     headers: controlPlaneHeaders({ credential: config.sidecarCredential }),
-    body: JSON.stringify({ device_id: deviceId, user_id: config.SIDECAR_USER_ID }),
+    body: JSON.stringify({
+      session_id: intent.session_id,
+      claim_token: intent.claim_token,
+      device_id: intent.device_id,
+      user_id: config.SIDECAR_USER_ID,
+    }),
   });
   const parsed = await resp.json();
   if (parsed.code === 0 && parsed.data && parsed.data.user_sig) {
@@ -192,19 +213,14 @@ async function pollAndJoin() {
       try { cloud.exitRoom(); } catch (e) { /* ignore */ }
       await new Promise(r => setTimeout(r, 600));
     }
-    const cred = await fetchSigForDevice(intent.device_id);
+    const cred = await fetchSigForDevice(intent);
     if (cred.room_id !== intent.room_id) {
       if (bridge) bridge.clearSession();
       throw new Error('SIDECAR_SESSION_ROOM_MISMATCH');
     }
-    bridge.startSession({
-      session_id: intent.session_id || intent.room_id, // 云端 v1.2 前老意图缺省回落 room_id
-      device_id: intent.device_id,
-      room_id: cred.room_id,
-      user_id: cred.user_id,
-      sdk_version: getSdkVersion(),
-    });
+    bridge.startSession(cred.hello);
     currentRoom = cred.room_id;
+    currentSessionId = cred.hello.session_id; // Task #23：终止通知对账键
     enterRoom(cred);
   } catch (e) {
     log('ERR', `意图轮询失败: ${e.message}`);
@@ -215,6 +231,7 @@ function exitSidecar(reason) {
   if (exited) return;
   exited = true;
   log('ROOM', `退出 sidecar（reason=${reason}）`);
+  currentSessionId = null; // Task #23：进程退出前清对账键
   try { cloud.exitRoom(); } catch (e) { /* ignore */ }
   if (bridge) bridge.close();
   setTimeout(() => requestRendererExit('controlled'), 400);
@@ -222,48 +239,6 @@ function exitSidecar(reason) {
 
 function getSdkVersion() {
   try { return cloud.getSDKVersion(); } catch (e) { return 'unknown'; }
-}
-
-/**
- * E2E 测试音频注入：生成 2s 440Hz 正弦波（16k s16 mono，模型侧契约），
- * 经 sendCustomAudioData 上行 → TRTC 分发给手机端，验证下行播放链路。
- * 手机端 DiagLog 应记录 firstAudioFrame + voiceVolume > 0。
- */
-function injectTestAudio() {
-  try {
-    const seconds = 2;
-    const sampleRate = 16000; // 实际 SDK 契约支持 16000（Task 9 以 d.ts 为准）
-    const freq = 440;
-    const n = seconds * sampleRate;
-    const buf = Buffer.alloc(n * 2);
-    for (let i = 0; i < n; i++) {
-      const v = Math.sin(2 * Math.PI * freq * i / sampleRate) * 0.4;
-      buf.writeInt16LE(Math.round(v * 32767), i * 2);
-    }
-    // 16k 20ms 帧 = 640B
-    const frameBytes = 640;
-    const frames = [];
-    for (let i = 0; i + frameBytes <= buf.length; i += frameBytes) {
-      frames.push(buf.slice(i, i + frameBytes));
-    }
-    let sent = 0;
-    const timer = setInterval(() => {
-      try {
-        cloud.sendCustomAudioData(makeAudioFrame16k(frames[sent]));
-        sent += 1;
-        if (sent >= frames.length) {
-          clearInterval(timer);
-          log('TEST', `测试音频注入完成：${frames.length} 帧（${seconds}s 440Hz @16k）`);
-        }
-      } catch (e) {
-        clearInterval(timer);
-        log('ERR', `测试音频注入失败: ${e.message}`);
-      }
-    }, 20);
-    log('TEST', `开始注入测试音频（${frames.length} 帧 @16k）`);
-  } catch (e) {
-    log('ERR', `injectTestAudio 异常: ${e.message}`);
-  }
 }
 
 // ---------- 入口 ----------

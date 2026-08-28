@@ -5,12 +5,16 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.routes_voice import create_secured_voice_router
 from app.voice.auth import CredentialValidator
 from app.voice.config import VoiceSecurityConfig, build_sidecar_credential_hashes
+from app.voice.hello_proof import HelloProofSigner
+from app.voice.hello_service import HelloProofService
 from app.voice.nonce import NonceService
 from app.voice.rate_limit import RateLimitConfig, RateLimiter
 from app.voice.rtc_session import RtcSessionConfig, RtcSessionService
@@ -23,6 +27,8 @@ SECRET_B = "secret-b-0123456789abcdef01234567"
 OWNER_SECRET = "owner-secret-0123456789abcdef0123"
 SIDECAR_SECRET = "sidecar-secret-0123456789abcdef"
 SIDECAR_NEXT_SECRET = "sidecar-next-secret-0123456789ab"
+RTC_BRIDGE_SECRET = "rtc-bridge-secret-0123456789abcdef"
+BRAIN_SECRET = "brain-service-secret-0123456789ab"
 FAKE_SDK_APP_ID = 1600155678
 FAKE_SECRET_KEY = "fake-secret-key-for-test-only-0123456789"
 
@@ -64,6 +70,8 @@ class VoiceSecurityFixture:
             security.owner_credential_hash,
             sidecar_credentials,
             clock=lambda: now,
+            rtc_bridge_credential_hash=CredentialValidator.hash_credential(RTC_BRIDGE_SECRET),
+            brain_service_credential_hash=CredentialValidator.hash_credential(BRAIN_SECRET),
         )
         self.nonces = NonceService(self.store, ttl_seconds=300)
         self.limiter = RateLimiter(
@@ -77,6 +85,21 @@ class VoiceSecurityFixture:
                 room_prefix="jax-",
             )
         )
+        hello_private = Ed25519PrivateKey.generate()
+        private_pem = hello_private.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ).decode()
+        public_pem = hello_private.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        ).decode()
+        self.hello_service = HelloProofService(
+            self.store.hello_proofs,
+            HelloProofSigner(private_pem),
+            public_pem,
+        )
         self.app = FastAPI()
         self.app.include_router(
             create_secured_voice_router(
@@ -86,6 +109,8 @@ class VoiceSecurityFixture:
                 nonces=self.nonces,
                 limiter=self.limiter,
                 security=security,
+                hello_service=self.hello_service,
+                hello_certificate_binding="sha256:test-gateway-binding",
             )
         )
         self.client = TestClient(self.app)
@@ -121,6 +146,13 @@ class VoiceSecurityFixture:
 
     def auth_headers(self, device_id: str, secret: str, nonce: str | None = None) -> dict:
         headers = {"Authorization": f"Bearer {device_id}.{secret}"}
+        if nonce is not None:
+            headers["X-Request-Nonce"] = nonce
+        return headers
+
+    def service_headers(self, secret: str, nonce: str | None = None) -> dict:
+        """服务主体（sidecar/rtc_bridge/brain）静态 Bearer headers。"""
+        headers = {"Authorization": f"Bearer {secret}"}
         if nonce is not None:
             headers["X-Request-Nonce"] = nonce
         return headers
