@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import logging
+from functools import partial
 
 from fastapi import APIRouter, Request
 
 from ..voice.control_plane import IdempotencyConflict, InvalidTerminationState, SessionLedger
+from .guarded_route import GuardedAPIRoute, guarded
 from .routes_voice_wake import build_wake_router
 from .voice_termination_contract import (
     AckReportRequest, KwsReadyRequest, RetryTerminationRequest,
@@ -17,15 +19,16 @@ logger = logging.getLogger(__name__)
 
 def build_termination_router(*, ledger: SessionLedger, guard=None,
                              reporter_resolver=None, rtc_service=None) -> APIRouter:
-    router = APIRouter(tags=["Termination"])
+    # route_class 把守卫提到 solve_dependencies 之前：未认证请求直接 401，
+    # 不会再先走 Pydantic body 校验返回 422（避免泄露 request schema）。
+    router = APIRouter(
+        tags=["Termination"],
+        route_class=partial(GuardedAPIRoute, guard=guard),
+    )
 
     @router.post("/api/v1/voice/sessions/{session_id}/terminate", status_code=202)
-    async def terminate_session(session_id: str, req: TerminateSessionRequest,
-                                request: Request):
-        if guard is not None:
-            denied = guard(request, "terminate")
-            if denied is not None:
-                return denied
+    @guarded("terminate")
+    async def terminate_session(session_id: str, req: TerminateSessionRequest):
         if req.session_id != session_id:
             return error_response(40916)
         try:
@@ -48,11 +51,8 @@ def build_termination_router(*, ledger: SessionLedger, guard=None,
         }, "message": ""}
 
     @router.get("/api/v1/voice/sessions/{session_id}/termination/{termination_id}")
-    async def get_termination(session_id: str, termination_id: str, request: Request):
-        if guard is not None:
-            denied = guard(request, "termination_status")
-            if denied is not None:
-                return denied
+    @guarded("termination_status")
+    async def get_termination(session_id: str, termination_id: str):
         try:
             record = ledger.get_termination(termination_id)
         except InvalidTerminationState as exc:
@@ -68,12 +68,9 @@ def build_termination_router(*, ledger: SessionLedger, guard=None,
         "/api/v1/voice/sessions/{session_id}/termination/{termination_id}/retry",
         status_code=202,
     )
+    @guarded("retry")
     async def retry_termination(session_id: str, termination_id: str,
-                                req: RetryTerminationRequest, request: Request):
-        if guard is not None:
-            denied = guard(request, "retry")
-            if denied is not None:
-                return denied
+                                req: RetryTerminationRequest):
         try:
             record = ledger.retry_termination(
                 session_id=session_id, parent_termination_id=termination_id,
@@ -98,12 +95,9 @@ def build_termination_router(*, ledger: SessionLedger, guard=None,
         "/api/v1/voice/sessions/{session_id}/termination/{termination_id}/acknowledgements",
         status_code=202,
     )
+    @guarded("termination_ack")
     async def report_acknowledgement(session_id: str, termination_id: str,
                                      req: AckReportRequest, request: Request):
-        if guard is not None:
-            denied = guard(request, "termination_ack")
-            if denied is not None:
-                return denied
         if reporter_resolver is None:
             return error_response(50301)
         reporter = reporter_resolver(request)
@@ -135,17 +129,13 @@ def build_termination_router(*, ledger: SessionLedger, guard=None,
         }, "message": ""}
 
     @router.post("/api/v1/voice/sessions/{session_id}/kws-ready", status_code=201)
-    async def report_kws_ready(session_id: str, req: KwsReadyRequest,
-                               request: Request):
+    @guarded("kws_ready")
+    async def report_kws_ready(session_id: str, req: KwsReadyRequest):
         """KWS 就绪上报（device 主体）：TERMINATED(complete) → KWS_READY。
 
         KWS_READY 是 /sessions/wake 的唯一受理前置（OpenAPI：仅 CP 可裁决）。
         重复上报因状态已转移回 40917（账本 can_enter 语义，防 evidence 篡改）。
         """
-        if guard is not None:
-            denied = guard(request, "kws_ready")
-            if denied is not None:
-                return denied
         if req.session_id != session_id:
             return error_response(40916)
         try:

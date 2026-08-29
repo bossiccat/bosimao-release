@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import logging
 import uuid
+from functools import partial
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from ..voice.control_plane import InvalidTerminationState
+from .guarded_route import GuardedAPIRoute, guarded
 from .voice_termination_contract import (
     CODE_MESSAGES, CODE_TO_HTTP, WakeSessionRequest, error_response,
 )
@@ -16,14 +18,15 @@ logger = logging.getLogger(__name__)
 
 
 def build_wake_router(*, ledger, guard=None, rtc_service=None) -> APIRouter:
-    router = APIRouter(tags=["Termination"])
+    # 守卫经 route_class 前置：未认证请求 401 先于 body 校验（见 guarded_route 模块说明）。
+    router = APIRouter(
+        tags=["Termination"],
+        route_class=partial(GuardedAPIRoute, guard=guard),
+    )
 
     @router.post("/api/v1/voice/sessions/wake", status_code=201)
-    async def wake_session(req: WakeSessionRequest, request: Request):
-        if guard is not None:
-            denied = guard(request, "wake")
-            if denied is not None:
-                return denied
+    @guarded("wake")
+    async def wake_session(req: WakeSessionRequest):
         if rtc_service is None:
             logger.error("wake endpoint mounted without rtc_service")
             return error_response(50301)

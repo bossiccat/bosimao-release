@@ -238,7 +238,7 @@ paths:
       tags: [Termination]
       operationId: terminateCommercialVoiceSession
       summary: 发起同代会话的受控终止
-      x-error-codes: [40912, 40916, 50301]
+      x-error-codes: [40101, 40912, 40916, 50301]
       description: |
         仅 device credential 可调用。首次合法请求只可将 ACTIVE 会话推进至 TERMINATING 并返回 202；
         不得在任何 acknowledgement 完成前报告 TERMINATED 或 KWS_READY。同一 request_id 的相同规范化请求
@@ -272,7 +272,7 @@ paths:
       tags: [Termination]
       operationId: getCommercialVoiceTermination
       summary: 查询商业终止聚合结果
-      x-error-codes: [50301]
+      x-error-codes: [40101, 50301]
       description: |
         只有五项 acknowledgement 均为 confirmed 时 result 才可为 complete。partial 或 timeout
         必须保持受限恢复态，禁止客户端将 IDLE、timeout 或局部退出解释为 KWS_READY。
@@ -298,7 +298,7 @@ paths:
       tags: [Termination]
       operationId: retryCommercialVoiceTermination
       summary: 为 partial 或 timeout 父周期创建受审计的子终止周期
-      x-error-codes: [40912, 40913, 40916, 50302]
+      x-error-codes: [40101, 40912, 40913, 40916, 50302]
       x-parent-resource:
         pathTemplate: /api/v1/voice/sessions/{session_id}/termination/{termination_id}
         parentTerminationIdSource: $request.path.termination_id
@@ -342,7 +342,7 @@ paths:
       tags: [Termination]
       operationId: reportCommercialVoiceTerminationAcknowledgement
       summary: 被授权参与方上报单项 terminal acknowledgement
-      x-error-codes: [40901, 50301]
+      x-error-codes: [40101, 40901, 50301]
       description: |
         上报端点本身不改变终止结论；它只接受与账本精确匹配、且来自被授权参与方的
         单项报告。reporter 不由客户端自报，而是由服务端验证的 credential 派生
@@ -397,7 +397,7 @@ paths:
       tags: [Wake]
       operationId: wakeCommercialVoiceSession
       summary: 消费 KWS 唤醒事件并签发下一代全新 TRTC 会话资源
-      x-error-codes: [40913, 40917, 50301]
+      x-error-codes: [40101, 40913, 40917, 50301]
       x-independent-tests:
         - generation_equals_prior_generation_plus_one
         - fresh_session_room_and_user_sig_not_in_previous_resource_refs
@@ -432,7 +432,7 @@ paths:
       tags: [Wake]
       operationId: reportCommercialVoiceKwsReady
       summary: 上报 KWS 重新武装就绪，将会话从 TERMINATED 迁移到 KWS_READY
-      x-error-codes: [40402, 40916, 40917, 50301]
+      x-error-codes: [40101, 40402, 40916, 40917, 50301]
       description: |
         仅 device 主体可上报。仅当 CP 账本中该 (session_id, generation) 处于 TERMINATED
         且 termination result=complete 时可受理；账本以 control_plane_kws_readiness

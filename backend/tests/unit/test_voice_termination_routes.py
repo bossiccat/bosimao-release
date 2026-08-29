@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.voice.control_plane import SessionLedger, VoiceStore
@@ -877,3 +877,88 @@ def test_kws_ready_generation_mismatch_returns_40917(tmp_path: Path) -> None:
 
     assert resp.status_code == 409
     assert resp.json()["code"] == 40917
+
+
+# ---- 鉴权前置顺序（401 必须先于 422） ----
+# 契约要求：未认证请求一律 401，不得先过 Pydantic 校验返回 422——
+# 422 会泄露 request body 的字段名与结构，构成未授权的信息暴露面。
+
+
+def _make_guarded_client(tmp_path: Path) -> tuple[TestClient, SessionLedger]:
+    """构造守卫一律拒绝的客户端，用于验证鉴权先于 body 校验。"""
+    from fastapi.responses import JSONResponse
+
+    from app.api.routes_voice_termination import build_termination_router
+    from app.voice.rtc_session import RtcSessionConfig, RtcSessionService
+
+    def deny_guard(request: Request, op: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=401,
+            content={"code": 40101, "data": None, "message": "unauthorized"},
+        )
+
+    store = VoiceStore(tmp_path / "voice.db")
+    store.initialize()
+    ledger = SessionLedger(store)
+    service = RtcSessionService(
+        RtcSessionConfig(sdk_app_id=1600155678,
+                         secret_key="fake-secret-key-for-test-only-0123456789",
+                         room_prefix="jax-")
+    )
+    app = FastAPI()
+    app.include_router(
+        build_termination_router(ledger=ledger, rtc_service=service,
+                                 guard=deny_guard)
+    )
+    return TestClient(app), ledger
+
+
+def test_guard_precedes_body_validation_on_terminate(tmp_path: Path) -> None:
+    """未认证 + 非法 body → 40101（不是 422 schema 错误）。"""
+    client, ledger = _make_guarded_client(tmp_path)
+    session = _create_session(ledger)
+
+    resp = client.post(
+        f"/api/v1/voice/sessions/{session['session_id']}/terminate",
+        json={"bogus_field": 1},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["code"] == 40101
+
+
+def test_guard_precedes_body_validation_on_kws_ready(tmp_path: Path) -> None:
+    """未认证 + 非法 body → 40101（不是 422 schema 错误）。"""
+    client, ledger = _make_guarded_client(tmp_path)
+    session = _create_session(ledger)
+
+    resp = client.post(
+        f"/api/v1/voice/sessions/{session['session_id']}/kws-ready",
+        json={"bogus_field": 1},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["code"] == 40101
+
+
+def test_guard_precedes_body_validation_on_wake(tmp_path: Path) -> None:
+    """未认证 + 非法 body → 40101（不是 422 schema 错误）。"""
+    client, _ = _make_guarded_client(tmp_path)
+
+    resp = client.post("/api/v1/voice/sessions/wake", json={"bogus_field": 1})
+
+    assert resp.status_code == 401
+    assert resp.json()["code"] == 40101
+
+
+def test_guard_absent_keeps_422_for_invalid_body(tmp_path: Path) -> None:
+    """无守卫（内部直连）时，非法 body 仍须 422——校验语义不得被改动。"""
+    client, ledger = _make_client(tmp_path)
+    session = _create_session(ledger)
+
+    resp = client.post(
+        f"/api/v1/voice/sessions/{session['session_id']}/terminate",
+        json={"bogus_field": 1},
+    )
+
+    assert resp.status_code == 422
