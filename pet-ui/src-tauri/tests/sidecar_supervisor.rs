@@ -294,3 +294,39 @@ fn autostart_toggle_flips_state_and_is_idempotent() {
     assert!(!store.is_enabled());
     assert_eq!(store.toggles, 2);
 }
+
+// ---- 8. RP-07 P0：sidecar 运行期 logs/ 不参与完整性闭集 ----
+
+/// 模拟"启动校验 → sidecar 写日志（logger.js 产物）→ 再次校验"两次迭代，
+/// 第二次 validate_binary 仍必须 PASS（generation 污染缺陷的验收场景）。
+/// 主修复是日志重定向（JAX_SIDECAR_LOG_DIR → app log dir），此处验证
+/// list_runtime_files 对顶层 logs/ 前缀的兜底豁免。
+#[test]
+fn validate_binary_tolerates_runtime_log_pollution_across_iterations() {
+    let fixture = support::sidecar_fixture();
+    let runtime_dir = fixture.integrity.runtime_dir.clone();
+    let s = SidecarSpec {
+        binary_path: fixture.binary_path.clone(),
+        expected_sha256: sha256_of(&fixture.binary_path),
+        integrity: fixture.integrity,
+        args: vec![],
+        // TLS 信任锚路径（ADR-020 A1）：stub 测试不读该文件，用占位路径即可。
+        ca_cert_path: PathBuf::from("certs/ca.crt"),
+        graceful_timeout: Duration::from_secs(5),
+        kill_timeout: Duration::from_secs(10),
+    };
+    let mut sup = SidecarSupervisor::new(s);
+
+    sup.validate_binary().expect("iteration 1: clean validation");
+
+    // 模拟 sidecar 运行期在 runtime 目录写日志（logger.js 的 logs/ 产物）。
+    std::fs::create_dir_all(runtime_dir.join("logs")).expect("mkdir logs");
+    std::fs::write(
+        runtime_dir.join("logs").join("sidecar-sidecar.log"),
+        "iteration-1 log line\n",
+    )
+    .expect("write sidecar log");
+
+    sup.validate_binary()
+        .expect("iteration 2: validation must still pass after log pollution");
+}

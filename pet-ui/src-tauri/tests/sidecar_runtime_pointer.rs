@@ -497,6 +497,48 @@ fn extra_payload_fails_closed() {
     assert!(matches!(error, ResolverError::ExtraPayload(_)), "{error:?}");
 }
 
+// ---- RP-07 P0：sidecar 运行期 logs/ 不参与闭集（logger 污染兜底） ----
+
+#[test]
+fn logs_dir_payload_is_excluded_from_closed_set() {
+    let fixture = RuntimeFixture::build();
+    // 模拟 logger.js 运行期写入（rtc.js / bridge.js 产物均在 logs/ 下）。
+    std::fs::create_dir_all(fixture.generation_dir.join("logs")).expect("mkdir logs");
+    std::fs::write(
+        fixture.generation_dir.join("logs").join("sidecar-sidecar.log"),
+        "run",
+    )
+    .expect("write sidecar log");
+    std::fs::write(fixture.generation_dir.join("logs").join("WS"), "run")
+        .expect("write bridge log");
+    let resolved = fixture
+        .resolve()
+        .expect("logs/ runtime artifacts must not fail closed set");
+    assert_eq!(resolved.generation_root(), fixture.generation_dir);
+    // 闭集仍只含声明的 5 个 payload，logs/ 未混入 expected hashes。
+    assert_eq!(resolved.expected_hashes().len(), 5);
+}
+
+#[test]
+fn repeated_resolve_survives_log_pollution_between_runs() {
+    // 模拟"第一次启动 → sidecar 写日志 → 第二次启动校验"两次迭代：
+    // 第二次 resolve 仍必须 PASS（P0 缺陷的验收场景）。
+    let fixture = RuntimeFixture::build();
+    let first = fixture.resolve().expect("first resolve");
+    let generation_root = first.generation_root().to_path_buf();
+
+    std::fs::create_dir_all(generation_root.join("logs")).expect("mkdir logs");
+    std::fs::write(
+        generation_root.join("logs").join("sidecar-sidecar.log"),
+        "iteration-1",
+    )
+    .expect("write log between runs");
+
+    let second = fixture.resolve().expect("second resolve after log pollution");
+    assert_eq!(second.generation_root(), generation_root);
+    assert_eq!(second.generation(), fixture.generation);
+}
+
 #[test]
 fn payload_hash_mismatch_fails_closed() {
     let fixture = RuntimeFixture::build();

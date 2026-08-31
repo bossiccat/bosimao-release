@@ -379,6 +379,11 @@ fn walk_generation_payload(root: &Path) -> Result<BTreeMap<String, String>, Reso
     let mut files = BTreeMap::new();
     visit(root, root, &mut files)?;
     files.remove("generation.json");
+    // RP-07 P0 兜底（2026-09-01）：sidecar 运行期会在 runtime 目录下生成 logs/
+    //（logger.js / phone.js 等的诊断产物）。主修复是把日志重定向到 app log dir
+    //（JAX_SIDECAR_LOG_DIR）；此处排除可再生运行时产物，防止历史残留导致
+    // ExtraPayload fail-closed。仅豁免顶层 logs/ 前缀，其余路径仍闭集。
+    files.retain(|rel, _| !rel.starts_with("logs/"));
     Ok(files)
 }
 

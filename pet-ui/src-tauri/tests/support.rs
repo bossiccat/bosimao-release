@@ -99,7 +99,7 @@ fn build_fixture(tiny_native: bool) -> SidecarFixture {
         "native_files": native_files,
         "runtime_files": runtime_files,
         "bundle_resources": {
-            "binaries/jax-rtc-sidecar-runtime/": "jax-rtc-sidecar-runtime/",
+            "binaries/jax-rtc-sidecar-runtime/": "jrt/",
         },
     });
     let manifest_path = runtime_dir.join("jax-rtc-sidecar.provenance.json");

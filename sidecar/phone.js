@@ -150,7 +150,8 @@ function runPhone(cloud, log) {
   function exitPhone() {
     if (exited) return;
     exited = true;
-    const out = ARGS.outWav || (__dirname + '/logs/phone_reply.wav');
+    const out = ARGS.outWav
+      || ((process.env.JAX_SIDECAR_LOG_DIR || (__dirname + '/logs')) + '/phone_reply.wav');
     if (replyParts.length > 0) {
       try {
         writeWav16k(out, replyParts);

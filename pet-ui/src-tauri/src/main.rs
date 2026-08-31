@@ -19,21 +19,70 @@ use jax_pet::watchdog::{
 };
 use tauri::{Emitter, Manager};
 
-const SIDECAR_RUNTIME_DIR: &str = "jax-rtc-sidecar-runtime";
+const SIDECAR_RUNTIME_DIR: &str = "jrt";
 const SIDECAR_ARGS: [&str; 1] = ["--role=sidecar"];
 const WATCHDOG_HEALTHY_AFTER: Duration = Duration::from_secs(30);
 const COMPILED_MANIFEST_SHA256: &str = env!("JAX_SIDECAR_MANIFEST_SHA256");
+
+/// 单实例互斥（RP-07 六场景验收缺陷修复，2026-08-31）：
+/// 命名互斥体 `Global\JaxPet.SingleInstance.v1`，第二实例立即静默退出（exit 0）。
+/// 句柄刻意不关闭：进程生命周期内持有，进程退出即由内核释放。
+/// 失败 fail-closed：CreateMutex 失败视为「无法确认唯一性」→ 退出（桌宠宁可不开也不双开）。
+fn acquire_single_instance() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let name_wide: Vec<u16> = "Global\\JaxPet.SingleInstance.v1"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let name = PCWSTR::from_raw(name_wide.as_ptr());
+    unsafe {
+        let handle = match CreateMutexW(None, false, name) {
+            Ok(handle) => handle,
+            Err(error) => {
+                eprintln!("single-instance mutex create failed: {error}");
+                return false;
+            }
+        };
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            let _ = CloseHandle(handle);
+            return false;
+        }
+        if handle.is_invalid() {
+            return false;
+        }
+        std::mem::forget(handle);
+        true
+    }
+}
 
 fn main() {
     // E-1：尽早注册全局 panic hook，任何后续 panic 都先落盘崩溃现场再走默认 hook。
     // 日志目录 setup 阶段注入 app_log_dir；注册时机早于 app 构建，故此处先用兜底目录。
     crash_report::install_panic_hook();
 
+    if !acquire_single_instance() {
+        eprintln!("jax-pet already running (single-instance); exiting");
+        std::process::exit(0);
+    }
+
     tauri::Builder::default()
         .setup(|app| {
             // 注入真实日志目录：app_log_dir()/crash，后续运行时 panic 落盘于此。
             if let Ok(log_dir) = app.path().app_log_dir() {
                 crash_report::set_log_dir(log_dir.join("crash"));
+
+                // RP-07 P0（2026-09-01）：sidecar 运行期日志不得落入 immutable
+                // generation 目录（会破坏完整性闭集校验）。sidecar CWD 指向
+                // generation 目录是 Electron 相对路径解析所必需（见 sidecar.rs
+                // spawn_with_credential 注释），不可更改；故通过环境变量把
+                // logger.js 的输出重定向到 app log dir（sidecar-logs/）。
+                // Command 继承父进程环境，supervisor 后续 spawn 的子进程同样生效。
+                let sidecar_log_dir = log_dir.join("sidecar-logs");
+                let _ = std::fs::create_dir_all(&sidecar_log_dir);
+                std::env::set_var("JAX_SIDECAR_LOG_DIR", &sidecar_log_dir);
             }
 
             // 受信面扩张红线（ADR-020 A2 + 总监裁决）：绝不静默装自签根 CA。
@@ -53,9 +102,12 @@ fn main() {
                 }
             };
             let mut service = SidecarCredentialService::new(WindowsCredentialStore::sidecar());
-            if let Err(error) = service.start_initial(&mut supervisor) {
+            let initial_start_failed = if let Err(error) = service.start_initial(&mut supervisor) {
                 eprintln!("sidecar initial start blocked: {error:?}");
-            }
+                true
+            } else {
+                false
+            };
             app.manage(Mutex::new(supervisor));
             app.manage(Mutex::new(service));
             app.manage(Mutex::new(Watchdog::new(WatchdogConfig {
@@ -65,6 +117,14 @@ fn main() {
             })));
             tray::setup_tray(app)?;
             spawn_watchdog(app.handle().clone());
+            if initial_start_failed {
+                let initial_action = app
+                    .state::<Mutex<Watchdog>>()
+                    .lock()
+                    .map(|mut wd| wd.on_initial_start_failure())
+                    .unwrap_or(WatchdogAction::None);
+                spawn_initial_restart(app.handle().clone(), initial_action);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -126,6 +186,17 @@ fn resolve_sidecar_spec(
     ))
 }
 
+#[derive(Clone, Copy)]
+enum RestartMode {
+    Initial,
+    UnexpectedExit,
+}
+
+/// 首次启动失败后使用与异常退出相同的受控重试预算，避免在 setup 线程阻塞。
+fn spawn_initial_restart(app: tauri::AppHandle, action: WatchdogAction) {
+    std::thread::spawn(move || drive_restart(&app, action, RestartMode::Initial));
+}
+
 /// watchdog 后台线程：code=0 不重启；异常退出/重启失败共享有限退避与熔断。
 fn spawn_watchdog(app: tauri::AppHandle) {
     std::thread::spawn(move || {
@@ -151,21 +222,24 @@ fn spawn_watchdog(app: tauri::AppHandle) {
                 Ok(mut wd) => wd.on_process_exit(code),
                 Err(_) => continue,
             };
-            drive_restart(&app, action);
+            drive_restart(&app, action, RestartMode::UnexpectedExit);
         }
     });
 }
 
-fn drive_restart(app: &tauri::AppHandle, action: WatchdogAction) {
+fn drive_restart(app: &tauri::AppHandle, action: WatchdogAction, mode: RestartMode) {
     let wd = app.state::<Mutex<Watchdog>>();
     let Ok(mut watchdog) = wd.lock() else { return };
     let final_action = drive_restart_policy(&mut watchdog, action, std::thread::sleep, || {
         let sup = app.state::<Mutex<SidecarSupervisor>>();
         let service = app.state::<Mutex<SidecarCredentialService<WindowsCredentialStore>>>();
         let result = match (sup.lock(), service.lock()) {
-            (Ok(mut supervisor), Ok(mut credential_service)) => {
-                credential_service.restart_after_unexpected_exit(&mut supervisor)
-            }
+            (Ok(mut supervisor), Ok(mut credential_service)) => match mode {
+                RestartMode::Initial => credential_service.start_initial(&mut supervisor),
+                RestartMode::UnexpectedExit => {
+                    credential_service.restart_after_unexpected_exit(&mut supervisor)
+                }
+            },
             _ => return Err(()),
         };
         result.map_err(|_| {

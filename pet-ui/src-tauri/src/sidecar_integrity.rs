@@ -212,7 +212,7 @@ fn validate_metadata(
             .bundle_resources
             .get("binaries/jax-rtc-sidecar-runtime/")
             .map(String::as_str)
-            != Some("jax-rtc-sidecar-runtime/")
+            != Some("jrt/")
     {
         return Err(SidecarError::ManifestInvalid);
     }
@@ -258,6 +258,11 @@ fn list_runtime_files(root: &Path, manifest_path: &Path) -> Result<BTreeSet<Stri
     {
         files.remove(excluded);
     }
+    // RP-07 P0 兜底（2026-09-01）：sidecar 运行期在 runtime_dir 下生成的 logs/
+    //（logger.js / phone.js 诊断产物）不属于 provenance 闭集；主修复是日志
+    // 重定向（JAX_SIDECAR_LOG_DIR），此处排除可再生运行时产物防止
+    // RuntimeSetMismatch。仅豁免顶层 logs/ 前缀。
+    files.retain(|relative| !relative.starts_with("logs/"));
     Ok(files)
 }
 
