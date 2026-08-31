@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import signal
+import ssl
 import sys
 import time
 import urllib.request
@@ -25,12 +26,41 @@ from .server import BridgeServer
 logger = logging.getLogger(__name__)
 
 
+def _resolve_brain_ca_file() -> str:
+    """Brain 回调 CA 路径解析：BRAIN_CA_FILE → SSL_CERT_FILE（.env 注入，
+    指向 certs/ca.crt；与 RTC_BRIDGE_CONTROL_PLANE_CA_FILE 同一注入方式）。"""
+    for name in ("BRAIN_CA_FILE", "SSL_CERT_FILE"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _make_brain_callback(api_url: str):
     """创建异步回调：AI 文本 → Brain API /intent 做意图提取。
 
     Brain 不可用时降级为日志（不影响语音会话）。
     """
     base = api_url.rstrip("/")
+    # 对齐 ack_reporter.py / redemption.py：显式构造带 cafile 的 SSL 上下文。
+    # backend :8000 为自签 HTTPS（certs/ca.crt），裸 urlopen 必然
+    # CERTIFICATE_VERIFY_FAILED 且被下方降级分支静默吞掉。
+    ca_file = _resolve_brain_ca_file()
+    ssl_context = None
+    if ca_file:
+        try:
+            ssl_context = ssl.create_default_context(
+                ssl.Purpose.SERVER_AUTH, cafile=ca_file
+            )
+        except OSError as e:
+            logger.warning(
+                "brain CA file unusable (%s): %s; TLS verification disabled (degraded)",
+                ca_file, e,
+            )
+    else:
+        logger.warning(
+            "BRAIN_CA_FILE/SSL_CERT_FILE not set; brain TLS verification disabled (degraded)"
+        )
 
     async def on_voice_intent(text: str) -> None:
         payload = json.dumps({
@@ -44,7 +74,9 @@ def _make_brain_callback(api_url: str):
             method="POST",
         )
         try:
-            resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=5.0)
+            resp = await asyncio.to_thread(
+                urllib.request.urlopen, req, timeout=5.0, context=ssl_context
+            )
             body = json.loads(resp.read())
             task_id = body.get("data", {}).get("task_id", "?")
             logger.info("voice intent routed to brain: task=%s", task_id)
