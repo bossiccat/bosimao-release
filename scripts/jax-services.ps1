@@ -77,9 +77,12 @@ function Test-ProcessAlive([int]$ProcId) {
 }
 function Load-Env {
     # 将 .env 注入进程环境（RELAY_TOKEN / RELAY_E2EE_KEY 等）
+    # -Encoding UTF8 必须显式声明：.env 为 UTF-8 无 BOM，PS5.1 默认按系统 ANSI(GBK)
+    # 解码会把含中文的绝对路径（SSL_CERT_FILE / RTC_BRIDGE_CONTROL_PLANE_* 等）
+    # mojibake 注入子进程（2026-09-01 AC-1 P1 契约 test_loadenv_utf8_no_mojibake_contract）。
     $envFile = Join-Path $Root ".env"
     if (Test-Path $envFile) {
-        Get-Content $envFile | ForEach-Object {
+        Get-Content $envFile -Encoding UTF8 | ForEach-Object {
             if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
                 [Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
             }
@@ -106,21 +109,7 @@ function Invoke-OwnerCredentialProvision {
     Write-Host "[owner-credential][ok] owner credential 已就绪"
     return $true
 }
-# Get-RelayProcesses：见 lib-common.ps1（单一实现，python.exe OR pythonw.exe）
-function Get-RelayTopLevel {
-    # 顶层 relay 实例：父进程不是 relay_client 的进程（排除 .venv 重定向器拉起的子 python）
-    $all = @(Get-RelayProcesses)
-    $allIds = @($all | ForEach-Object { [int]$_.ProcessId })
-    return @($all | Where-Object { $allIds -notcontains [int]$_.ParentProcessId })
-}
-function Stop-AllRelay {
-    # 杀掉 relay_client 全部进程（含 .venv 启动器 + 其子 python），先杀顶层再补漏
-    $rs = @(Get-RelayProcesses)
-    foreach ($r in $rs) { Stop-Process -Id $r.ProcessId -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Milliseconds 800
-    $left = @(Get-RelayProcesses)
-    foreach ($r in $left) { Stop-Process -Id $r.ProcessId -Force -ErrorAction SilentlyContinue }
-}
+# Get-RelayProcesses / Get-RelayTopLevel / Stop-AllRelay：见 lib-common.ps1。
 function Invoke-SvcStart([string]$Name) {
     switch ($Name) {
         "model"      { return Start-ModelService }
@@ -301,16 +290,28 @@ function Start-RelayService {
     $e2eeKey  = $env:RELAY_E2EE_KEY
     if (-not $token)   { Write-Host "[relay][!] RELAY_TOKEN 为空（中继将拒绝配对）" }
     if (-not $e2eeKey) { Write-Host "[relay][!] RELAY_E2EE_KEY 为空（明文模式，手机需匹配）" }
-    # 幂等：已有顶层 relay_client 实例 → 跳过（采纳首个 PID；多实例残留时报告）
+    # 仅一个完整顶层 relay_client 进程树才是幂等成功。多实例会抢占配对码，必须先收敛。
     $existing = @(Get-RelayTopLevel)
-    if ($existing.Count -gt 0) {
-        $ids = ($existing | ForEach-Object { $_.ProcessId }) -join ","
+    if ($existing.Count -eq 1 -and (Test-RelayProcessTree)) {
         Set-PidFile "relay" $existing[0].ProcessId
-        Write-Host "[relay][ok] 已有 relay_client 运行（实例 PID $ids），幂等跳过"
-        if ($existing.Count -gt 1) {
-            Write-Host "[relay][!] 检测到 $($existing.Count) 个 relay_client 实例残留（互相抢占配对码），建议 restart relay 清理"
-        }
+        Write-Host "[relay][ok] 已有唯一 relay_client 实例（PID $($existing[0].ProcessId)），幂等跳过"
         return $true
+    }
+    if ($existing.Count -gt 1) {
+        $ids = ($existing | ForEach-Object { $_.ProcessId }) -join ","
+        Write-Host "[relay][!] 检测到 $($existing.Count) 个 relay_client 实例（PID $ids），先受控收敛"
+        if (-not (Stop-AllRelay)) {
+            Write-Host "[relay][x] relay_client 残留未完全退出，拒绝启动新实例"
+            return $false
+        }
+        if (@(Get-RelayProcesses).Count -ne 0) {
+            Write-Host "[relay][x] relay_client 停止后仍有残留，拒绝启动新实例"
+            return $false
+        }
+        Clear-PidFile "relay"
+    } elseif ($existing.Count -eq 1) {
+        Write-Host "[relay][x] relay_client 进程树不完整，拒绝与残留实例并存启动"
+        return $false
     }
     $oldProcId = Get-PidFile "relay"
     if ($oldProcId -and -not (Test-ProcessAlive $oldProcId)) { Clear-PidFile "relay" }
@@ -386,7 +387,10 @@ function Stop-ServiceByName([string]$Name) {
     if ($Name -eq "relay") {
         $rs = @(Get-RelayProcesses)
         if ($rs.Count -gt 0) {
-            Stop-AllRelay
+            if (-not (Stop-AllRelay)) {
+                Write-Host "[relay][x] relay_client 残留未完全退出"
+                return $false
+            }
             Write-Host "[relay] 已停止全部 relay_client 进程（$($rs.Count) 个，含启动器+子进程）"
             Clear-PidFile "relay"; return $true
         }

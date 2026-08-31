@@ -15,6 +15,7 @@ const {
   generationIdForProvenance,
   parseCurrentPointer,
   parseGenerationId,
+  publishCurrentPointer,
 } = require('../lib/sidecar-runtime-publish');
 
 function tempRoot() {
@@ -45,6 +46,27 @@ test('stable root is never renamed and has the exact protocol layout', () => {
   assert.equal(fs.statSync(path.join(root, 'publish.lock')).isFile(), true);
   assert.equal(fs.statSync(path.join(root, 'reader-gc.lock')).isFile(), true);
   assert.equal(fs.statSync(path.join(root, 'current.json')).isFile(), true);
+});
+
+test('pointer publication on Windows rejects rather than using rename when the native helper is unavailable', { skip: process.platform !== 'win32' }, () => {
+  const runtimeDir = path.join(tempRoot(), 'jax-rtc-sidecar-runtime');
+  const bytes = provenance('native-helper-required');
+  const generation = generationIdForProvenance(bytes);
+  const priorHelper = process.env.SIDECAR_POINTER_REPLACE_HELPER;
+  process.env.SIDECAR_POINTER_REPLACE_HELPER = path.join(runtimeDir, 'missing-helper.exe');
+
+  try {
+    assert.throws(
+      () => publishCurrentPointer({
+        runtimeDir,
+        pointer: createCurrentPointer({ generation, manifestSha256: digest(bytes) }),
+      }),
+      /native pointer replace helper not found/i,
+    );
+  } finally {
+    if (priorHelper === undefined) delete process.env.SIDECAR_POINTER_REPLACE_HELPER;
+    else process.env.SIDECAR_POINTER_REPLACE_HELPER = priorHelper;
+  }
 });
 
 test('generation id is g plus the provenance byte SHA-256', () => {

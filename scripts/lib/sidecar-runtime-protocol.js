@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeImmutableGeneration } = require('./sidecar-runtime-immutable');
+const { replacePointer } = require('./sidecar-pointer-replace');
 
 const GENERATION_RE = /^g-[0-9a-f]{64}$/;
 const HASH_RE = /^[0-9a-f]{64}$/;
@@ -229,7 +230,10 @@ function replaceCurrentPointer(temporaryPath, currentPath, _options = {}) {
   if (path.dirname(temporaryAbsolute) !== path.dirname(currentAbsolute)) {
     fail('temporary and current pointers must share a directory');
   }
-  fs.renameSync(temporaryAbsolute, currentAbsolute);
+  replacePointer({
+    temporaryPath: temporaryAbsolute,
+    currentPath: currentAbsolute,
+  });
   return currentAbsolute;
 }
 

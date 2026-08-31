@@ -1,7 +1,7 @@
 ﻿# ============================================================
 # jax-watchdog.ps1 — 贾克斯三件套自愈 watchdog（单次运行）
 # 触发：计划任务（开机 AtStartup + 每 5 分钟）由 install-scheduled-tasks.ps1 注册
-# 逻辑：检查三件套 → 哪个挂了自动拉起（调用 jax-services.ps1 start <svc>）
+# 逻辑：检查后台服务 → 哪个挂了自动拉起（调用 jax-services.ps1 start <svc>）
 #       → 动作写 logs/watchdog.log（静默成功，不写日志）
 # 中继假死检测：relay_client 日志最近 5 分钟几乎全为错误 → 重启 relay_client
 # 防风暴：每服务 10 分钟内最多重启 3 次，超限写告警不再拉起
@@ -23,6 +23,25 @@ New-Item -ItemType Directory -Force -Path $LogDir, (Split-Path $StateFile) | Out
 # 2026-08-21（审计 A11/A2）：Test-Health（含自签 https 兜底）与 Get-RelayProcesses
 # （python.exe OR pythonw.exe）统一抽取到 lib-common.ps1，与 jax-services.ps1 共用。
 . (Join-Path $PSScriptRoot "lib-common.ps1")
+
+function Test-RelayProcessTree {
+    # 一个顶层 relay_client 与其已识别子进程构成唯一受管实例。
+    $all = @(Get-RelayProcesses)
+    if ($all.Count -eq 0) { return $false }
+    $allIds = @($all | ForEach-Object { [int]$_.ProcessId })
+    $topLevel = @($all | Where-Object { $allIds -notcontains [int]$_.ParentProcessId })
+    if ($topLevel.Count -ne 1) { return $false }
+
+    $knownIds = @([int]$topLevel[0].ProcessId)
+    do {
+        $before = $knownIds.Count
+        $knownIds += @($all | Where-Object {
+            $knownIds -contains [int]$_.ParentProcessId
+        } | ForEach-Object { [int]$_.ProcessId })
+        $knownIds = @($knownIds | Select-Object -Unique)
+    } while ($knownIds.Count -gt $before)
+    return (@($all | Where-Object { $knownIds -notcontains [int]$_.ProcessId }).Count -eq 0)
+}
 
 function Write-WatchLog([string]$msg) {
     $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
@@ -76,9 +95,9 @@ function Record-Restart([string]$svc) {
 # ---------------- 健康检查 ----------------
 # Test-Health / Get-RelayProcesses 已 dot-source lib-common.ps1（单一实现）
 function Test-RelayAlive {
-    # relay_client 进程存在 且 未处于假死错误循环 → 健康
-    $procs = @(Get-RelayProcesses)
-    if ($procs.Count -eq 0) { return $false }
+    # 仅一个完整项目 relay_client 进程树且未处于假死错误循环才健康。
+    # 多顶层实例必须交给 jax-services.ps1 受控收敛，再由 Start-One 的防风暴限制启动。
+    if (-not (Test-RelayProcessTree)) { return $false }
     return (-not (Test-RelayDeadLoop))
 }
 function Test-RelayDeadLoop {
@@ -128,9 +147,8 @@ function Start-One([string]$svc) {
     $healthyAfter = switch ($svc) {
         "model"       { Test-Health "http://127.0.0.1:19080/health" }
         "backend"     { Test-BackendHealth }
-        "relay"       { @(Get-RelayProcesses).Count -gt 0 }
+        "relay"       { Test-RelayAlive }
         "rtc-bridge"  { Test-BridgeHealth }
-        "sidecar"     { Test-SidecarHealthy }
     }
     if ($healthyAfter) {
         Write-WatchLog "[$svc] 拉起成功（复查健康）"
@@ -140,7 +158,7 @@ function Start-One([string]$svc) {
     }
 }
 
-# ---------------- rtc-bridge / sidecar 健康（2026-08-21 补：桌面常驻闭环） ----------------
+# ---------------- rtc-bridge 健康 ----------------
 function Test-BridgeHealth {
     # rtc_bridge 由 pythonw 承载属正常（审计 A10：不做进程名校验，只查 status ok）
     try {
@@ -163,71 +181,17 @@ function Test-BackendHealth {
     return $false
 }
 
-function Test-SidecarConnected {
-    # 仅记录用途：sidecar_connected 语义是"进房+bridge.startSession 后才 true"
-    # （bridge /health 接口），空闲轮询态本来就是 false → 不能作健康判据
-    try {
-        $r = Invoke-RestMethod -Uri "http://127.0.0.1:19093/health" -TimeoutSec 3
-        return ($r.sidecar_connected -eq $true)
-    } catch { return $false }
-}
-
-function Test-SidecarHealthy {
-    # 审计 A1 修复：sidecar 健康 = electron 进程存在（空闲是正常态，不是病态）。
-    # 原实现用 sidecar_connected 判健康 → 每 5 分钟误杀健康空闲 sidecar。
-    return ($null -ne (Get-Process -Name electron -ErrorAction SilentlyContinue))
-}
-
-function Start-Sidecar {
-    # sidecar 不在 jax-services.ps1 里（Electron 启动参数复杂），单独拉起
-    $SidecarDir = Join-Path $Root "sidecar"
-    $Electron   = Join-Path $SidecarDir "node_modules\electron\dist\electron.exe"
-    if (-not (Test-Path $Electron)) { Write-WatchLog "[sidecar] electron.exe 不存在: $Electron"; return }
-    # 环境净化 + 凭证（.env 已由调用方 Load-Env；此处兜底读取）
-    if (-not $env:VOICE_SIDECAR_CREDENTIAL) {
-        $envFile = Join-Path $Root ".env"
-        if (Test-Path $envFile) {
-            $m = (Get-Content $envFile | Select-String "^VOICE_SIDECAR_CREDENTIAL=(.+)$" | Select-Object -First 1)
-            if ($m) { $env:VOICE_SIDECAR_CREDENTIAL = $m.Matches[0].Groups[1].Value.Trim() }
-        }
-    }
-    $env:NODE_EXTRA_CA_CERTS = Join-Path $SidecarDir "ca-tmp.crt"
-    Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
-    if ($env:NODE_OPTIONS) {
-        $kept = ($env:NODE_OPTIONS -split '\s+') | Where-Object { $_ -and $_ -notmatch '--use-system-ca|--use-openssl-ca|--require' }
-        if ($kept) { $env:NODE_OPTIONS = $kept -join ' ' } else { Remove-Item Env:NODE_OPTIONS -ErrorAction SilentlyContinue }
-    }
-    $SignUrl = "https://jinhong-d2g55ycl591208475-1436773060.ap-shanghai.app.tcloudbase.com"
-    $ts = Get-Date -Format "yyyyMMdd-HHmmss"
-    Start-Process -FilePath $Electron -ArgumentList ".","--in-process-gpu","--role=sidecar","--sign-url=$SignUrl","--bridge-url=ws://127.0.0.1:19092","--hold=86400" -WorkingDirectory $SidecarDir -WindowStyle Hidden
-    Write-WatchLog "[sidecar] 已拉起（ts=$ts）"
-}
-
 # ---------------- 主流程：只对异常服务动作，静默成功 ----------------
-# 2026-08-21：补 rtc-bridge + sidecar（用户需求：桌面端一直常驻、手机随时可连）
-foreach ($svc in @("model","backend","relay","rtc-bridge","sidecar")) {
-    # sidecar 依赖 rtc-bridge：bridge 不健康时先拉 bridge，sidecar 本轮跳过
-    if ($svc -eq "sidecar" -and -not (Test-BridgeHealth)) { continue }
+# 桌面 sidecar 的实例、运行时指针和完整性校验仅由 Tauri SidecarSupervisor 管理。
+# 看门狗不得直接启动 Electron，避免绕过生产运行时与单实例保证。
+foreach ($svc in @("model","backend","relay","rtc-bridge")) {
     $healthy = switch ($svc) {
         "model"       { Test-Health "http://127.0.0.1:19080/health" }
         "backend"     { Test-BackendHealth }
         "relay"       { Test-RelayAlive }
         "rtc-bridge"  { Test-BridgeHealth }
-        "sidecar"     { Test-SidecarHealthy }
     }
-    if ($healthy) {
-        # sidecar_connected 只作记录不作判据（空闲态为 false 属正常）
-        if ($svc -eq "sidecar" -and (Test-SidecarConnected)) {
-            Write-WatchLog "[sidecar] 会话已连接（sidecar_connected=true）"
-        }
-        continue
-    }
-    if ($svc -eq "sidecar") {
-        # 审计 A1 修复：sidecar 不健康 = electron 进程不存在 → 普通拉起即可。
-        # 原实现"进程在但未连 bridge 就杀掉重启"会在空闲态误杀健康 sidecar，已移除。
-        Start-Sidecar
-    } else {
-        Start-One $svc
-    }
+    if ($healthy) { continue }
+    Start-One $svc
 }
 exit 0
