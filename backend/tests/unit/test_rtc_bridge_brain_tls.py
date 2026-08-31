@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pathlib
 import ssl
 
 import pytest
@@ -97,3 +98,32 @@ def test_brain_intent_degrades_without_ca_file(monkeypatch):
 
     assert "url" in captured, "ca 缺失时仍应发出请求（降级而非中断）"
     assert captured["url"].endswith("/intent")
+
+
+def test_brain_ca_resolves_repo_default_when_env_path_missing(monkeypatch):
+    """乱码/失效的 env 绝对路径必须回退到仓库相对 certs/ca.crt。
+
+    现场实锤（2026-09-01 05:17 rtc_bridge.log.err）：.env 经 PS5.1
+    Load-Env 注入时中文路径被 GBK 误解码（监视app → 鐩戣…），env 路径
+    不存在 → TLS verification disabled (degraded)。契约：解析器必须做
+    存在性校验，候选失效时回退 backend/../certs/ca.crt。
+    """
+    monkeypatch.setenv("BRAIN_CA_FILE", r"C:\nonexistent\鐩戣\certs\ca.crt")
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+
+    resolved = brain_main._resolve_brain_ca_file()
+    expected = (
+        pathlib.Path(brain_main.__file__).resolve().parents[2]
+        / "certs"
+        / "ca.crt"
+    )
+    assert resolved == str(expected), "env 路径失效时必须回退仓库相对 certs/ca.crt"
+    assert pathlib.Path(resolved).is_file(), "回退路径必须真实存在"
+
+
+def test_brain_ca_env_existing_path_takes_priority(monkeypatch, tmp_path):
+    """存在且有效的 env 路径优先于仓库默认。"""
+    p = tmp_path / "other-ca.crt"
+    p.write_text("dummy", encoding="utf-8")
+    monkeypatch.setenv("BRAIN_CA_FILE", str(p))
+    assert brain_main._resolve_brain_ca_file() == str(p)

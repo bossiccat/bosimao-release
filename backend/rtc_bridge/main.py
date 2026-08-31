@@ -16,6 +16,7 @@ import ssl
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 import websockets
 
@@ -27,12 +28,29 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_brain_ca_file() -> str:
-    """Brain 回调 CA 路径解析：BRAIN_CA_FILE → SSL_CERT_FILE（.env 注入，
-    指向 certs/ca.crt；与 RTC_BRIDGE_CONTROL_PLANE_CA_FILE 同一注入方式）。"""
+    """Brain 回调 CA 路径解析：BRAIN_CA_FILE → SSL_CERT_FILE（.env 注入）
+    → 仓库相对 certs/ca.crt 兜底。
+
+    现场实锤（2026-09-01 rtc_bridge.log.err）：.env 经 PS5.1 Load-Env
+    注入时，绝对路径中的非 ASCII 段被 GBK 误解码（"监视app" → "鐩戣…"），
+    env 路径实际不存在 → 必须做存在性校验，候选全部失效时回退
+    backend/../certs/ca.crt（相对 __file__ 解析，天然免疫编码问题）。
+    """
+    candidates: list[str] = []
     for name in ("BRAIN_CA_FILE", "SSL_CERT_FILE"):
         value = os.environ.get(name, "").strip()
         if value:
-            return value
+            candidates.append(value)
+    repo_default = (
+        Path(__file__).resolve().parents[2] / "certs" / "ca.crt"
+    )
+    candidates.append(str(repo_default))
+    for candidate in candidates:
+        try:
+            if Path(candidate).is_file():
+                return candidate
+        except OSError:
+            continue
     return ""
 
 
