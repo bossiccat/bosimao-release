@@ -410,6 +410,28 @@ function Stop-ServiceByName([string]$Name) {
             return $true
         }
     }
+    # rtc-bridge：与 relay 对齐，一律先按命令行白名单清整棵树（.venv 启动器 + re-exec 子进程）。
+    # 否则 PID 文件分支只杀启动器，留下持有 19092/19093 的孤儿子进程；restart 随后被
+    # Start-RtcBridgeService 的 /health 幂等判定采纳该旧进程，改动永远不生效（静默空转）。
+    if ($Name -eq "rtc-bridge") {
+        $rs = @(Get-RtcBridgeProcesses)
+        if ($rs.Count -gt 0) {
+            foreach ($r in $rs) { Stop-Process -Id $r.ProcessId -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Milliseconds 800
+            $left = @(Get-RtcBridgeProcesses)
+            foreach ($r in $left) { Stop-Process -Id $r.ProcessId -Force -ErrorAction SilentlyContinue }
+            $still = @(Get-RtcBridgeProcesses)
+            if ($still.Count -gt 0) {
+                $ids = ($still | ForEach-Object { $_.ProcessId }) -join ","
+                Write-Host "[rtc-bridge][x] 残留 $($still.Count) 个进程未退出（PID $ids）"
+                return $false
+            }
+            Write-Host "[rtc-bridge] 已停止全部 rtc_bridge 进程（$($rs.Count) 个，含启动器+子进程）"
+            Clear-PidFile "rtc-bridge"; return $true
+        }
+        Write-Host "[rtc-bridge][ok] 未运行"
+        Clear-PidFile "rtc-bridge"; return $true
+    }
     if ($procId -and (Test-ProcessAlive $procId)) {
         Write-Host "[$Name] 停止 PID=$procId"
         Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
@@ -443,18 +465,6 @@ function Stop-ServiceByName([string]$Name) {
             }
             Write-Host "[backend][!] 端口 8000 被非 jax-backend 进程占用（PID $procId），不盲杀"; return $false
         }
-    } elseif ($Name -eq "rtc-bridge") {
-        $rs = @(Get-RtcBridgeProcesses)
-        if ($rs.Count -gt 0) {
-            foreach ($r in $rs) { Stop-Process -Id $r.ProcessId -Force -ErrorAction SilentlyContinue }
-            Start-Sleep -Milliseconds 800
-            $left = @(Get-RtcBridgeProcesses)
-            foreach ($r in $left) { Stop-Process -Id $r.ProcessId -Force -ErrorAction SilentlyContinue }
-            Write-Host "[rtc-bridge] 已停止全部 rtc_bridge 进程（$($rs.Count) 个）"
-            Clear-PidFile "rtc-bridge"; return $true
-        }
-        Write-Host "[rtc-bridge][ok] 未运行"
-        Clear-PidFile "rtc-bridge"; return $true
     }
     Write-Host "[$Name][ok] 未运行"
     return $true
