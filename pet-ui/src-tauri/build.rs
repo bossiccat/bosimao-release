@@ -142,9 +142,41 @@ fn verify_sidecar_for_release(manifest_dir: &Path) {
     );
 }
 
+/// ADR-027 immutable generation 的只读属性（0o444/0o555）会随 fs::copy 传播到
+/// target/<profile>/jrt/ 的资源副本；tauri-build 的 copy_resources 每次构建都会
+/// copy_file 覆盖这些副本，撞上只读目标即报 os error 5 并 exit(1)，阻断全部
+/// cargo build（含发布打包）。故在 tauri_build::build() 之前递归摘除 target
+/// 资源副本的只读位。只清文件位、不删目录：副本缺失时 copy_resources 会重建，
+/// 摘位失败时后续 copy_file 仍会以更明确的原始错误兜底。
+fn clear_readonly_target_resources() {
+    let Ok(out_dir) = std::env::var("OUT_DIR") else { return };
+    // OUT_DIR = <target>/<profile>/build/<crate>-<hash>/out：上溯 3 级得 <target>/<profile>。
+    let out_path = PathBuf::from(out_dir);
+    let Some(profile_dir) = out_path.ancestors().nth(3) else { return };
+    clear_readonly_recursive(&profile_dir.join("jrt"));
+}
+
+fn clear_readonly_recursive(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            clear_readonly_recursive(&p);
+        } else {
+            let Ok(meta) = std::fs::metadata(&p) else { continue };
+            let mut perms = meta.permissions();
+            if perms.readonly() {
+                perms.set_readonly(false);
+                let _ = std::fs::set_permissions(&p, perms);
+            }
+        }
+    }
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     emit_rerun_rules(&manifest_dir);
     verify_sidecar_for_release(&manifest_dir);
+    clear_readonly_target_resources();
     tauri_build::build()
 }
