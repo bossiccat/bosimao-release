@@ -23,9 +23,12 @@ if ($listening -and $Restart) {
 }
 
 # 2) 加载 .env 到进程环境（RELAY_TOKEN / RELAY_E2EE_KEY 等；config.py 只读 os.environ）
+# -Encoding UTF8 必须显式声明：.env 为 UTF-8 无 BOM，PS5.1 默认按系统 ANSI(GBK)
+# 解码会把含中文的绝对路径（SSL_CERT_FILE / RTC_BRIDGE_CONTROL_PLANE_* 等）
+# mojibake 注入子进程（2026-09-01 编码审计 P1-A；对齐全 640726d 的 jax-services.ps1）。
 $envFile = Join-Path $Root ".env"
 if (Test-Path $envFile) {
-    Get-Content $envFile | ForEach-Object {
+    Get-Content $envFile -Encoding UTF8 | ForEach-Object {
         if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
             [Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
         }

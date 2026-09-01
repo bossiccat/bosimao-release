@@ -52,8 +52,12 @@ function Wait-Health([string]$url, [int]$timeoutSec) {
 
 try {
     # 1. 读取 .env 注入环境变量
+    # -Encoding UTF8 必须显式声明：.env 为 UTF-8 无 BOM，PS5.1 默认按系统 ANSI(GBK)
+    # 解码会把含中文的绝对路径（SSL_CERT_FILE / RTC_BRIDGE_CONTROL_PLANE_* 等）
+    # mojibake 注入子进程，再经 Start-Process(:94) 传给 backend、经 npm run tauri
+    # dev(:126) 传给 Tauri -> sidecar 全链继承（2026-09-01 编码审计 P1-B）。
     if (Test-Path (Join-Path $Root ".env")) {
-        $envVars = Get-Content (Join-Path $Root ".env") | Where-Object { $_ -match "=" }
+        $envVars = Get-Content (Join-Path $Root ".env") -Encoding UTF8 | Where-Object { $_ -match "=" }
         foreach ($line in $envVars) {
             $kv = $line -split "=", 2
             if ($kv[0]) { Set-Item -Path "Env:$($kv[0])" -Value $kv[1] }
