@@ -64,3 +64,26 @@ fn restart_wiring_retries_failures_then_fuses() {
     );
     assert!(wd.is_fused());
 }
+
+#[test]
+fn initial_start_failure_uses_the_same_bounded_restart_budget() {
+    let mut wd = watchdog(3);
+    assert_eq!(wd.on_initial_start_failure(), WatchdogAction::Restart);
+    assert_eq!(wd.take_restart_delay(), Duration::from_secs(1));
+    assert_eq!(wd.on_restart_failure(), WatchdogAction::Restart);
+    assert_eq!(wd.take_restart_delay(), Duration::from_secs(2));
+    assert_eq!(wd.on_restart_failure(), WatchdogAction::Restart);
+    assert_eq!(wd.take_restart_delay(), Duration::from_secs(4));
+    assert_eq!(wd.on_restart_failure(), WatchdogAction::Fuse);
+    assert!(wd.is_fused());
+}
+
+#[test]
+fn app_entry_routes_initial_start_failures_through_tauri_restart_policy() {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+        .expect("read main.rs");
+    assert!(source.contains("wd.on_initial_start_failure()"));
+    assert!(source.contains("spawn_initial_restart(app.handle().clone(), initial_action)"));
+    assert!(source.contains("RestartMode::Initial"));
+    assert!(source.contains("credential_service.start_initial(&mut supervisor)"));
+}

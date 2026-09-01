@@ -50,6 +50,11 @@ impl Watchdog {
         self.record_failure()
     }
 
+    /// 首次启动失败同样计入连续异常，避免应用只记录错误后永久停在 Stopped。
+    pub fn on_initial_start_failure(&mut self) -> WatchdogAction {
+        self.record_failure()
+    }
+
     /// 自动重启本身失败时同样计入连续异常，避免静默留在 Stopped。
     pub fn on_restart_failure(&mut self) -> WatchdogAction {
         self.record_failure()

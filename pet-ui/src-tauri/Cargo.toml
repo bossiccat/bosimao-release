@@ -3,6 +3,10 @@ name = "jax-pet"
 version = "1.0.0"
 description = "贾克斯模式 - AI 智能体监控中枢桌宠"
 edition = "2021"
+# 多 bin crate（O-018/O-020/O-022 辅助 bin 与 main 并存）必须显式指定默认运行目标：
+# 否则 tauri 的 main binary 查找失败，或 auto-discovery 混淆导致 release/jax-pet.exe
+# 被硬链接成 provision 内容（见 O-018 provision 双二进制注释）。
+default-run = "jax-pet"
 
 [lib]
 name = "jax_pet"
