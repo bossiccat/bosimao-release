@@ -78,7 +78,11 @@ function Get-RelayProcesses {
             if (-not $_.ExecutablePath -or $JaxPythonPaths -notcontains ([System.IO.Path]::GetFullPath($_.ExecutablePath))) {
                 return $false
             }
-            return ($_.CommandLine -match '(?i)(^|[\\s"''])-m[\\s"'']+backend\.relay\.relay_client([\\s"'']|$)')
+            # PS 单引号字符串不处理反斜杠转义：此处 \s / \. 原样传给 regex 引擎。
+            # 2026-09-01 修复 976c98f 回归：曾写成 \\s 双重转义 → regex 收到
+            # [\\s"']（反斜杠+s+引号，无空白）→ "-m backend..." 永不匹配 →
+            # Get-RelayProcesses 恒空 → relay 健康判定恒假 → watchdog 反复拉起。
+            return ($_.CommandLine -match '(?i)(^|\s)-m\s+backend\.relay\.relay_client(\s|$)')
         }
 }
 
