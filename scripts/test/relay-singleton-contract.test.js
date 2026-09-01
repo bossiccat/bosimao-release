@@ -29,19 +29,23 @@ test('relay health requires exactly one complete project relay process tree', ()
   const watchdog = source(watchdogPath);
   const common = source(commonPath);
 
-  assert.match(common, /CommandLine\s+-match\s+"relay_client"/);
-  assert.match(services, /function\s+Test-RelayProcessTree\b/i);
-  assert.match(services, /\$topLevel\.Count -ne 1\) \{ return \$false \}/);
-  assert.match(watchdog, /function\s+Test-RelayProcessTree\b/i);
-  assert.match(watchdog, /\$topLevel\.Count -ne 1\) \{ return \$false \}/);
+  assert.match(common, /ExecutablePath/);
+  assert.match(common, /backend\\.relay\\.relay_client/);
+  assert.doesNotMatch(services, /function\s+Test-RelayProcessTree\b/i);
+  assert.doesNotMatch(watchdog, /function\s+Test-RelayProcessTree\b/i);
+  assert.match(common, /\$topLevel\.Count -ne 1\) \{ return \$false \}/);
   assert.match(watchdog, /function\s+Test-RelayAlive\s*\{[\s\S]*?if \(-not \(Test-RelayProcessTree\)\) \{ return \$false \}[\s\S]*?return \(-not \(Test-RelayDeadLoop\)\)/s);
   assert.match(watchdog, /"relay"\s*\{\s*Test-RelayAlive\s*\}/);
   assert.doesNotMatch(watchdog, /"relay"\s*\{\s*@\(Get-RelayProcesses\)\.Count\s*-gt\s*0\s*\}/);
 });
 
-test('relay process discovery remains scoped to relay_client command lines', () => {
+test('relay process discovery is scoped to this project venv and exact module entry', () => {
   const common = source(commonPath);
 
   assert.match(common, /Name='python\.exe' OR Name='pythonw\.exe'/);
-  assert.match(common, /CommandLine\s+-match\s+"relay_client"/);
+  assert.match(common, /ExecutablePath/);
+  assert.ok(common.includes('.venv\\Scripts\\python.exe'));
+  assert.ok(common.includes('.venv\\Scripts\\pythonw.exe'));
+  assert.ok(common.includes('backend.relay.relay_client'));
+  assert.doesNotMatch(common, /CommandLine\s+-match\s+"relay_client"\s*\}/);
 });

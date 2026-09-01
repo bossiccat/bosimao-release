@@ -40,11 +40,23 @@ function Test-Health([string]$Url, [int]$TimeoutSec = 3) {
     }
 }
 
+$JaxProjectRoot = Split-Path -Parent $PSScriptRoot
+$JaxPythonPaths = @(
+    (Join-Path $JaxProjectRoot ".venv\Scripts\python.exe"),
+    (Join-Path $JaxProjectRoot ".venv\Scripts\pythonw.exe")
+) | ForEach-Object { [System.IO.Path]::GetFullPath($_) }
+$JaxRelayModule = "backend.relay.relay_client"
+
 function Get-RelayProcesses {
-    # relay 由 pythonw.exe（GUI 子系统，无命令窗）启动——必须同时匹配两种进程名，
-    # 否则看门狗看不见活着的 relay → 误判死亡空转拉起（审计 A11 实证：PID 17868 pythonw 存活但不可见）
+    # 进程名不足以证明项目归属：其他工作区也可能运行名为 relay_client 的 Python。
+    # 同时约束解释器绝对路径和完整模块入口，停止逻辑才不会误杀外部进程。
     Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "relay_client" }
+        Where-Object {
+            if (-not $_.ExecutablePath -or $JaxPythonPaths -notcontains ([System.IO.Path]::GetFullPath($_.ExecutablePath))) {
+                return $false
+            }
+            return ($_.CommandLine -match '(?i)(^|[\\s"''])-m[\\s"'']+backend\.relay\.relay_client([\\s"'']|$)')
+        }
 }
 
 function Get-RelayTopLevel {

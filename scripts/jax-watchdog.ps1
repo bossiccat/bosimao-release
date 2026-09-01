@@ -24,25 +24,6 @@ New-Item -ItemType Directory -Force -Path $LogDir, (Split-Path $StateFile) | Out
 # （python.exe OR pythonw.exe）统一抽取到 lib-common.ps1，与 jax-services.ps1 共用。
 . (Join-Path $PSScriptRoot "lib-common.ps1")
 
-function Test-RelayProcessTree {
-    # 一个顶层 relay_client 与其已识别子进程构成唯一受管实例。
-    $all = @(Get-RelayProcesses)
-    if ($all.Count -eq 0) { return $false }
-    $allIds = @($all | ForEach-Object { [int]$_.ProcessId })
-    $topLevel = @($all | Where-Object { $allIds -notcontains [int]$_.ParentProcessId })
-    if ($topLevel.Count -ne 1) { return $false }
-
-    $knownIds = @([int]$topLevel[0].ProcessId)
-    do {
-        $before = $knownIds.Count
-        $knownIds += @($all | Where-Object {
-            $knownIds -contains [int]$_.ParentProcessId
-        } | ForEach-Object { [int]$_.ProcessId })
-        $knownIds = @($knownIds | Select-Object -Unique)
-    } while ($knownIds.Count -gt $before)
-    return (@($all | Where-Object { $knownIds -notcontains [int]$_.ProcessId }).Count -eq 0)
-}
-
 function Write-WatchLog([string]$msg) {
     $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
     Add-Content -Path $WatchLog -Value $line -Encoding UTF8

@@ -18,11 +18,14 @@ function diagnostic(code) {
 }
 
 function defaultRun(command, args) {
+  // 全量 Win32_Process（含 ExecutablePath/CommandLine）+ Get-NetTCPConnection 在
+  // 真实机器上常需 5-30s，输出可达数十 MB；过小的超时/缓冲会把"机器慢"误判为
+  // runner 不可用，从而错误阻断迁移。
   return spawnSync(command, args, {
     encoding: 'utf8',
     windowsHide: true,
-    timeout: 5000,
-    maxBuffer: 4 * 1024 * 1024,
+    timeout: 60000,
+    maxBuffer: 64 * 1024 * 1024,
   });
 }
 
@@ -75,9 +78,19 @@ function normalizeSnapshot(snapshot) {
     const name = item.name ?? item.Name;
     const executablePath = item.executablePath ?? item.ExecutablePath;
     const commandLine = item.commandLine ?? item.CommandLine;
-    if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(parentProcessId) || parentProcessId < 0
-      || typeof name !== 'string' || !name.trim() || typeof executablePath !== 'string' || !executablePath.trim()
-      || typeof commandLine !== 'string' || !commandLine.trim()) throw new Error('incomplete process');
+    // 真实机器上必然存在 ExecutablePath/CommandLine 为 null 的系统进程
+    // （System Idle Process、Registry、受保护的 svchost 等）。这不是脏输出：
+    // pid/parent/name 结构合法即保留，缺路径/命令行的记录随后无法归因、
+    // 自然跳过。只有结构垃圾（pid 非法等）才判定整份快照无效（fail-closed）。
+    // pid<=0 是真实的内核级记录（System Idle Process 等），永远不可能是
+    // consumer：以空路径/命令行保留，后续归因循环自然跳过。只有结构垃圾
+    // （pid 非整数、父 PID 非法）才判定整份快照无效（fail-closed）。
+    if (!Number.isInteger(pid) || !Number.isInteger(parentProcessId) || parentProcessId < 0
+      || typeof name !== 'string' || !name.trim()) throw new Error('invalid process');
+    if (pid <= 0 || typeof executablePath !== 'string' || !executablePath.trim()
+      || typeof commandLine !== 'string' || !commandLine.trim()) {
+      return { pid, parentProcessId, name, executablePath: null, commandLine: null };
+    }
     return { pid, parentProcessId, name, executablePath, commandLine };
   });
   const ports = snapshot.ports.map((item) => {
@@ -126,6 +139,9 @@ function inspectConsumers(runtimeDir, options = {}) {
   const byPid = new Map();
   let invalidPath = false;
   for (const process of snapshot.processes) {
+    // 缺路径/命令行的合法系统进程无法归因，直接跳过（不是快照无效）。
+    if (typeof process.executablePath !== 'string' || !process.executablePath.trim()
+      || typeof process.commandLine !== 'string' || !process.commandLine.trim()) continue;
     let executable;
     try {
       executable = realpath(process.executablePath);

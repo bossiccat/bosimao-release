@@ -27,3 +27,12 @@ test('all service entry points ship their shared library dependency', () => {
     assert.ok(fs.existsSync(path.join(root, file)), `${file} must be present in the delivery tree`);
   }
 });
+
+test('start-all delegates relay lifecycle to the converging service manager', () => {
+  const startAll = read('scripts/start-all.ps1');
+
+  assert.match(startAll, /jax-services\.ps1/);
+  assert.match(startAll, /\$SvcScript\s+\$action\s+all/);
+  assert.doesNotMatch(startAll, /Start-Process\s+-FilePath\s+\$PyW[\s\S]*?relay_client/s);
+  assert.doesNotMatch(startAll, /Get-CimInstance[\s\S]*?relay_client[\s\S]*?Stop-Process/s);
+});
