@@ -45,7 +45,7 @@
       "binaries/provision_sidecar_credential_launcher"
     ],
     "resources": {
-      "binaries/jax-rtc-sidecar-runtime/": "jax-rtc-sidecar-runtime/",
+      "binaries/jax-rtc-sidecar-runtime/": "jrt/",
       "certs/ca.crt": "certs/ca.crt"
     }
   },

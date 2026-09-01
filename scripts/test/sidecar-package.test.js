@@ -383,7 +383,9 @@ test('rejects sidecar production source whitelist drift', () => {
 });
 
 test('resource mapping preserves the dedicated runtime directory contract end to end', () => {
-  const destination = 'jax-rtc-sidecar-runtime/';
+  // RP-07 (2026-08-31): 安装目的地解耦缩短为 jrt/（NSIS 3.11 解压端 260 上限，
+  // 完整名最长 269 字符会静默丢文件）；源目录保持规范名 jax-rtc-sidecar-runtime/。
+  const destination = 'jrt/';
   assert.deepEqual(expectedBundleResourceMap(), {
     'binaries/jax-rtc-sidecar-runtime/': destination,
   });
@@ -404,7 +406,8 @@ test('resource mapping preserves the dedicated runtime directory contract end to
   const { config, generation } = fixture();
   const manifest = verifyPackage(config);
   assert.deepEqual(manifest.bundle_resources, expectedBundleResourceMap());
-  assert.equal(path.basename(config.runtimeDir), destination.replace(/\/$/, ''));
+  // 源目录名保持规范名（与安装目的地解耦）。
+  assert.equal(path.basename(config.runtimeDir), 'jax-rtc-sidecar-runtime');
   assert.equal(fs.existsSync(path.join(config.runtimeDir, 'generations', generation)), true);
 });
 

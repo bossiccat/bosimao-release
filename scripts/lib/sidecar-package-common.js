@@ -32,7 +32,8 @@ const ELECTRON_REQUIRED = [
 ];
 const APP_SOURCES = [
   'audio.js', 'bridge.js', 'config.js', 'exit-protocol.js', 'index.html', 'logger.js',
-  'main.js', 'phone.js', 'rtc-startup.js', 'rtc.js', 'security.js',
+  'main.js', 'phone.js', 'rtc-startup.js', 'rtc-termination.js', 'rtc-test-audio.js', 'rtc.js',
+  'security.js',
   'package.json', 'package-lock.json',
 ];
 const MANIFEST_KEYS = [
@@ -116,7 +117,7 @@ function validateManifestSchema(manifest) {
       || !sameKeys(manifest.external_bin, EXTERNAL_BIN_KEYS)
       || !HASH_RE.test(manifest.external_bin.sha256)
       || !sameKeys(manifest.bundle_resources, Object.keys(expectedBundleResourceMap()))
-      || manifest.bundle_resources['binaries/jax-rtc-sidecar-runtime/'] !== 'jax-rtc-sidecar-runtime/') {
+      || manifest.bundle_resources['binaries/jax-rtc-sidecar-runtime/'] !== 'jrt/') {
     fail('SIDECAR_PACKAGE_MANIFEST_SCHEMA_INVALID');
   }
   validateRelativePath(manifest.external_bin.build_input_file);
@@ -139,7 +140,7 @@ function verifyAppSourceSet(sidecarDir) {
 }
 
 function expectedBundleResourceMap() {
-  return { 'binaries/jax-rtc-sidecar-runtime/': 'jax-rtc-sidecar-runtime/' };
+  return { 'binaries/jax-rtc-sidecar-runtime/': 'jrt/' };
 }
 
 function sdkRoot(contentRoot) {
