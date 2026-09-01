@@ -23,6 +23,21 @@ function runNpm(args, cwd, fail) {
   if (result.status !== 0) fail('SIDECAR_PACKAGE_NPM_CI_FAILED');
 }
 
+// 2026-09-02 cpSync 机器级故障规避：本机（2026-09-01 02:30 后）fs.cpSync 任何参数组合
+// 均触发 0xC0000409 fail-fast 硬崩（node 22/24、bash/PowerShell、大小目录全复现，
+// 疑似安全软件 hook 层问题），而 copyFileSync 全量验证通过。用逐文件递归拷贝
+// 等价替换 cpSync(recursive, force, dereference:false)。electron dist 内无 symlink，
+// dereference 语义差异不影响结果。
+function copyTreeInto(sourceDir, targetDir) {
+  fs.mkdirSync(targetDir, { recursive: true });
+  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    const sourcePath = path.join(sourceDir, entry.name);
+    const targetPath = path.join(targetDir, entry.name);
+    if (entry.isDirectory()) copyTreeInto(sourcePath, targetPath);
+    else if (entry.isFile()) fs.copyFileSync(sourcePath, targetPath);
+  }
+}
+
 function buildPackage(config, api) {
   const {
     APP_SOURCES,
@@ -50,7 +65,7 @@ function buildPackage(config, api) {
 
   // Electron dist → staging；electron.exe 作为 installed 身份与 externalBin 构建输入。
   const electronDist = path.join(config.sidecarDir, 'node_modules', 'electron', 'dist');
-  fs.cpSync(electronDist, stagingDir, { recursive: true, force: true, dereference: false });
+  copyTreeInto(electronDist, stagingDir);
   const electronExe = path.join(stagingDir, 'electron.exe');
   if (!fs.existsSync(electronExe)) fail('SIDECAR_PACKAGE_ELECTRON_RUNTIME_MISSING');
   fs.copyFileSync(electronExe, path.join(stagingDir, config.installedFile));
