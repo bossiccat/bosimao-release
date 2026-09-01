@@ -57,10 +57,15 @@ try {
     # mojibake 注入子进程，再经 Start-Process(:94) 传给 backend、经 npm run tauri
     # dev(:126) 传给 Tauri -> sidecar 全链继承（2026-09-01 编码审计 P1-B）。
     if (Test-Path (Join-Path $Root ".env")) {
-        $envVars = Get-Content (Join-Path $Root ".env") -Encoding UTF8 | Where-Object { $_ -match "=" }
-        foreach ($line in $envVars) {
-            $kv = $line -split "=", 2
-            if ($kv[0]) { Set-Item -Path "Env:$($kv[0])" -Value $kv[1] }
+        # 过滤必须是严格 KV 正则（对齐 jax-services.ps1:86 / start-relay.ps1:33）：
+        # .env 含带 = 的注释行（首行 `# ===== 环境变量模板 =====`、第 34 行
+        # `# voice 网关鉴权（V1.5 M1）：...；留空=不校验`），宽松的 $_ -match "="
+        # 会把它们当 KV 注入 —— PS 5.1 下 Set-Item -Path "Env:# " 会**成功**，
+        # 静默创建名为 `#` 的垃圾环境变量（2026-09-01 Load-Env 专项 P2）。
+        Get-Content (Join-Path $Root ".env") -Encoding UTF8 | ForEach-Object {
+            if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
+                Set-Item -Path "Env:$($matches[1])" -Value $matches[2]
+            }
         }
     }
 

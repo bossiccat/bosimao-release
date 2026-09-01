@@ -46,6 +46,17 @@ codec 会产出 U+FFFD —— 二者行为不同，不要据 Python codec 推断
 RED 基线（已实测）：临时副本里摘掉三条通道的 -Encoding UTF8 后，本文件
 6 项全部失败（3 通道 × 2 条腿），实测腿命中
 SSL_CERT_FILE = 'C:\Users\Administrator\WorkBuddy\鐩戣\ue74bapp\certs\ca.crt'。
+
+第三条腿（P2，2026-09-01）：「注释行不得被当成环境变量注入」。仓库 .env 含
+两条带 `=` 的注释行（首行 `# ===== 环境变量模板 =====` 与第 34 行
+`# voice 网关鉴权（V1.5 M1）：...；留空=不校验`）。宽松过滤 `$_ -match "="`
+会把它们当成 KV 注入：实测 Set-Item -Path "Env:# " 在 PS 5.1 **成功**，静默
+创建名为 `# `（`#` + 空格）的垃圾环境变量。另两条通道早已用严格正则
+`^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$`，dev.ps1 是唯一漏网的。
+
+判据选「不存在以 `#` 开头的环境变量名」而非「枚举全部变量做白名单正则」：
+Windows 默认环境不会出现 `#` 前缀变量（零假阳性），而白名单正则会被
+`ProgramFiles(x86)`、`=C:` 等系统自带变量误报。
 """
 from __future__ import annotations
 
@@ -70,6 +81,21 @@ _PATH_VARS = (
 
 # GBK/CP936 解码 UTF-8 中文的典型产物（"监视" → "鐩戣"）。见模块 docstring P2-C。
 _GBK_MOJIBAKE_MARKERS = ("鐩戣",)
+
+# 第三条腿：列出进程内以 '#' 开头的环境变量名。两个 PS 5.1 坑：
+#   1. 用 [Environment]::GetEnvironmentVariables() 而非 Get-ChildItem Env: —— 后者
+#      的 Env: provider 在本机环境块上直接抛 ArgumentException「已添加了具有相同键的
+#      项」（实测 187 个变量，2026-09-01），连空结果都拿不到；.NET 路径不受影响，
+#      且与另两条通道注入所用的 SetEnvironmentVariable 属同一底层环境块。
+#   2. 用 -join '|' 拼成单个字符串输出，Python 侧再 split —— 规避单元素数组被
+#      ConvertTo-Json 展平成字符串、以及空数组输出为空行的问题。
+_HASH_VAR_SENTINEL = "HASHVARS="
+_PS_TAIL_HASH_VARS = (
+    "$hashVars = @("
+    "[Environment]::GetEnvironmentVariables().Keys | Where-Object { $_ -like '#*' }"
+    ")",
+    f"Write-Output ('{_HASH_VAR_SENTINEL}' + ($hashVars -join '|'))",
+)
 
 
 @dataclass(frozen=True)
@@ -168,7 +194,12 @@ def _env_read_statements(source: str) -> list:
     return found
 
 
-def _ps_script(channel: _Channel) -> str:
+def _ps_script(channel: _Channel, tail: tuple = ()) -> str:
+    """拼出「抽出 env 加载片段并执行」的 PS 脚本。
+
+    tail：片段执行后、默认 JSON 输出块之前插入的附加 PS 行（用于观测片段的副作用，
+    例如列出被注入的 `#` 前缀变量）。留空则与既有两条腿的行为完全一致。
+    """
     path = _ROOT / channel.rel
     body = [
         _PS_HEADER,
@@ -185,6 +216,7 @@ def _ps_script(channel: _Channel) -> str:
         body.append(_PS_FIND_FUNCTION)
     else:
         body.append(_PS_FIND_STATEMENT)
+    body.extend(tail)
     body.append("@{")
     for name in _PATH_VARS:
         body.append(f"  {name.lower()} = $env:{name}")
@@ -192,9 +224,16 @@ def _ps_script(channel: _Channel) -> str:
     return "\n".join(body)
 
 
-def _run_channel(channel: _Channel) -> dict:
+def _run_channel(channel: _Channel, tail: tuple = ()) -> dict:
     """在真实 PowerShell 中执行脚本里抽出的 env 加载片段，回读 4 条路径变量。"""
-    encoded = base64.b64encode(_ps_script(channel).encode("utf-16-le")).decode("ascii")
+    return _parse_flat_json(_exec_channel_ps(channel, tail))
+
+
+def _exec_channel_ps(channel: _Channel, tail: tuple = ()) -> str:
+    """执行「env 加载片段 + tail」并返回原始 stdout（供需要观测副作用的腿使用）。"""
+    encoded = base64.b64encode(
+        _ps_script(channel, tail).encode("utf-16-le")
+    ).decode("ascii")
     proc = subprocess.run(
         [
             "powershell", "-NoProfile", "-NonInteractive",
@@ -212,7 +251,20 @@ def _run_channel(channel: _Channel) -> dict:
         f"[{channel.rel}] env-load fragment execution failed (exit {proc.returncode}): "
         f"{proc.stderr[:500]}"
     )
-    return _parse_flat_json(proc.stdout)
+    return proc.stdout
+
+
+def _hash_prefixed_env_var_names(channel: _Channel) -> list:
+    """执行通道的 env 加载片段，回读进程内所有以 `#` 开头的环境变量名。"""
+    stdout = _exec_channel_ps(channel, _PS_TAIL_HASH_VARS)
+    for line in stdout.splitlines():
+        if line.strip().startswith(_HASH_VAR_SENTINEL):
+            payload = line.strip()[len(_HASH_VAR_SENTINEL):]
+            return [name for name in payload.split("|") if name]
+    raise AssertionError(
+        f"[{channel.rel}] no {_HASH_VAR_SENTINEL!r} line in env-load output: "
+        f"{stdout[:300]!r}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -265,6 +317,27 @@ def test_channel_injects_chinese_paths_verbatim(channel: _Channel) -> None:
         assert Path(value).is_file(), (
             f"[{channel.rel}] {name} points to a nonexistent file: {value!r}"
         )
+
+
+@pytest.mark.parametrize(
+    "channel", _CHANNELS, ids=[c.rel.rsplit("/", 1)[-1] for c in _CHANNELS]
+)
+def test_channel_injects_no_comment_lines_as_env_vars(channel: _Channel) -> None:
+    """实测腿：.env 中带 `=` 的注释行不得被注入成环境变量。
+
+    .env 有两条含 `=` 的注释行（`# ===== 环境变量模板 =====`、`# voice 网关鉴权
+    ...；留空=不校验`）。宽松过滤 `$_ -match "="` 会把它们当 KV 注入：PS 5.1 下
+    `Set-Item -Path "Env:# " -Value ...` 会**成功**，静默创建名为 `# ` 的垃圾变量。
+    判据用「不存在 `#` 前缀变量名」：Windows 默认环境无 `#` 前缀变量，零假阳性；
+    反过来枚举全部变量做名字白名正则会被 `ProgramFiles(x86)` / `=C:` 误报。
+    """
+    names = _hash_prefixed_env_var_names(channel)
+    assert not names, (
+        f"[{channel.rel}] 注释行被当成环境变量注入（{len(names)} 个 '#' 前缀变量）："
+        f"{[(n[:16], len(n)) for n in names]!r} — .env 过滤必须为严格正则 "
+        r"'^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$'（对齐 jax-services.ps1:86 / "
+        "start-relay.ps1:33），宽松的 -match '=' 会把 `# ===== ...` 这类注释行一起注入"
+    )
 
 
 def _parse_flat_json(stdout: str) -> dict:
