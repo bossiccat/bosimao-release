@@ -63,13 +63,22 @@ def _make_brain_callback(api_url: str):
                 ssl.Purpose.SERVER_AUTH, cafile=ca_file
             )
         except OSError as e:
+            # 注意：context=None 并非「关闭校验」。此时 http.client 会自建
+            # ssl._create_default_https_context()，走**系统默认信任库**且校验
+            # 仍开启（并按默认策略校验主机名）。原文案 "TLS verification
+            # disabled" 与事实相反，会把 on-call 往「校验被关了」的错误方向带。
             logger.warning(
-                "brain CA file unusable (%s): %s; TLS verification disabled (degraded)",
+                "brain CA file unusable (%s): %s; falling back to system default "
+                "trust store (verification still enabled; self-signed backend "
+                "will likely fail the handshake)",
                 ca_file, e,
             )
     else:
         logger.warning(
-            "BRAIN_CA_FILE/SSL_CERT_FILE not set; brain TLS verification disabled (degraded)"
+            "BRAIN_CA_FILE/SSL_CERT_FILE unusable and repo default certs/ca.crt "
+            "missing; falling back to system default trust store "
+            "(verification still enabled; self-signed backend will likely fail "
+            "the handshake)"
         )
 
     async def on_voice_intent(text: str) -> None:
