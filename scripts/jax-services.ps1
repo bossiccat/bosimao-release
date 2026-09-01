@@ -101,6 +101,7 @@ function Invoke-OwnerCredentialProvision {
         return $false
     }
     # GUI 子系统二进制——不带 -WindowStyle（避免冲突），-Wait 等退出码
+    Merge-DuplicateProxyEnv
     $p = Start-Process -FilePath $exe -Wait -PassThru
     if ($p.ExitCode -ne 0) {
         Write-Host "[owner-credential][x] provision 失败（退出码 $($p.ExitCode)），中止启动（fail-closed）"
@@ -157,6 +158,7 @@ function Start-ModelService {
     $env:LLAMA_ARG_DEVICE = "CUDA0"
     $args = @("--host","127.0.0.1","--port","$Port","--model",$Model,"-ngl","99","--ctx-size","4096","--device","CUDA0","--split-mode","none")
     Write-Host "[model] 启动 $ServerBin ..."
+    Merge-DuplicateProxyEnv
     $p = Start-Process -FilePath $ServerBin -ArgumentList $args `
         -RedirectStandardOutput $Log -RedirectStandardError "$Log.err" -WindowStyle Hidden -PassThru
     Set-PidFile "model" $p.Id
@@ -236,6 +238,7 @@ function Start-BackendService {
     if ($oldProcId -and -not (Test-ProcessAlive $oldProcId)) { Clear-PidFile "backend" }
     if (-not (Test-Path $BackendExe)) { Write-Host "[backend][x] jax-backend.exe 不存在: $BackendExe（请先 cd backend/packaging 打包）"; return $false }
     Write-Host "[backend] 启动 $BackendExe --host 127.0.0.1 --port $Port (cwd=项目根)"
+    Merge-DuplicateProxyEnv
     $p = Start-Process -FilePath $BackendExe -ArgumentList "--host","127.0.0.1","--port","$Port" `
         -WorkingDirectory $Root `
         -RedirectStandardOutput $Log -RedirectStandardError "$Log.err" -WindowStyle Hidden -PassThru
@@ -322,6 +325,7 @@ function Start-RelayService {
         "--relay", $relayUrl, "--gateway", $gwUrl, "--gateway-ca", $gwCa,
         "--pairing-code", $pairCode)
     Write-Host "[relay] 启动 $PyW $($relayArgs -join ' ')（凭据来自 env，不进 argv）"
+    Merge-DuplicateProxyEnv
     $p = Start-Process -FilePath $PyW -ArgumentList $relayArgs -WorkingDirectory $Root `
         -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden -PassThru
     Set-PidFile "relay" $p.Id
@@ -367,6 +371,7 @@ function Start-RtcBridgeService {
     if ($oldProcId -and -not (Test-ProcessAlive $oldProcId)) { Clear-PidFile "rtc-bridge" }
     $bridgeArgs = @("-m","rtc_bridge.main")
     Write-Host "[rtc-bridge] 启动 $PyW $($bridgeArgs -join ' ')"
+    Merge-DuplicateProxyEnv
     $p = Start-Process -FilePath $PyW -ArgumentList $bridgeArgs -WorkingDirectory (Join-Path $Root "backend") `
         -RedirectStandardOutput $Log -RedirectStandardError "$Log.err" -WindowStyle Hidden -PassThru
     Set-PidFile "rtc-bridge" $p.Id

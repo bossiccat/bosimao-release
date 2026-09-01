@@ -7,6 +7,29 @@
 # 说明：本文件必须保持 UTF-8 with BOM（PS 5.1 中文解析依赖 BOM）
 # ============================================================
 
+function Merge-DuplicateProxyEnv {
+    # 2026-09-01 P1：WorkBuddy 等宿主进程会向子进程同时注入大小写两个变体的
+    # 代理变量（HTTPS_PROXY 与 https_proxy 同存）。Windows 环境变量名不区分
+    # 大小写，但 PS 5.1 Start-Process 构建子进程环境字典时按区分大小写的
+    # Dictionary 逐条 Add → 「已添加项。字典中的关键字:HTTPS_PROXY」
+    # ArgumentException，服务拉起直接失败（relay 首例，实测复现）。
+    # 修法：每个 Start-Process 前折叠 process 级代理变量——按规范名取值后
+    # 循环删除（实测 SetEnvironmentVariable(name, $null) 每次只删一个变体），
+    # 再以规范名单条重设。空值在 Windows 上删除即等于重设语义（'' = 删除），
+    # 故空值只删不重设。仅影响当前进程环境块，不改 User/Machine 级。
+    foreach ($name in @('HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY')) {
+        $value = [System.Environment]::GetEnvironmentVariable($name, 'Process')
+        $guard = 0
+        while ($null -ne [System.Environment]::GetEnvironmentVariable($name, 'Process') -and $guard -lt 5) {
+            [System.Environment]::SetEnvironmentVariable($name, $null, 'Process')
+            $guard++
+        }
+        if ($null -ne $value -and $value -ne '') {
+            [System.Environment]::SetEnvironmentVariable($name, $value, 'Process')
+        }
+    }
+}
+
 function Test-Health([string]$Url, [int]$TimeoutSec = 3) {
     # backend :8000 是自签 https 端口（用 http 探测必失败）——本地健康检查按端口回退 TLS 免验
     # 2026-08-22 修复（弹窗事故根因之一）：HTTP 200 判健康后，若失败仅在"超时/连接重置"时
