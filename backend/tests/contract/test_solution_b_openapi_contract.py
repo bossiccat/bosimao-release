@@ -75,7 +75,10 @@ def test_global_operation_ids_local_refs_and_frozen_p0_contracts() -> None:
         if method.lower() in HTTP_METHODS
     ]
     operation_ids = [operation["operationId"] for operation in operations]
-    assert len(operations) == 15
+    # 15 -> 16：09f9d65 新增 reportCommercialVoiceKwsReady（KWS 就绪上报）。
+    # 该端点已在 test_commercial_contract.EXPECTED_OPERATIONS 白名单显式登记，
+    # 此处同步总数断言。任何后续新增/删除端点都必须同时更新这两处。
+    assert len(operations) == 16
     assert len(operation_ids) == len(set(operation_ids))
 
     # ack 上报端点：reporter 由 credential 派生，不得出现在请求体

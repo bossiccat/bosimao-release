@@ -25,6 +25,10 @@ EXPECTED_OPERATIONS = {
     ("post", "/api/v1/voice/sessions/{session_id}/termination/{termination_id}/retry"),
     ("post", "/api/v1/voice/sessions/{session_id}/termination/{termination_id}/acknowledgements"),
     ("post", "/api/v1/voice/sessions/wake"),
+    # 09f9d65 引入：KWS（关键词检测）就绪上报 —— Android 侧唤醒词引擎就绪后回传，
+    # 供后台判定「唤醒链路已可用」。新增端点必须在本白名单显式登记，本集合即
+    # 「控制面能力冻结契约」的全部内容；只改 len 断言而不登记等于架空该保护。
+    ("post", "/api/v1/voice/sessions/{session_id}/kws-ready"),
     ("post", "/api/v1/voice/internal/rtc-bridge/hello-redeem"),
     ("get", "/api/v1/voice/status"),
     ("get", "/api/v1/voice/stream"),
@@ -86,7 +90,7 @@ def test_openapi_locks_control_plane_capabilities_and_error_codes() -> None:
     assert set(document["paths"]) == {op[1] for op in EXPECTED_OPERATIONS}
     operations = _operation_set(document)
     assert operations == EXPECTED_OPERATIONS
-    assert len(operations) == 15
+    assert len(operations) == 16
     assert set(document["components"]["schemas"]["ErrorCode"]["enum"]) == EXPECTED_ERROR_CODES
 
 
