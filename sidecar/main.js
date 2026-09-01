@@ -28,6 +28,15 @@ process.on('uncaughtException', fatalMain);
 process.on('unhandledRejection', fatalMain);
 process.on('SIGTERM', () => exitArbiter.decide({ kind: 'controlled' }));
 app.disableHardwareAcceleration();
+// 2026-09-02 GPU 沙箱修复：部分环境（本机实测复现）GPU 进程沙箱初始化失败 →
+// Chromium 连试 6 次 "GPU process exited unexpectedly: exit_code=1" 后
+// FATAL "GPU process isn't usable. Goodbye."，sidecar 启动 ~6 秒即死、watchdog
+// 熔断。disableHardwareAcceleration() 只禁硬件加速，Chromium 仍为软件合成拉起
+// GPU 进程，其沙箱失败依旧 FATAL；--disable-gpu 同样无效（GPU 进程仍被创建）。
+// disable-gpu-sandbox 仅禁 GPU 进程沙箱（渲染器/工具进程沙箱全部保留），
+// disable-gpu-sandbox 仅禁 GPU 进程沙箱（渲染器/工具进程沙箱全部保留），
+// 对照实验：加此开关存活 >30s 且业务链完整；不加必死。最小安全面修复。
+app.commandLine.appendSwitch('disable-gpu-sandbox');
 
 // TLS 信任锚（ADR-020 A1）：app.whenReady() 前读取 NODE_EXTRA_CA_CERTS 指向的
 // ca.crt，计算 SHA-256 指纹，注册 certificate-error pinning——仅当证书链（leaf 或
