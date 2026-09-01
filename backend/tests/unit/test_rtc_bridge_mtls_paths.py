@@ -61,6 +61,66 @@ def logging_enabled():
     finally:
         logging.disable(logging.WARNING)
 
+
+def _self_signed_pem(cn: str) -> tuple[bytes, bytes]:
+    """生成一对自签证书/私钥 PEM（仅测试用，不落仓库、不碰真实凭据）。"""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=365))
+        .sign(key, hashes.SHA256())
+    )
+    return (
+        cert.public_bytes(serialization.Encoding.PEM),
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        ),
+    )
+
+
+@pytest.fixture
+def repo_certs(tmp_path, monkeypatch):
+    """把兜底目录重定向到临时生成的证书，使用例不依赖仓库未跟踪的凭据。
+
+    必要性：`certs/` 下只有 `ca.crt` / `server.crt` 被 git 跟踪；
+    `client.crt` / `client.key`（以及 `*.key` 私钥）按 f1d24e3 的 gitignore
+    加固**故意不入库**——这是正确的安全决定，不该为了测试去改。
+
+    因此凡依赖客户端凭据的用例都不能假设仓库里存在这些文件，否则在纯净副本
+    （`git archive` / worktree / CI 新签出）里会假阳性失败。这里改为临时
+    生成自签凭据并把 `tls_paths.REPO_CERTS_DIR` 指过去：
+      * 用例在纯净副本里照常运行（而非静默 skip —— 静默跳过正是本次 P1
+        「失效不可见」的同一种病）；
+      * 兜底**机制**得到完整验证（这才是本用例要守的契约，仓库具体放了哪些
+        文件不是单测该依赖的事）。
+    """
+    from rtc_bridge import tls_paths
+
+    ca_pem, _ = _self_signed_pem("test-ca")
+    (tmp_path / "ca.crt").write_bytes(ca_pem)
+    client_pem, client_key_pem = _self_signed_pem("test-client")
+    (tmp_path / "client.crt").write_bytes(client_pem)
+    (tmp_path / "client.key").write_bytes(client_key_pem)
+
+    monkeypatch.setattr(tls_paths, "REPO_CERTS_DIR", tmp_path)
+    return tmp_path
+
 # PS 5.1 Load-Env 摘掉 -Encoding UTF8 的实测产物（env-channels-fix-x2 真机抓取）。
 # UTF-8 字节 e7 9b 91 e8 a7 86 61 70 70（"监视app"）被 CP936 解码为：
 #   鐩(U+9429) 戣(U+6223) U+E74B(PUA) app
@@ -110,8 +170,11 @@ def test_resolve_tls_file_skips_missing_candidate_and_falls_back():
     assert pathlib.Path(resolved).is_file(), "回退路径必须真实存在"
 
 
-def test_resolve_tls_file_falls_back_for_client_credential_pair():
-    """mTLS 客户端证书/私钥同样走兜底（三条路径缺一不可）。"""
+def test_resolve_tls_file_falls_back_for_client_credential_pair(repo_certs):
+    """mTLS 客户端证书/私钥同样走兜底（三条路径缺一不可）。
+
+    用 repo_certs 而非仓库真实凭据：client.crt/client.key 故意不入库。
+    """
     assert pathlib.Path(
         resolve_tls_file("client.crt", rf"{_MOJIBAKE_DIR}\client.crt")
     ).is_file()
@@ -204,8 +267,12 @@ def test_resolve_tls_file_silent_when_candidate_blank(
 
 # ---------- 地雷 1：ack_reporter 静默失效 ----------
 
-def test_ack_reporter_still_built_when_cfg_paths_are_mojibake():
-    """乱码路径不得让 ack 上报能力静默消失。"""
+def test_ack_reporter_still_built_when_cfg_paths_are_mojibake(repo_certs):
+    """乱码路径不得让 ack 上报能力静默消失。
+
+    用 repo_certs：需真实可用的 PEM 对（要过 ssl context + load_cert_chain），
+    而 client.crt/client.key 故意不入库，故临时生成而非依赖仓库。
+    """
     client = build_ack_reporter(_mojibake_cfg())
     assert client is not None, (
         "cfg 证书路径为乱码时，ack reporter 必须靠仓库相对兜底正常构建，"
@@ -215,8 +282,11 @@ def test_ack_reporter_still_built_when_cfg_paths_are_mojibake():
 
 # ---------- 地雷 2：redemption 硬崩溃 ----------
 
-def test_redemption_client_builds_when_cfg_paths_are_mojibake():
-    """乱码路径不得让 hello 兑付客户端构建崩溃（惰性构建、无兜底）。"""
+def test_redemption_client_builds_when_cfg_paths_are_mojibake(repo_certs):
+    """乱码路径不得让 hello 兑付客户端构建崩溃（惰性构建、无兜底）。
+
+    同 repo_certs 理由：需真实可用 PEM 对，而客户端凭据故意不入库。
+    """
     bridge = BridgeServer(_mojibake_cfg(), {})
     client = bridge._redemption
     assert isinstance(client, HelloRedemptionClient)
