@@ -74,6 +74,15 @@ test('a real migration CLI run is blocked while another process holds the lease'
   const runtimeDirExisted = fs.existsSync(runtimeDir);
   fs.mkdirSync(runtimeDir, { recursive: true });
 
+  // 工作区的 runtime 可能早已完成 ADR-027 迁移（current.json 本就存在）。
+  // 此时「current.json 不得存在」是过期假设，会造出与租约机制无关的恒真红灯。
+  // 改为记录指针指纹并在争用后比对：既能抓住「从无到有」的转换，
+  // 也能抓住「指针被改写」，比单纯的存在性判断更强。
+  const pointerPath = path.join(runtimeDir, 'current.json');
+  const pointerBefore = fs.existsSync(pointerPath)
+    ? fs.readFileSync(pointerPath, 'utf8')
+    : null;
+
   const holder = spawn(process.execPath, ['-e', holderScript], {
     env: {
       ...process.env,
@@ -104,11 +113,21 @@ test('a real migration CLI run is blocked while another process holds the lease'
       /SIDECAR_RUNTIME_COORDINATION_BUSY/,
     );
     assert.equal(fs.existsSync(backupDir), false, 'no backup may be created while the lease is held');
-    assert.equal(
-      fs.existsSync(path.join(runtimeDir, 'current.json')),
-      false,
-      'the runtime must not be converted while the lease is held',
-    );
+    if (pointerBefore === null) {
+      // 未迁移形态：runtime 仍是 legacy flat，不得被转换出指针。
+      assert.equal(
+        fs.existsSync(pointerPath),
+        false,
+        'the runtime must not be converted while the lease is held',
+      );
+    } else {
+      // 已迁移形态：指针本就存在，争用期间必须逐字节不变。
+      assert.equal(
+        fs.readFileSync(pointerPath, 'utf8'),
+        pointerBefore,
+        'the runtime pointer must not be rewritten while the lease is held',
+      );
+    }
   } finally {
     fs.writeFileSync(releaseFlag, '1');
     try {
