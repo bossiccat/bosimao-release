@@ -13,6 +13,27 @@ from pathlib import Path
 from .hermes_worker_profiles import worker_command_argv
 
 
+def _repo_root() -> Path:
+    """仓库根（本文件位于 <repo>/backend/app/brain/ 下，故 parents[3]）。"""
+    return Path(__file__).resolve().parents[3]
+
+
+def resolve_db_path(value: str) -> Path:
+    """把配置值解析成绝对数据库路径，**相对值锚定到仓库根而非进程 cwd**。
+
+    为什么必须锚定：2026-08-27 把默认路径改为模块锚定，是为了让 FastAPI 后台
+    与 rtc_bridge 落在同一个库上；但只要 `AGENT_THREAD_DB` 给的是相对路径，
+    它就会退化成 cwd 相对 —— 而这两个服务的启动 cwd 不同
+    （`scripts/jax-services.ps1`：backend 用 $Root，rtc_bridge 用 $Root/backend），
+    于是又被拆成两个库（实测 .env:65 让 rtc_bridge 落到 backend/backend/data/）。
+    锚定到仓库根后，相对值的语义与启动位置无关。
+    """
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = _repo_root() / path
+    return path.resolve()
+
+
 class AgentThreadRegistry:
     def __init__(
         self,
@@ -21,7 +42,7 @@ class AgentThreadRegistry:
     ) -> None:
         default_path = Path(__file__).resolve().parents[2] / "data" / "agent_threads.sqlite3"
         path = db_path or os.environ.get("AGENT_THREAD_DB") or default_path
-        self.path = Path(path).expanduser().resolve()
+        self.path = resolve_db_path(str(path))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._default_worker_profile = default_worker_profile
         self._lock = threading.Lock()

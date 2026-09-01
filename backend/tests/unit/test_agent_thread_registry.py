@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.brain import agent_thread_registry
 from app.brain.agent_thread_registry import AgentThreadRegistry
 
 
@@ -28,6 +29,40 @@ def test_default_database_path_is_not_derived_from_process_working_directory(
 
     expected = Path(__file__).resolve().parents[2] / "data" / "agent_threads.sqlite3"
     assert registry.path == expected
+
+
+# 2026-09-01：上面那条只守住了「默认值不受 cwd 影响」，却漏了「环境变量覆盖值本身
+# 也可能是相对路径」这条旁路。生产实际走的正是这条旁路 —— .env:65 的
+# AGENT_THREAD_DB=backend/data/agent_threads.sqlite3 被注入到 cwd=backend 的
+# rtc_bridge，解析成 backend/backend/data/...，与 FastAPI 后台（cwd=仓库根，
+# 不调 Load-Env 故未注入）落在不同库上，形成跨进程断链。
+
+
+def test_resolve_db_path_anchors_relative_value_to_repo_root(tmp_path, monkeypatch):
+    """相对路径必须锚定到仓库根，而不是进程 cwd（纯函数，不碰任何真实数据库）。"""
+    monkeypatch.chdir(tmp_path)
+
+    repo_root = Path(agent_thread_registry.__file__).resolve().parents[3]
+    assert (
+        agent_thread_registry.resolve_db_path("backend/data/agent_threads.sqlite3")
+        == repo_root / "backend" / "data" / "agent_threads.sqlite3"
+    )
+    # 绝对路径不受锚定影响，保持原样
+    absolute = tmp_path / "abs.sqlite3"
+    assert agent_thread_registry.resolve_db_path(str(absolute)) == absolute
+
+
+def test_relative_env_override_is_anchored_not_cwd_derived(tmp_path, monkeypatch):
+    """端到端：相对覆盖值不随 cwd 漂移（锚定根重定向到 tmp，避免碰真实库）。"""
+    monkeypatch.setattr(agent_thread_registry, "_repo_root", lambda: tmp_path)
+    monkeypatch.setenv("AGENT_THREAD_DB", "backend/data/agent_threads.sqlite3")
+    elsewhere = tmp_path / "somewhere-else"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    registry = AgentThreadRegistry()
+
+    assert registry.path == tmp_path / "backend" / "data" / "agent_threads.sqlite3"
 
 
 def test_atomic_claim_consumes_queued_thread_once(tmp_path):
