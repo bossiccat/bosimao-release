@@ -71,6 +71,18 @@ certs/*.key
 certs/*.csr
 certs/*.srl
 
+# 2026-09-01（安全修复）：上面三条带斜杠，锚定在仓库根，覆盖不到子目录里的
+# certs/（如 _red_check/certs/ 曾含 ca.key/client.key/server.key 三把私钥且
+# 未被忽略，一次 git add -A 就会进历史）。补不锚定模式，任何目录下的私钥、
+# CSR、序列号一律不入库。历史核查确认从未有私钥入库，勿放宽。
+# 注意：只忽略私钥与中间产物，ca.crt/server.crt 等公钥证书仍按原规则入库。
+**/*.key
+**/*.csr
+**/*.srl
+
+# RED 验证临时目录（内含 certs/ 私钥副本，整目录忽略）
+_red_check/
+
 # 运行时数据（进程 PID + watchdog 状态，每次运行变化，禁止提交）
 data/pids/*.pid
 data/pids/.watchdog_state.json
