@@ -16,13 +16,13 @@ import ssl
 import sys
 import time
 import urllib.request
-from pathlib import Path
 
 import websockets
 
 from .config import load_bridge_config
 from .health import HealthServer
 from .server import BridgeServer
+from .tls_paths import resolve_tls_file
 
 logger = logging.getLogger(__name__)
 
@@ -33,25 +33,17 @@ def _resolve_brain_ca_file() -> str:
 
     现场实锤（2026-09-01 rtc_bridge.log.err）：.env 经 PS5.1 Load-Env
     注入时，绝对路径中的非 ASCII 段被 GBK 误解码（"监视app" → "鐩戣…"），
-    env 路径实际不存在 → 必须做存在性校验，候选全部失效时回退
-    backend/../certs/ca.crt（相对 __file__ 解析，天然免疫编码问题）。
+    env 路径实际不存在 → 候选全部失效时回退仓库相对 certs/ca.crt
+    （相对 __file__ 解析，天然免疫编码问题）。
+
+    三段解析语义（存在性校验 + 仓库相对兜底）由 rtc_bridge.tls_paths 统一提供，
+    控制面 mTLS 客户端（ack_reporter / redemption）复用同一实现。
     """
-    candidates: list[str] = []
-    for name in ("BRAIN_CA_FILE", "SSL_CERT_FILE"):
-        value = os.environ.get(name, "").strip()
-        if value:
-            candidates.append(value)
-    repo_default = (
-        Path(__file__).resolve().parents[2] / "certs" / "ca.crt"
-    )
-    candidates.append(str(repo_default))
-    for candidate in candidates:
-        try:
-            if Path(candidate).is_file():
-                return candidate
-        except OSError:
-            continue
-    return ""
+    env_candidates = [
+        os.environ.get(name, "").strip()
+        for name in ("BRAIN_CA_FILE", "SSL_CERT_FILE")
+    ]
+    return resolve_tls_file("ca.crt", *env_candidates)
 
 
 def _make_brain_callback(api_url: str):

@@ -16,6 +16,8 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from .tls_paths import resolve_tls_file
+
 logger = logging.getLogger(__name__)
 
 MAX_TERMINATION_ID_LEN = 128
@@ -78,12 +80,20 @@ def build_ack_reporter(cfg, injected=None):
     if not all(getattr(cfg, name, "") for name in fields):
         return None
     try:
+        # 证书路径兜底：cfg 里的路径可能经 .env 注入时被 GBK 误解码成乱码
+        # （"监视app" → "鐩戣…"）——字符串非空、守卫查不出，但文件并不存在，
+        # 会导致 ssl context 构建抛 FileNotFoundError 并被下方 except 吞掉，
+        # drain 上报能力静默消失。与 Brain 回调共用同一套解析语义。
         return AckReporterClient(
             base_url=cfg.control_plane_base_url,
             service_credential=cfg.control_plane_service_credential,
-            ca_file=cfg.control_plane_ca_file,
-            client_cert_file=cfg.control_plane_client_cert_file,
-            client_key_file=cfg.control_plane_client_key_file,
+            ca_file=resolve_tls_file("ca.crt", cfg.control_plane_ca_file),
+            client_cert_file=resolve_tls_file(
+                "client.crt", cfg.control_plane_client_cert_file
+            ),
+            client_key_file=resolve_tls_file(
+                "client.key", cfg.control_plane_client_key_file
+            ),
             gateway_assertion=cfg.control_plane_gateway_assertion,
             connect_timeout_s=cfg.control_plane_connect_timeout_s,
             total_timeout_s=cfg.control_plane_total_timeout_s,

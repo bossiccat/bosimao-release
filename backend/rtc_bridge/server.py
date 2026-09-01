@@ -19,6 +19,7 @@ from .drain_ack import (
 )
 from .redemption import HelloRedemptionClient, HelloRedemptionError, validate_hello
 from .session import PeerVoiceSession
+from .tls_paths import resolve_tls_file
 from app.brain.agent_thread_registry import AgentThreadRegistry
 from app.voice.qwen_realtime_bridge import QwenRealtimeBridge
 from app.brain.hermes_worker_runner import HermesWorkerRunner
@@ -119,12 +120,20 @@ class BridgeServer:
         if self._redemption_override is not None:
             return self._redemption_override
         if self._redemption_client is None:
+            # 证书路径兜底：cfg 里的路径可能经 .env 注入时被 GBK 误解码成乱码
+            # （"监视app" → "鐩戣…"）——字符串非空、配置守卫查不出，但文件并不
+            # 存在，会让 ssl context 构建抛 FileNotFoundError 并在此处冒泡，
+            # 直接打断 hello 兑付。与 Brain 回调共用同一套解析语义。
             self._redemption_client = HelloRedemptionClient(
                 base_url=self.cfg.control_plane_base_url,
                 service_credential=self.cfg.control_plane_service_credential,
-                ca_file=self.cfg.control_plane_ca_file,
-                client_cert_file=self.cfg.control_plane_client_cert_file,
-                client_key_file=self.cfg.control_plane_client_key_file,
+                ca_file=resolve_tls_file("ca.crt", self.cfg.control_plane_ca_file),
+                client_cert_file=resolve_tls_file(
+                    "client.crt", self.cfg.control_plane_client_cert_file
+                ),
+                client_key_file=resolve_tls_file(
+                    "client.key", self.cfg.control_plane_client_key_file
+                ),
                 gateway_assertion=self.cfg.control_plane_gateway_assertion,
                 connect_timeout_s=self.cfg.control_plane_connect_timeout_s,
                 total_timeout_s=self.cfg.control_plane_total_timeout_s,
