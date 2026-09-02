@@ -213,6 +213,15 @@ impl SidecarSupervisor {
             .current_dir(&current_dir)
             .env(SIDECAR_CREDENTIAL_ENV, launch.expose())
             .env("NODE_EXTRA_CA_CERTS", &ca_cert_path)
+            // RP-07 补充（2026-09-02）：Electron 在 C++ 引导期（早于任何 JS）读取
+            // ELECTRON_RUN_AS_NODE 决定是否退化为纯 Node 模式；main.js 的 JS 层净化
+            // 来不及救引导期。宿主（如 WorkBuddy shell）注入的 ELECTRON_RUN_AS_NODE=1
+            // 会经继承链抵达 sidecar，使其 spawn 成功后秒退 → watchdog 熔断
+            //（本机实测复现；stderr 干净是因为 spawn 全部 Ok、熔断由退出计数驱动）。
+            // NODE_OPTIONS 同理在引导期生效，一并掐断；sidecar 自身需要的变量全部
+            // 由上面 .env 显式注入，不依赖宿主继承。
+            .env_remove("ELECTRON_RUN_AS_NODE")
+            .env_remove("NODE_OPTIONS")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
