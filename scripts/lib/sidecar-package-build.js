@@ -75,7 +75,13 @@ function buildPackage(config, api) {  const {
     closedFileMap,
   } = api;
   verifyAppSourceSet(config.sidecarDir);
-  runNpm(['ci'], config.sidecarDir, fail);
+  // SIDECAR_SKIP_NPM_CI=1：跳过 npm ci（前提：调用方已手动在 sidecar/ 装好全新
+  // node_modules）。背景（2026-09-02）：宿主 shell 会对长命令发起重试，两个并发
+  // npm ci 在同一 node_modules 上竞态死锁（600s 无输出后 SIGTERM，连续 3 次实证）。
+  // electron 版本一致性仍由下方 MISMATCH 校验兜底，skip 只省重装、不放松校验。
+  if (process.env.SIDECAR_SKIP_NPM_CI !== '1') {
+    runNpm(['ci'], config.sidecarDir, fail);
+  }
   const electronPackage = JSON.parse(fs.readFileSync(path.join(config.sidecarDir, 'node_modules', 'electron', 'package.json'), 'utf8'));
   if (electronPackage.version !== config.electronVersion) fail('SIDECAR_PACKAGE_ELECTRON_VERSION_MISMATCH');
 
