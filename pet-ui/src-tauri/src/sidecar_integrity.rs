@@ -252,6 +252,11 @@ fn list_runtime_files(root: &Path, manifest_path: &Path) -> Result<BTreeSet<Stri
         // generation 布局下 runtime_dir 即 selected generation 目录，其中
         // generation.json 是 pointer 协议元数据，不属于 provenance 的 runtime_files。
         Some("generation.json"),
+        // RP-07 补充（2026-09-02）：Chromium 自身会在 CWD（= generation 目录）写
+        // debug.log（registration_protocol_win.cc 等内部诊断），不受
+        // JAX_SIDECAR_LOG_DIR 控制。它与 logs/ 同属可再生运行时产物，不豁免会使
+        // 首次运行后每次 spawn 都 RuntimeSetMismatch → watchdog 熔断（本机实测）。
+        Some("debug.log"),
     ]
     .into_iter()
     .flatten()
