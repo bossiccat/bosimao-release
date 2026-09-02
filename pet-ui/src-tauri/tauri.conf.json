@@ -11,22 +11,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "pet",
-        "title": "贾克斯 · 星核",
-        "width": 200,
-        "height": 200,
-        "transparent": true,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "resizable": false,
-        "shadow": false,
-        "focusable": true,
-        "visible": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     },

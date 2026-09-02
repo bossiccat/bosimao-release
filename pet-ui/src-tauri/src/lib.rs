@@ -12,6 +12,7 @@ mod credential_windows_backend;
 #[cfg(windows)]
 mod credential_windows_lock;
 pub mod ca_trust;
+pub mod navigation;
 #[cfg(windows)]
 mod ca_trust_windows;
 #[cfg(all(windows, feature = "credential-test-support"))]

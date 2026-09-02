@@ -9,7 +9,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import { useActor } from "@xstate/react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Settings as SettingsIcon } from "lucide-react";
+import { EyeOff, Settings as SettingsIcon } from "lucide-react";
 import { Pet } from "./components/Pet";
 import { VoiceOrb, type VoicePhase } from "./components/VoiceOrb";
 import { MonitorPanel, type SessionData } from "./components/MonitorPanel";
@@ -151,6 +151,36 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 内容驱动窗口尺寸（商业化 P0 修复 2026-09-02）：全部面板（340-420px 宽）
+  // 在 200x200 视口里被裁剪，是「显示的什么东西」投诉的直接根源。
+  // 面板/弹窗打开时放大窗口，全部关闭后恢复 200x200 宠物态。
+  useEffect(() => {
+    if (!isTauri()) return;
+    let width = 200;
+    let height = 200;
+    if (showPanel) {
+      width = Math.max(width, 380);
+      height = Math.max(height, 480);
+    }
+    if (showSettings) {
+      width = Math.max(width, 380);
+      height = Math.max(height, 560);
+    }
+    if (showCaConfirm) {
+      width = Math.max(width, 400);
+      height = Math.max(height, 580);
+    }
+    if (fault) {
+      width = Math.max(width, 440);
+      height = Math.max(height, 220);
+    }
+    invoke("set_pet_size", { width, height }).catch(() => {});
+  }, [showPanel, showSettings, showCaConfirm, fault]);
+
+  const handleHidePet = () => {
+    invoke("hide_pet").catch(() => {});
+  };
+
   const handleFaultAction = (action: Fault["action"]) => {
     if (action === "reconnect") wsClient.connect();
     if (action === "open-settings") setShowSettings(true);
@@ -194,7 +224,7 @@ export default function App() {
   };
 
   return (
-    <div className="app-root">
+    <div className="app-root" data-tauri-drag-region>
       <div
         className="pet-anchor"
         role="button"
@@ -236,6 +266,15 @@ export default function App() {
         }}
       >
         <SettingsIcon size={16} strokeWidth={1.8} aria-hidden="true" />
+      </button>
+
+      <button
+        type="button"
+        className="hide-trigger"
+        aria-label="隐藏宠物（可从系统托盘找回）"
+        onClick={handleHidePet}
+      >
+        <EyeOff size={16} strokeWidth={1.8} aria-hidden="true" />
       </button>
 
       {showSettings && (
@@ -291,6 +330,17 @@ export default function App() {
         .settings-trigger:hover { background: var(--surface-raised); color: var(--fg); }
         .settings-trigger:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
         .settings-slot { position: fixed; left: 10px; bottom: 48px; z-index: 40; }
+        .hide-trigger {
+          position: fixed; right: 10px; top: 10px; z-index: 30;
+          display: inline-flex; align-items: center; justify-content: center;
+          width: var(--target-min); height: var(--target-min); /* 44x44 触达目标 */
+          border: 1px solid var(--border); border-radius: 8px;
+          background: var(--surface); color: var(--fg-2);
+          cursor: pointer;
+          transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+        }
+        .hide-trigger:hover { background: var(--surface-raised); color: var(--fg); }
+        .hide-trigger:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
         .conn-badge-slot {
           position: fixed; left: 10px; top: 10px; z-index: 40;
         }

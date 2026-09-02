@@ -70,6 +70,34 @@ fn main() {
 
     tauri::Builder::default()
         .setup(|app| {
+            // 商业化 P0 修复（2026-09-02 用户投诉）：宠物窗迁移到代码构建。
+            // 原 config 建窗无法挂 on_navigation —— 用户实测 webview 被导航到
+            // 站外页面（闲鱼风控页）在 200x200 无边框窗里渲染 = 内容失控。
+            // 迁移后导航白名单见 jax_pet::navigation（fail-closed）。
+            let pet_window = tauri::WebviewWindowBuilder::new(
+                app,
+                "pet",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("贾克斯 · 星核")
+            .inner_size(200.0, 200.0)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .shadow(false)
+            .visible(true)
+            .on_navigation(|url| {
+                let allowed = jax_pet::navigation::is_allowed_navigation(url.as_str());
+                if !allowed {
+                    eprintln!("pet webview navigation blocked: {url}");
+                }
+                allowed
+            })
+            .build()?;
+            let _ = pet_window; // label "pet" 供 get_webview_window 使用
+
             // 注入真实日志目录：app_log_dir()/crash，后续运行时 panic 落盘于此。
             if let Ok(log_dir) = app.path().app_log_dir() {
                 crash_report::set_log_dir(log_dir.join("crash"));
@@ -130,6 +158,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             window::set_ignore_cursor_events,
             window::get_sidecar_status,
+            hide_pet,
+            set_pet_size,
             install_trusted_ca,
             is_ca_install_required,
             get_owner_credential,
@@ -144,6 +174,28 @@ fn main() {
 fn install_trusted_ca(app: tauri::AppHandle) -> Result<String, String> {
     let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
     jax_pet::ca_trust::install_current_user_root_ca(&resource_dir)
+}
+
+/// 隐藏宠物窗（商业化 P0 修复 2026-09-02）：窗口内「隐藏」控件的落地动作。
+/// 恢复入口 = 托盘「显示/隐藏宠物」（tray.rs toggle_window）。
+#[tauri::command]
+fn hide_pet(app: tauri::AppHandle) -> Result<(), String> {
+    let win = app
+        .get_webview_window("pet")
+        .ok_or("pet window not found")?;
+    win.hide().map_err(|e| e.to_string())
+}
+
+/// 内容驱动窗口尺寸（商业化 P0 修复 2026-09-02）：200x200 视口裁剪了全部
+/// 340-420px 宽的面板/弹窗（CA 确认卡、监控面板、设置、错误横幅全部溢出）。
+/// 前端按当前 UI 状态 invoke 本命令调整窗口，面板关闭时恢复 200x200。
+#[tauri::command]
+fn set_pet_size(app: tauri::AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let win = app
+        .get_webview_window("pet")
+        .ok_or("pet window not found")?;
+    win.set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())
 }
 
 /// 前端 mount 时拉取：是否还需弹 CA 确认（未安装 = true）。
