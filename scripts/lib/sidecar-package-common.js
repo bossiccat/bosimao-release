@@ -31,7 +31,7 @@ const ELECTRON_REQUIRED = [
   'locales/en-US.pak',
 ];
 const APP_SOURCES = [
-  'audio.js', 'bridge.js', 'config.js', 'exit-protocol.js', 'index.html', 'logger.js',
+  'audio.js', 'bridge.js', 'config.js', 'exit-protocol.js', 'index.html', 'intent-selection.js', 'logger.js',
   'main.js', 'phone.js', 'rtc-startup.js', 'rtc-termination.js', 'rtc-test-audio.js', 'rtc.js',
   'security.js',
   'package.json', 'package-lock.json',
