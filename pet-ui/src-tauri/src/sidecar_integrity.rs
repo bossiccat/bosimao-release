@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::sidecar::{IntegritySpec, SidecarError, SidecarSpec};
 use crate::sidecar_runtime_trust::validate_runtime_trust;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeFile {
     path: String,
@@ -110,7 +110,22 @@ pub(crate) fn validate_runtime(spec: &SidecarSpec) -> Result<(), SidecarError> {
     let manifest: ProvenanceManifest =
         serde_json::from_slice(&bytes).map_err(|_| SidecarError::ManifestInvalid)?;
     validate_metadata(&manifest, spec)?;
-    let runtime_by_path = validate_runtime_entries(&manifest.runtime_files, runtime_dir)?;
+    // RP-07 P0（2026-09-02）：debug.log 是 Chromium 在 CWD（= generation 目录）
+    // 写的再生产物（registration_protocol_win.cc 等内部诊断，不受
+    // JAX_SIDECAR_LOG_DIR 控制）。staging 捕获时它可能被写进 provenance 的
+    // runtime_files（v4m 安装实测 3830 项含 debug.log），但安装侧既不保证其
+    // 存在、也不保证内容一致。actual 侧已在 list_runtime_files 豁免；此处
+    // expected 侧同步豁免，否则首次 spawn 前完整性门即熔断
+    // （RuntimeSetMismatch / RuntimeHashMismatch）→ watchdog fused。
+    // 豁免不弱化安全边界：manifest 本身受 ManifestDigestMismatch 保护，且
+    // actual 侧从不对其做 hash 校验（两侧若不对偶只会制造假阳性熔断）。
+    let declared: Vec<RuntimeFile> = manifest
+        .runtime_files
+        .iter()
+        .filter(|file| file.path != "debug.log")
+        .cloned()
+        .collect();
+    let runtime_by_path = validate_runtime_entries(&declared, runtime_dir)?;
     validate_native_subset(&manifest.native_files, &runtime_by_path)?;
     let actual = list_runtime_files(runtime_dir, manifest_path)?;
     if actual != runtime_by_path.keys().cloned().collect() {
