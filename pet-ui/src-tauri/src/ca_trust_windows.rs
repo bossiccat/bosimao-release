@@ -1,10 +1,19 @@
 #![cfg(windows)]
 
-//! ca_trust_windows.rs — Windows「当前用户」受信根库安装实现（ADR-020 A2）。
+//! ca_trust_windows.rs — Windows 受信根库安装实现（ADR-020 A2；2026-09-03 库选择策略修订）。
 //!
-//! 幂等把 ca.crt 装进当前用户「受信任的根证书颁发机构」库（CURRENT_USER，无需管理员），
-//! 按 SHA-1 thumbprint 判重，并把 thumbprint 写入 HKCU\Software\JaxPet\ca_thumbprint
-//! 供卸载清理。卸载按该 thumbprint 用 CertDeleteCertificateFromStore 干净移除。
+//! 安装策略（2026-09-03 根因修复）：
+//! 1. 优先写 LOCAL_MACHINE\Root——无确认弹窗、全机生效；仅当机器库不可写
+//!    （如非提权普通用户）才回落 CURRENT_USER\Root（交互环境弹窗可确认）。
+//!    背景：CU\Root 写入被 Windows 强制确认弹窗，非交互会话报
+//!    「此操作中不允许使用 UI」必然失败（v4n 实测）。
+//! 2. ca.crt 支持 PEM 与 DER 双格式：PEM 自动剥壳转 DER（历史版本直接喂
+//!    DER-only 的 CertCreateCertificateContext，对 PEM 文件必然失败——
+//!    本机 certs/ca.crt 实为 PEM，此前从未真正安装成功）。
+//! 3. 幂等按 SHA-1 thumbprint 判重；注册表写双值：
+//!    `HKCU\Software\JaxPet\ca_thumbprint` + `ca_store`
+//!    （"LocalMachine" | "CurrentUser"）供判重与卸载定位。
+//!    卸载按记录定位对应库；无 ca_store 标记的旧记录两库都尝试（兼容）。
 
 use std::path::Path;
 
@@ -13,12 +22,16 @@ use windows::Win32::Security::Cryptography::{
     CertDeleteCertificateFromStore, CertFindCertificateInStore, CertFreeCertificateContext,
     CertOpenStore, CryptHashCertificate, CALG_SHA1, CERT_CONTEXT, CERT_FIND_SHA1_HASH,
     CERT_OPEN_STORE_FLAGS, CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_PROV_SYSTEM_W,
-    CERT_SYSTEM_STORE_CURRENT_USER, HCERTSTORE, X509_ASN_ENCODING,
+    CERT_SYSTEM_STORE_CURRENT_USER, CERT_SYSTEM_STORE_LOCAL_MACHINE,
+    HCERTSTORE, X509_ASN_ENCODING,
 };
 
 const ROOT_STORE_NAME: &str = "Root";
 const REG_KEY: &str = r"Software\JaxPet";
 const REG_VALUE: &str = "ca_thumbprint";
+const REG_STORE_VALUE: &str = "ca_store";
+const STORE_MARKER_LM: &str = "LocalMachine";
+const STORE_MARKER_CU: &str = "CurrentUser";
 const SHA1_LEN: usize = 20;
 
 /// CertFindCertificateInStore(CERT_FIND_SHA1_HASH) 所需的 CRYPT_HASH_BLOB 布局。
@@ -29,30 +42,54 @@ struct CryptHashBlob {
     pb_data: *const u8,
 }
 
-/// 幂等安装当前用户根 CA，返回 SHA-1 thumbprint 大写十六进制串。
+/// 幂等安装根 CA：优先 LOCAL_MACHINE\Root，权限失败回落 CURRENT_USER\Root。
+/// 返回 SHA-1 thumbprint 大写十六进制串。
 pub fn install_current_user_root_ca(resource_dir: &Path) -> Result<String, String> {
     let ca_path = resource_dir.join("certs").join("ca.crt");
-    let der = std::fs::read(&ca_path)
-        .map_err(|e| format!("读取 CA 证书失败 {}: {e}", ca_path.display()))?;
+    let der = load_ca_der(&ca_path)?;
 
     let thumbprint = sha1_thumbprint(&der)?;
     let thumbprint_hex = to_hex(&thumbprint);
 
     // 受信面扩张：安装留痕日志，便于首启/隐私说明审计。
-    eprintln!("[ca_trust] installing self-signed root CA thumbprint {thumbprint_hex} into current-user root store");
+    eprintln!(
+        "[ca_trust] installing self-signed root CA thumbprint {thumbprint_hex} (LocalMachine preferred, CurrentUser fallback)"
+    );
 
-    let store = open_root_store()?;
+    match try_install_into(CERT_SYSTEM_STORE_LOCAL_MACHINE, &der, &thumbprint_hex, STORE_MARKER_LM) {
+        Ok(()) => return Ok(thumbprint_hex),
+        Err(e_lm) => {
+            eprintln!("[ca_trust] LocalMachine\\Root 不可用（{e_lm}），回落 CurrentUser\\Root");
+        }
+    }
+    try_install_into(CERT_SYSTEM_STORE_CURRENT_USER, &der, &thumbprint_hex, STORE_MARKER_CU)?;
+    Ok(thumbprint_hex)
+}
 
-    // 幂等：同 thumbprint 已存在则跳过安装，仅刷新注册表记录。
-    if store_has_thumbprint(store, &thumbprint) {
-        write_thumbprint_registry(&thumbprint_hex)?;
+/// 向指定系统根库幂等安装，成功后把 thumbprint + 库标记写入注册表。
+fn try_install_into(
+    system_flag: u32,
+    der: &[u8],
+    thumbprint_hex: &str,
+    store_marker: &str,
+) -> Result<(), String> {
+    let store = open_system_root_store(system_flag)?;
+
+    let done = |store: HCERTSTORE| -> Result<(), String> {
+        write_thumbprint_registry(thumbprint_hex)?;
+        write_store_registry(store_marker)?;
         unsafe {
             let _ = CertCloseStore(Some(store), 0);
         }
-        return Ok(thumbprint_hex);
+        Ok(())
+    };
+
+    // 幂等：同 thumbprint 已存在则跳过安装，仅刷新注册表记录。
+    if store_has_thumbprint(store, &from_hex(thumbprint_hex)?) {
+        return done(store);
     }
 
-    let cert = unsafe { CertCreateCertificateContext(X509_ASN_ENCODING, &der) };
+    let cert = unsafe { CertCreateCertificateContext(X509_ASN_ENCODING, der) };
     if cert.is_null() {
         unsafe {
             let _ = CertCloseStore(Some(store), 0);
@@ -75,17 +112,14 @@ pub fn install_current_user_root_ca(resource_dir: &Path) -> Result<String, Strin
         unsafe {
             let _ = CertCloseStore(Some(store), 0);
         }
-        return Err(format!("安装根证书到当前用户根库失败: {e}"));
+        return Err(format!("安装根证书到系统根库失败: {e}"));
     }
 
-    write_thumbprint_registry(&thumbprint_hex)?;
-    unsafe {
-        let _ = CertCloseStore(Some(store), 0);
-    }
-    Ok(thumbprint_hex)
+    done(store)
 }
 
-/// 是否已安装当前用户根 CA（真判重：注册表 thumbprint 记录 + 根库命中）。
+/// 是否已安装根 CA（真判重：注册表 thumbprint 记录 + 对应根库命中；
+/// 无 ca_store 标记的旧记录两库任一命中即可）。
 pub fn is_ca_installed() -> bool {
     let Some(thumbprint_hex) = read_thumbprint_registry().ok().flatten() else {
         return false;
@@ -93,47 +127,69 @@ pub fn is_ca_installed() -> bool {
     let Ok(thumbprint) = from_hex(&thumbprint_hex) else {
         return false;
     };
-    let Ok(store) = open_root_store() else {
-        return false;
+    let marker = read_store_registry().ok().flatten();
+    let flags: &[u32] = match marker.as_deref() {
+        Some(STORE_MARKER_LM) => &[CERT_SYSTEM_STORE_LOCAL_MACHINE],
+        Some(STORE_MARKER_CU) => &[CERT_SYSTEM_STORE_CURRENT_USER],
+        _ => &[CERT_SYSTEM_STORE_LOCAL_MACHINE, CERT_SYSTEM_STORE_CURRENT_USER],
     };
-    let present = store_has_thumbprint(store, &thumbprint);
-    unsafe {
-        let _ = CertCloseStore(Some(store), 0);
+    for flag in flags {
+        if let Ok(store) = open_system_root_store(*flag) {
+            let present = store_has_thumbprint(store, &thumbprint);
+            unsafe {
+                let _ = CertCloseStore(Some(store), 0);
+            }
+            if present {
+                return true;
+            }
+        }
     }
-    present
+    false
 }
 
-/// 卸载清理（联动阶段 D4）：按注册表记录的 thumbprint 从当前用户根库删除。
+/// 卸载清理（联动阶段 D4）：按注册表记录定位库删除 thumbprint 证书；
+/// 无标记旧记录两库都尝试。
 pub fn remove_current_user_root_ca() -> Result<(), String> {
     let Some(thumbprint_hex) = read_thumbprint_registry()? else {
         return Ok(()); // 无记录：无可清理。
     };
     let thumbprint = from_hex(&thumbprint_hex)?;
-    let store = open_root_store()?;
-    if let Some(found) = find_thumbprint(store, &thumbprint) {
+    let marker = read_store_registry().ok().flatten();
+    let flags: &[u32] = match marker.as_deref() {
+        Some(STORE_MARKER_LM) => &[CERT_SYSTEM_STORE_LOCAL_MACHINE],
+        Some(STORE_MARKER_CU) => &[CERT_SYSTEM_STORE_CURRENT_USER],
+        _ => &[CERT_SYSTEM_STORE_LOCAL_MACHINE, CERT_SYSTEM_STORE_CURRENT_USER],
+    };
+    for flag in flags {
+        let Ok(store) = open_system_root_store(*flag) else {
+            continue;
+        };
+        if let Some(found) = find_thumbprint(store, &thumbprint) {
+            unsafe {
+                CertDeleteCertificateFromStore(found)
+                    .map_err(|e| format!("删除根证书失败: {e}"))?;
+            }
+        }
         unsafe {
-            CertDeleteCertificateFromStore(found)
-                .map_err(|e| format!("删除根证书失败: {e}"))?;
+            let _ = CertCloseStore(Some(store), 0);
         }
     }
-    unsafe {
-        let _ = CertCloseStore(Some(store), 0);
-    }
     delete_thumbprint_registry()?;
+    delete_store_registry()?;
     Ok(())
 }
 
-fn open_root_store() -> Result<HCERTSTORE, String> {
+fn open_system_root_store(system_flag: u32) -> Result<HCERTSTORE, String> {
     let name = wide(ROOT_STORE_NAME);
     unsafe {
         CertOpenStore(
             CERT_STORE_PROV_SYSTEM_W,
             X509_ASN_ENCODING,
             None,
-            CERT_OPEN_STORE_FLAGS(CERT_SYSTEM_STORE_CURRENT_USER),
+            CERT_OPEN_STORE_FLAGS(system_flag),
             Some(name.as_ptr() as *const std::ffi::c_void),
         )
-        .map_err(|e| format!("打开当前用户根证书库失败: {e}"))
+        .map_err(|e| format!("打开系统根证书库失败: {e}"))
     }
 }
 
@@ -196,6 +252,25 @@ fn write_thumbprint_registry(thumbprint_hex: &str) -> Result<(), String> {
         .map_err(|e| format!("写入 {REG_KEY}\\{REG_VALUE} 失败: {e}"))
 }
 
+fn write_store_registry(store_marker: &str) -> Result<(), String> {
+    let (key, _disposition) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .create_subkey(REG_KEY)
+        .map_err(|e| format!("创建注册表键 {REG_KEY} 失败: {e}"))?;
+    key.set_value(REG_STORE_VALUE, &store_marker)
+        .map_err(|e| format!("写入 {REG_KEY}\\{REG_STORE_VALUE} 失败: {e}"))
+}
+
+fn read_store_registry() -> Result<Option<String>, String> {
+    let key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey(REG_KEY);
+    let Ok(key) = key else {
+        return Ok(None);
+    };
+    match key.get_value::<String, _>(REG_STORE_VALUE) {
+        Ok(value) => Ok(Some(value)),
+        Err(_) => Ok(None), // 旧版本无 ca_store 记录。
+    }
+}
+
 fn read_thumbprint_registry() -> Result<Option<String>, String> {
     let key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey(REG_KEY);
     let Ok(key) = key else {
@@ -216,6 +291,78 @@ fn delete_thumbprint_registry() -> Result<(), String> {
         .map_err(|e| format!("打开注册表键 {REG_KEY} 失败: {e}"))?;
     key.delete_value(REG_VALUE)
         .map_err(|e| format!("删除 {REG_KEY}\\{REG_VALUE} 失败: {e}"))
+}
+
+fn delete_store_registry() -> Result<(), String> {
+    let key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey_with_flags(
+            REG_KEY,
+            winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
+        )
+        .map_err(|e| format!("打开注册表键 {REG_KEY} 失败: {e}"))?;
+    key.delete_value(REG_STORE_VALUE)
+        .map_err(|e| format!("删除 {REG_KEY}\\{REG_STORE_VALUE} 失败: {e}"))
+}
+
+/// 读取 ca.crt：PEM 自动剥壳转 DER；纯 DER 原样透传（向后兼容）。
+fn load_ca_der(ca_path: &Path) -> Result<Vec<u8>, String> {
+    let raw = std::fs::read(ca_path)
+        .map_err(|e| format!("读取 CA 证书失败 {}: {e}", ca_path.display()))?;
+    if let Some(der) = pem_to_der(&raw) {
+        return Ok(der);
+    }
+    Ok(raw)
+}
+
+/// PEM（-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----）→ DER。
+/// 非 PEM 输入返回 None。
+fn pem_to_der(raw: &[u8]) -> Option<Vec<u8>> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    let text = std::str::from_utf8(raw).ok()?;
+    let begin = text.find(BEGIN)? + BEGIN.len();
+    let end = text[begin..].find(END)? + begin;
+    let b64: Vec<u8> = text[begin..end]
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    base64_decode(&b64).ok()
+}
+
+/// 紧凑标准 base64 解码（跳过空白，支持 '=' padding）。避免为此新增依赖。
+fn base64_decode(input: &[u8]) -> Result<Vec<u8>, String> {
+    fn val(b: u8) -> Result<u32, String> {
+        match b {
+            b'A'..=b'Z' => Ok((b - b'A') as u32),
+            b'a'..=b'z' => Ok((b - b'a' + 26) as u32),
+            b'0'..=b'9' => Ok((b - b'0' + 52) as u32),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => Err(format!("base64 非法字符 {b:#x}")),
+        }
+    }
+    let clean: Vec<u8> = input
+        .iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    let pad = clean.iter().rev().take_while(|&&b| b == b'=').count();
+    let body = &clean[..clean.len() - pad];
+    let mut out = Vec::with_capacity(body.len() * 3 / 4);
+    for chunk in body.chunks(4) {
+        let mut acc: u32 = 0;
+        for (i, &b) in chunk.iter().enumerate() {
+            acc |= val(b)? << (18 - 6 * i);
+        }
+        out.push((acc >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((acc >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(acc as u8);
+        }
+    }
+    Ok(out)
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -241,4 +388,37 @@ fn from_hex(hex: &str) -> Result<[u8; SHA1_LEN], String> {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_decode_roundtrip_known_vectors() {
+        assert_eq!(base64_decode(b"").unwrap(), Vec::<u8>::new());
+        assert_eq!(base64_decode(b"Zg==").unwrap(), b"f".to_vec());
+        assert_eq!(base64_decode(b"Zm8=").unwrap(), b"fo".to_vec());
+        assert_eq!(base64_decode(b"Zm9v").unwrap(), b"foo".to_vec());
+        assert_eq!(base64_decode(b"Zm9vYg==").unwrap(), b"foob".to_vec());
+        assert_eq!(base64_decode(b"Zm9vYmE=").unwrap(), b"fooba".to_vec());
+        assert_eq!(base64_decode(b"Zm9vYmFy").unwrap(), b"foobar".to_vec());
+    }
+
+    #[test]
+    fn base64_decode_tolerates_whitespace() {
+        assert_eq!(
+            base64_decode(b"Zm9v\r\nYmFy\n").unwrap(),
+            b"foobar".to_vec()
+        );
+    }
+
+    #[test]
+    fn pem_to_der_extracts_payload_and_ignores_der() {
+        // 3 字节 DER 模拟：0xDE 0xAD 0xBE → base64 "3q2+"。
+        let pem = b"garbage header\n-----BEGIN CERTIFICATE-----\n3q2+\n-----END CERTIFICATE-----\ntrailer";
+        assert_eq!(pem_to_der(pem).unwrap(), vec![0xDE, 0xAD, 0xBE]);
+        assert!(pem_to_der(b"\xDE\xAD\xBE").is_none(), "纯 DER 应返回 None 走透传");
+        assert!(pem_to_der(b"-----BEGIN CERTIFICATE-----\n@@@!\n-----END CERTIFICATE-----").is_none());
+    }
 }
