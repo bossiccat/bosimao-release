@@ -384,6 +384,11 @@ fn walk_generation_payload(root: &Path) -> Result<BTreeMap<String, String>, Reso
     //（JAX_SIDECAR_LOG_DIR）；此处排除可再生运行时产物，防止历史残留导致
     // ExtraPayload fail-closed。仅豁免顶层 logs/ 前缀，其余路径仍闭集。
     files.retain(|rel, _| !rel.starts_with("logs/"));
+    // RP-07 补充（2026-09-02）：Chromium 自身会在 CWD（= generation 目录）写顶层
+    // debug.log（registration_protocol_win.cc 等内部诊断），不受 JAX_SIDECAR_LOG_DIR
+    // 控制。与 logs/ 同属可再生运行时产物；resolve 阶段 ExtraPayload 不豁免它会使
+    // 首次运行后 resolve 永久失败 → watchdog 熔断（本机实测，stderr 完整错误链证实）。
+    files.remove("debug.log");
     Ok(files)
 }
 
