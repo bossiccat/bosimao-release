@@ -39,10 +39,16 @@ app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('disable-gpu-sandbox');
 
 // TLS 信任锚（ADR-020 A1）：app.whenReady() 前读取 NODE_EXTRA_CA_CERTS 指向的
-// ca.crt，计算 SHA-256 指纹，注册 certificate-error pinning——仅当证书链（leaf 或
-// issuer）指纹命中该 CA 指纹时 callback(true)，否则 callback(false)。
+// ca.crt，注册 certificate-error pinning——仅当 leaf 证书能被 pinned CA 验签
+// （或 leaf 本身就是该 CA）时 callback(true)，否则 callback(false)。
 // 缺失/不可读 = fail-closed（记 FATAL 并 fatalMain，绝不降级为无条件接受）。
-function loadCaFingerprint256() {
+//
+// 2026-09-02 修正（RP-07 后续，实证 net::ERR_CERT_AUTHORITY_INVALID）：
+// 旧实现依赖 certificate.issuerCert 指纹比对，但 Chromium 在验证失败时经常不提供
+// issuerCert（undefined），导致 leaf!=CA 的正常 CA 签发证书永远被拒。现改为用
+// Node X509Certificate.verify(publicKey) 对 pinned CA 做密码学级验签，不依赖
+// Chromium 提供的链信息；验签通过 = 该证书确由 pinned CA 签发。
+function loadPinnedCaCertificate() {
   const caPath = process.env.NODE_EXTRA_CA_CERTS;
   if (!caPath) {
     console.error('[main] fatal NODE_EXTRA_CA_CERTS is not set; refusing to run without a pinned CA');
@@ -58,7 +64,7 @@ function loadCaFingerprint256() {
     return null;
   }
   try {
-    return new X509Certificate(pem).fingerprint256;
+    return new X509Certificate(pem);
   } catch (error) {
     console.error(`[main] fatal invalid ca.crt at ${caPath}: ${error.message}`);
     fatalMain();
@@ -66,23 +72,20 @@ function loadCaFingerprint256() {
   }
 }
 
-const caFingerprint256 = loadCaFingerprint256();
+const pinnedCaCertificate = loadPinnedCaCertificate();
 
 // 覆盖 Chromium 网络栈（renderer 进程 fetch，如 rtc.js/phone.js 的控制面调用）。
-// 不做 URL 放行，只按 CA 指纹钉证书；指纹不命中一律拒绝。
+// 不做 URL 放行，只按 pinned CA 验签放行；验签不通过一律拒绝（fail-closed）。
 app.on('certificate-error', (_event, _webContents, _url, _error, certificate, callback) => {
-  if (!caFingerprint256) {
+  if (!pinnedCaCertificate) {
     callback(false);
     return;
   }
   try {
     const leaf = new X509Certificate(certificate.data);
-    const issuer = certificate.issuerCert
-      ? new X509Certificate(certificate.issuerCert.data)
-      : null;
     const trusted =
-      leaf.fingerprint256 === caFingerprint256 ||
-      (issuer !== null && issuer.fingerprint256 === caFingerprint256);
+      leaf.fingerprint256 === pinnedCaCertificate.fingerprint256 ||
+      leaf.verify(pinnedCaCertificate.publicKey);
     callback(trusted);
   } catch (_) {
     callback(false);
