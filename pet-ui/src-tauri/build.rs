@@ -178,5 +178,12 @@ fn main() {
     emit_rerun_rules(&manifest_dir);
     verify_sidecar_for_release(&manifest_dir);
     clear_readonly_target_resources();
+    // 测试专用逃生门（2026-09-02）：tauri_build 的资源拷贝会把整个 runtime（数千
+    // node_modules 文件）写进 target，纯逻辑测试（如 sidecar_runtime_pointer）
+    // 既不需要也不应该为此付出完整拷贝成本；JAX_SKIP_TAURI_BUILD=1 时跳过。
+    // 默认（未设该变量）行为完全不变，发布打包不受影响。
+    if std::env::var("JAX_SKIP_TAURI_BUILD").as_deref() == Ok("1") {
+        return;
+    }
     tauri_build::build()
 }

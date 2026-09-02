@@ -471,16 +471,22 @@ pub fn resolve_sidecar_runtime(
             hash: hash.clone(),
         })?;
     }
+    // RP-07 补充（2026-09-02 v4k 实证）：v4k 打包时 staging gen 残留的顶层 debug.log
+    // 被计入 manifest（generation.json 受 provenance 哈希保护，数据侧不可修正）。
+    // 56937f6 只豁免了 walk（actual）侧，expected 侧仍声明 debug.log →
+    // expected-actual 差集报 PayloadMissing → watchdog 熔断。两侧同时豁免。
+    let mut files = metadata.files;
+    files.remove("debug.log");
     let actual = walk_generation_payload(&generation_dir)?;
     let actual_keys: BTreeSet<&String> = actual.keys().collect();
-    let expected_keys: BTreeSet<&String> = metadata.files.keys().collect();
+    let expected_keys: BTreeSet<&String> = files.keys().collect();
     for rel in actual_keys.difference(&expected_keys) {
         return Err(ResolverError::ExtraPayload((*rel).clone()));
     }
     for rel in expected_keys.difference(&actual_keys) {
         return Err(ResolverError::PayloadMissing(generation_dir.join(*rel)));
     }
-    for (rel, hash) in &metadata.files {
+    for (rel, hash) in &files {
         if actual.get(rel) != Some(hash) {
             return Err(ResolverError::PayloadHashMismatch(generation_dir.join(rel)));
         }
@@ -493,7 +499,7 @@ pub fn resolve_sidecar_runtime(
         binary_path,
         manifest_path: provenance_path,
         manifest_sha256: pointer.manifest_sha256,
-        expected_hashes: metadata.files,
+        expected_hashes: files,
         lease,
     })
 }

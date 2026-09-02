@@ -598,6 +598,33 @@ fn symlink_payload_fails_closed() {
     assert!(matches!(error, ResolverError::PayloadSymlink(_)), "{error:?}");
 }
 
+// ---- debug.log 双侧豁免（RP-07 追加，2026-09-02 v4k 实证）----
+
+#[test]
+fn manifest_declared_debug_log_must_not_fail_resolve() {
+    let fixture = RuntimeFixture::build();
+    // v4k 打包时 staging gen 残留的顶层 debug.log 被计入 manifest（打包管线缺陷）。
+    // generation.json 受 provenance 哈希保护不可改数据侧，resolver 必须双侧豁免：
+    // 56937f6 只豁免了 walk（actual）侧，expected 侧仍声明 → PayloadMissing → 熔断。
+    let debug_log = fixture.generation_dir.join("debug.log");
+    std::fs::write(&debug_log, b"chromium-debug-output").expect("write debug.log");
+    let mut files = read_files_map(&fixture.generation_dir);
+    files.insert(
+        "debug.log".to_string(),
+        sha256_bytes(b"chromium-debug-output"),
+    );
+    write_generation_metadata(
+        &fixture.generation_dir,
+        &fixture.generation,
+        &fixture.manifest_sha256,
+        &files,
+    );
+    let resolved = fixture
+        .resolve()
+        .expect("manifest-declared debug.log must not fail resolve");
+    assert_eq!(resolved.generation_root(), fixture.generation_dir);
+}
+
 fn read_files_map(generation_dir: &Path) -> BTreeMap<String, String> {
     let bytes = std::fs::read(generation_dir.join("generation.json")).expect("read generation.json");
     let value: serde_json::Value = serde_json::from_slice(&bytes).expect("parse generation.json");
