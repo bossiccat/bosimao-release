@@ -104,6 +104,28 @@ app.whenReady().then(async () => {
     height: 240,
     webPreferences: { nodeIntegration: true, contextIsolation: false },
   });
+  // 诊断增强（2026-09-02）：renderer "Failed to fetch" 无 cause，归因困难；
+  // main stdout/stderr 被 supervisor 丢弃（sidecar.rs Stdio::null），
+  // 网络错误（精确 net::ERR_* 码）与 renderer console 统一落盘到诊断文件。
+  // JAX_SIDECAR_LOG_DIR 与 logger.js 同源（宿主注入；未注入退回 __dirname/logs）。
+  const diagFile = process.env.JAX_SIDECAR_LOG_DIR
+    ? path.join(process.env.JAX_SIDECAR_LOG_DIR, 'sidecar-main-diag.log')
+    : path.join(__dirname, 'logs', 'sidecar-main-diag.log');
+  function diagLog(msg) {
+    try {
+      fs.appendFileSync(diagFile, `[${new Date().toISOString()}] ${msg}\n`);
+    } catch (_) {
+      /* 诊断写失败不影响业务 */
+    }
+  }
+  win.webContents.session.webRequest.onErrorOccurred((details) => {
+    diagLog(`[net] ${details.resourceType} ${details.url} -> ${details.error}`);
+  });
+  win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level >= 2) {
+      diagLog(`[console:${level}] ${sourceId}:${line} ${message}`);
+    }
+  });
   win.webContents.on('render-process-gone', fatalMain);
   win.webContents.on('unresponsive', fatalMain);
   try {
