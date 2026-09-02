@@ -38,8 +38,29 @@ function copyTreeInto(sourceDir, targetDir) {
   }
 }
 
-function buildPackage(config, api) {
-  const {
+// 2026-09-02 大文件外部进程拷贝规避：copyTreeInto（cpSync→copyFileSync）之后，
+// build 进程内对 ~180MB electron.exe 的连续 copyFileSync/rmSync 在 npm ci 子进程
+// 之后稳定静默硬死（runs 3/5/6/7 复现：staging 74 文件 + jax-rtc-sidecar.exe 完成、
+// electron.exe 残留、无 JS 异常输出、租约 unlink 失败留锁）；同样的操作在独立
+// node 进程（含沙箱内/外）均正常。与大文件 cpSync 0xC0000409 同属宿主 hook 层
+// 进程内状态故障家族。规避：大文件操作改走 cmd.exe 外部进程，绕开 node fs 层。
+function copyFileExternal(source, target, fail) {
+  const result = spawnSync('cmd.exe', ['/d', '/c', 'copy', '/y', source, target], {
+    stdio: 'ignore',
+    shell: false,
+  });
+  if (result.status !== 0 || !fs.existsSync(target)) fail('SIDECAR_PACKAGE_COPY_FILE_EXTERNAL_FAILED');
+}
+
+function removeFileExternal(target, fail) {
+  const result = spawnSync('cmd.exe', ['/d', '/c', 'del', '/f', '/q', target], {
+    stdio: 'ignore',
+    shell: false,
+  });
+  if (fs.existsSync(target)) fail('SIDECAR_PACKAGE_REMOVE_FILE_EXTERNAL_FAILED');
+}
+
+function buildPackage(config, api) {  const {
     APP_SOURCES,
     createProvenance,
     fail,
@@ -68,9 +89,9 @@ function buildPackage(config, api) {
   copyTreeInto(electronDist, stagingDir);
   const electronExe = path.join(stagingDir, 'electron.exe');
   if (!fs.existsSync(electronExe)) fail('SIDECAR_PACKAGE_ELECTRON_RUNTIME_MISSING');
-  fs.copyFileSync(electronExe, path.join(stagingDir, config.installedFile));
-  fs.copyFileSync(electronExe, config.executable);
-  fs.rmSync(electronExe);
+  copyFileExternal(electronExe, path.join(stagingDir, config.installedFile), fail);
+  copyFileExternal(electronExe, config.executable, fail);
+  removeFileExternal(electronExe, fail);
 
   // resources/app 组装。
   fs.rmSync(path.join(stagingDir, 'resources', 'default_app.asar'), { force: true });
