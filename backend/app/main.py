@@ -8,6 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from .api import (
     routes_brain,
@@ -218,6 +219,21 @@ app = FastAPI(
     title="贾克斯模式 - AI 智能体监控中枢",
     version=app_config.settings.app_version,
     lifespan=lifespan,
+)
+
+# sidecar renderer CORS（RP-07 后续修复，2026-09-02）：
+# rtc.js/phone.js 在 file:// 页面（Origin: null）用 Chromium fetch 调控制面，
+# 自定义头触发 OPTIONS preflight，无 CORS 中间件时 405 → "Failed to fetch"。
+# fail-closed：仅放行 file:// 的 Origin 字面量 "null"；普通网页 Origin 不放行；
+# allow_credentials=False（Bearer 控制面，无 cookie）。preflight 由中间件应答、
+# 不进业务守卫；实请求鉴权语义不变（无凭证仍 401）。
+# 契约：backend/tests/contract/test_sidecar_renderer_cors_contract.py
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["null"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "X-Request-Nonce", "Content-Type"],
+    allow_credentials=False,
 )
 
 # 阶段 E-1：全局未捕获异常兜底（路由内未 try/except 的异常 → 落盘 + 统一 500）
