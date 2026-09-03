@@ -98,6 +98,22 @@ fn main() {
             .build()?;
             let _ = pet_window; // label "pet" 供 get_webview_window 使用
 
+            // 商业化 P1 修复（2026-09-03）：关闭窗口 ≠ 退出应用。
+            // Tauri 默认所有窗口销毁即进程退出；宠物窗无 on_window_event 防护时，
+            // 任何 Alt+F4 / 外部 WM_CLOSE（含桌面级干扰程序）都会让整个 app 静默
+            // 消失（v4o 实机 2-10 分钟内多次复现）。宠物窗标准行为：关闭 = 隐藏
+            // 到托盘，恢复与退出入口都在托盘菜单（tray.rs show/quit）。
+            {
+                let win_for_close = pet_window.clone();
+                pet_window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = win_for_close.hide();
+                        eprintln!("pet window close requested -> hidden to tray (close-to-hide policy)");
+                    }
+                });
+            }
+
             // 注入真实日志目录：app_log_dir()/crash，后续运行时 panic 落盘于此。
             if let Ok(log_dir) = app.path().app_log_dir() {
                 crash_report::set_log_dir(log_dir.join("crash"));
