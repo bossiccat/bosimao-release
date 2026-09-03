@@ -161,6 +161,7 @@
 - 2026-08-10 输入就绪核验（只读，不实施）：后端受保护配置字段已存在（`backend/app/config.py` 的 `voice_sidecar_credential` / `_next` / `_next_enabled_at` / `_next_expires_at` / `_config_revision`）；Windows 三槽 Credential Manager backend 已实现并通过独立 QA（`credential_windows.rs` + Win32 backend + SID hash named mutex）；NSIS 安装包已构建（`outputs/JaxPet-Setup-x86_64-20260810.exe`，94,757,822 B）。仍缺：`src/bin/provision_sidecar_credential.rs`、NSIS custom action 编排、限权匿名 pipe/继承 handle 通道、代码签名证书与干净 Windows 机 E2E。按契约 §6.1"缺任一证据继续 blocking"与"禁止硬写孤立 helper"边界，本轮不实施孤立 provisioner。
 - 2026-08-10 16:45 切片 1 完成（实现侧）：`pet-ui/src-tauri/src/bin/provision_sidecar_credential.rs`（153 行）已按 §4/§6.1 落地：继承 stdin 匿名管道读一次性 secret（Zeroizing、限长 512）→ `SecretString::parse_utf8` validate → revoke 幂等清理三槽 → provision active 写入+readback → ExitCode 0/1/2 不回显。单测 7/7、release 编译 exit 0、真实 CM 冒烟（active 恰 1 条、staging/backup absent、负向 exit 1、二次幂等、清理 0 残留）。独立 QA 三遍复验进行中。切片 2（NSIS custom action 编排：CryptGenRandom → CreatePipe → CreateProcess 继承 handle → WriteFile → WaitForSingleObject → 非 0 Abort）因 NSIS System 插件复杂度与宿主干扰风险，且干净机 E2E 属外部条件，暂不冒险产出半成品；切片 2 需单独 TDD/审计后方可放行。
 - 2026-08-10 17:00 切片 1 独立 QA 三遍复验 PASS（证据 `o018-slice1-qa-20260810-163808`）：源码契约 15 项、fresh target 独立编译（test 7/7、release exit 0、exe sha256 861dca25...、verifier 门执行通过）、真实 CM 行为复验（正向/负向/幂等/513 超长/清理 0 残留）。后端同值链 PASS：同一 CSPRNG secret 经 provisioner 写 CM 后，后端 `SidecarCredentialHashSet(hash_credential(S))` 下 `verify_sidecar(S)` 通过、错误值 40101、后端错值配置时 CM 同值被拒。仍缺：NSIS custom action 编排（切片 2）、代码签名证书、干净 Windows 机无泄露 E2E。
+- 2026-09-04 切片 2 完成并三遍验证放行（证据 `.workbuddy/o018-slice2-evidence-20260904-0020/`）：Task 1-3（orchestrator/transport/launcher，Rust 测试 8/8）+ Task 4（hooks `o018-installer-hooks.nsh` POSTINSTALL：固定路径零参数 ExecWait → IntCmp 非 0 即 Abort；tauri.conf `nsis.installMode="currentUser"` + `installerHooks` 接线；契约测试 3/3 + 校验器 9 项 + 静态泄露扫描 PASS）+ Task 5 三遍验证：①认证审核（独立 agent）verdict pass、零 blocking；②fresh 测试核验全绿（fresh CARGO_TARGET_DIR 8/8 exit 0、fresh NSIS 构建 exit 0、verifier 0、pytest 3/3 exit 0、泄露扫描 0），fresh 出包 95,415,332B sha256 de27bbf6...df8b（unsigned self-use candidate）；③独立 QA 审计放行 verdict pass。切片 2 标记已证实（静态契约+接线+本地测试层）。**O-018 整体维持 OPEN**，商业放行前仍缺：后端同值链、干净 Windows 机真实 installer 无泄露 E2E、代码签名证书（tauri.conf.json:50 仍为 minisign pubkey 占位）、O-019 轮换窗口衔接。
 - Resolves when：installer/custom action、provisioner、pipe ACL/handle inheritance、后端同值配置和干净机无泄露E2E证据全部通过；本次只补机械blocking与实施边界，保持OPEN。
 
 ### O-019 Sidecar credential 后端 current/next 轮换窗口（2026-08-08 Task 19 追加）
@@ -194,3 +195,10 @@
 - Current Leaning：语音前台不等大脑选型——用户先开百炼拿 90 天免费额度把 QwenRealtimeAdapter 调通；大脑层 Phase 1 用 A/B 对比（同一组语音意图→任务拆解用例，评拆解质量+成本），本地 llama-server 保留为离线兜底。注意旧名 deepseek-chat/reasoner 将弃用，新代码直接用 deepseek-v4-flash/pro；百炼 DASHSCOPE_API_KEY 是地域绑定（北京 key 不能打新加坡端点）。
 - 影响：QwenRealtimeAdapter 需在会话 config 注册 spawn_agent_thread/agent_status/steer_agent_thread/approve_reply 四自定义工具（Qwen 原生 FunctionCall），取代 [STANDBY]/[ACTIVE] 文本标记协议（根治标记被 TTS 念出）；rtc_bridge 需新增线程注册表（thread 状态本地持久化，与语音 WS 生命周期解耦）。
 - Resolves when：用户开通百炼并提供 DASHSCOPE_API_KEY（语音前台联调）+ 大脑层 A/B 对比数据出炉后定档
+
+### O-023 provision 编排器单命令混合形态（2026-09-04 切片 2 认证审核 advisory 登记）
+- 类别：design-decision-to-evaluate
+- 描述：O-018 切片 2 的 provision_orchestrator 采用「单命令 = 混合编排器」：CLI 一次性 orchestrate 与 long-run supervision 职责共存于同一入口。认证审核指出这是有意折衷（简化安装器接线），但语义边界未文档化。
+- 影响：后续切片若给 orchestrator 增加 daemon/supervision 语义，可能破坏「安装器一次调用」契约（hooks 恰一次 ExecWait）。
+- Current Leaning：维持单命令形态至 O-018 全链闭合；若出现 long-run 需求则拆分 orchestrate/supervise 两个子命令并改 Spec。
+- Resolves when：O-018 商业放行评审时裁决是否拆分；拆分前先落 ADR 固化现状语义

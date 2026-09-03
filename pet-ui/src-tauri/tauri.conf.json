@@ -33,6 +33,12 @@
       "binaries/jax-rtc-sidecar-runtime/current.json": "jrt/current.json",
       "binaries/jax-rtc-sidecar-runtime/generations/": "jrt/generations/",
       "certs/ca.crt": "certs/ca.crt"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./installer/o018-installer-hooks.nsh"
+      }
     }
   },
   "plugins": {
