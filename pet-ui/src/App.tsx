@@ -33,6 +33,7 @@ export default function App() {
   const [settingsView, setSettingsView] = useState<SettingsView>("main");
   const [fault, setFault] = useState<Fault | null>(null);
   const [showCaConfirm, setShowCaConfirm] = useState(false);
+  const [hovered, setHovered] = useState(false);
   const wsFaultedRef = useRef(false);
 
   // CA 安装明示确认（ADR-020 A2）：绝不静默装自签根 CA。
@@ -194,6 +195,9 @@ export default function App() {
   // 提醒为独立维度（Task 8：语音状态机收紧为 10 体验态，alerting 不再作为机器状态）
   const isAlerting = (alert?.level ?? 0) >= 3;
   const tone = alert?.state === "off_track" ? "danger" : alert?.state === "stuck" ? "warn" : "neutral";
+  // 三态交互模型（商业化 2026-09-03）：idle 只见波斯猫本体，控件 hover 淡入；
+  // 任何面板/横幅打开期间控件保持可见（放大窗口中需可操作）。
+  const controlsHidden = !(hovered || showPanel || showSettings || showCaConfirm || fault);
 
   // 监控目标：与 config/monitors.yaml 对齐（session 到达后以实际 app_name 为准）
   const targets = useMemo<MonitorTarget[]>(() => {
@@ -224,9 +228,14 @@ export default function App() {
   };
 
   return (
-    <div className="app-root" data-tauri-drag-region>
+    <div
+      className="app-root"
+      data-tauri-drag-region
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
       <div
-        className="pet-anchor"
+        className={`pet-anchor${controlsHidden ? " pet-anchor--idle" : ""}`}
         role="button"
         tabIndex={0}
         aria-label="打开监控面板"
@@ -239,8 +248,8 @@ export default function App() {
           <Pet
             mode={isAlerting ? "alerting" : "monitoring"}
             tone={tone}
-            sizePx={isAlerting ? 140 : 80}
-            opacity={isAlerting ? 1 : 0.3}
+            sizePx={isAlerting ? 140 : 96}
+            opacity={isAlerting ? 1 : 0.9}
             alertPulse={isAlerting}
           />
         )}
@@ -259,6 +268,7 @@ export default function App() {
       <button
         type="button"
         className="settings-trigger"
+        data-hidden={controlsHidden}
         aria-label="打开设置"
         onClick={() => {
           setShowSettings((v) => !v);
@@ -271,6 +281,7 @@ export default function App() {
       <button
         type="button"
         className="hide-trigger"
+        data-hidden={controlsHidden}
         aria-label="隐藏宠物（可从系统托盘找回）"
         onClick={handleHidePet}
       >
@@ -299,7 +310,7 @@ export default function App() {
         </div>
       )}
 
-      <div className="conn-badge-slot">
+      <div className="conn-badge-slot" data-hidden={controlsHidden}>
         <ConnectionBadge voicePhase={toVoicePhase(machineState)} />
       </div>
 
@@ -315,9 +326,27 @@ export default function App() {
 
       <style>{`
         .app-root { height: 100vh; position: relative; }
-        .pet-anchor { position: fixed; right: 16px; bottom: 16px; z-index: 10; }
+        .pet-anchor {
+          position: fixed; right: 16px; bottom: 16px; z-index: 10;
+          transition: transform var(--motion-fast) var(--ease-standard);
+        }
+        /* idle 态：仅波斯猫本体居中（业界共识：主体即主入口） */
+        .pet-anchor.pet-anchor--idle {
+          right: auto; bottom: auto;
+          left: 50%; top: 50%;
+          transform: translate(-50%, -50%);
+        }
         .pet-anchor:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 50%; }
         .panel-slot { position: fixed; right: 16px; bottom: 110px; z-index: 20; }
+        /* 控件淡入三态（商业化 2026-09-03）：默认隐藏，hover/面板打开时浮现 */
+        .settings-trigger, .hide-trigger, .conn-badge-slot {
+          opacity: 1;
+          transition: opacity var(--motion-fast) var(--ease-standard);
+        }
+        .settings-trigger[data-hidden="true"], .hide-trigger[data-hidden="true"], .conn-badge-slot[data-hidden="true"] {
+          opacity: 0;
+          pointer-events: none;
+        }
         .settings-trigger {
           position: fixed; left: 10px; bottom: 10px; z-index: 30;
           display: inline-flex; align-items: center; justify-content: center;
