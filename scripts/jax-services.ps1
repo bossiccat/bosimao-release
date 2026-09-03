@@ -110,6 +110,67 @@ function Invoke-OwnerCredentialProvision {
     Write-Host "[owner-credential][ok] owner credential 已就绪"
     return $true
 }
+
+function Invoke-SidecarCredentialProvision {
+    # O-018 切片 3：sidecar credential「launcher → CM → .env 同值同步」编排（2026-09-03 设计稿落地）
+    # 语义：CM 与 .env 已同值 → 幂等跳过；否则跑真 launcher（CSPRNG）→ 读 CM active →
+    #       备份 + 原子写 .env；若 backend 已在运行且值变化 → 温和重启（下方主流程随后重拉）。
+    # fail-closed：任何一步失败返回 $false，中止启动（与 owner credential 同级）。
+    $launcher = $null
+    $release = Join-Path $Root "pet-ui\src-tauri\target\release\provision_sidecar_credential_launcher.exe"
+    $debug   = Join-Path $Root "pet-ui\src-tauri\target\debug\provision_sidecar_credential_launcher.exe"
+    if (Test-Path $release) { $launcher = $release }
+    elseif (Test-Path $debug) { $launcher = $debug }
+    else {
+        Write-Host "[sidecar-credential][!] launcher 未编译；请先: cd pet-ui/src-tauri; cargo build --bin provision_sidecar_credential_launcher [SIDECARPROV_001]"
+        return $false
+    }
+
+    $envPath = Join-Path $Root ".env"
+    $cmTarget = "JaxPet/com.jax.pet/voice-sidecar/v1"
+    $envValue = Get-DotEnvValue $envPath "VOICE_SIDECAR_CREDENTIAL"
+    $cmValue  = Get-CredentialBlobFromCM $cmTarget
+
+    # 幂等：两侧都有值且同值 → 不跑 launcher、不动盘、不重启
+    if ($cmValue -and $envValue -and ($cmValue -eq $envValue)) {
+        Write-Host "[sidecar-credential][ok] CM 与 .env 已同值，幂等跳过"
+        return $true
+    }
+
+    # 需要供给：跑真 launcher（GUI 子系统，-Wait 等退出码；每次生成新值 = 轮换语义）
+    Merge-DuplicateProxyEnv
+    $p = Start-Process -FilePath $launcher -Wait -PassThru
+    if ($p.ExitCode -ne 0) {
+        Write-Host "[sidecar-credential][x] launcher 失败（退出码 $($p.ExitCode)），中止启动（fail-closed）[SIDECARPROV_002]"
+        return $false
+    }
+    $cmValue = Get-CredentialBlobFromCM $cmTarget
+    if (-not $cmValue) {
+        Write-Host "[sidecar-credential][x] provision 后 CM active 不可读，中止启动（fail-closed）[SIDECARPROV_003]"
+        return $false
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $hashPrefix = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($cmValue)))).Replace("-","").Substring(0,16).ToLower()
+    if ($envValue -eq $cmValue) {
+        Write-Host "[sidecar-credential][ok] 已同值（sha16=$hashPrefix），幂等跳过"
+        return $true
+    }
+    if (-not (Set-DotEnvValue $envPath "VOICE_SIDECAR_CREDENTIAL" $cmValue)) {
+        Write-Host "[sidecar-credential][x] .env 单键写入/校验失败，中止启动（fail-closed）[SIDECARPROV_004]"
+        return $false
+    }
+    Write-Host "[sidecar-credential][ok] .env 已同步 CM 值（len=$($cmValue.Length)，sha16=$hashPrefix，备份已落）"
+    # 若 backend 已在运行且健康，值变化必须温和重启才能生效；未在运行则交给下方正常启动路径
+    if ((Test-PortListen 8000) -and (Test-Health "https://127.0.0.1:8000/health")) {
+        Write-Host "[sidecar-credential][!] backend 在运行但凭证已变化，温和重启使新值生效"
+        if (-not (Stop-BackendProcesses)) {
+            Write-Host "[sidecar-credential][x] 旧 backend 进程树未能停止，中止（防风暴）[SIDECARPROV_005]"
+            return $false
+        }
+        Clear-PidFile "backend"
+    }
+    return $true
+}
 # Get-RelayProcesses / Get-RelayTopLevel / Stop-AllRelay：见 lib-common.ps1。
 function Invoke-SvcStart([string]$Name) {
     switch ($Name) {
@@ -178,6 +239,8 @@ function Start-BackendService {
     $Log = Join-Path $LogDir "backend.log"
     # owner credential 首启 provision（ADR-022）：backend 启动前，失败即中止（fail-closed）
     if (-not (Invoke-OwnerCredentialProvision)) { return $false }
+    # sidecar credential「launcher → CM → .env」同值编排（O-018 切片 3）：失败即中止（fail-closed）
+    if (-not (Invoke-SidecarCredentialProvision)) { return $false }
     $backendProcs = @(Get-BackendProcesses)
     if (Test-PortListen $Port -or $backendProcs.Count -gt 0) {
         # 端口已监听或 onefile bootstrap 尚在：健康则幂等跳过；不健康则报告（不盲杀）

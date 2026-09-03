@@ -187,3 +187,76 @@ function Stop-BackendProcesses {
     } while ((Get-Date) -lt $deadline)
     return (@(Get-BackendProcesses).Count -eq 0)
 }
+
+# ============================================================
+# O-018 切片 3：sidecar credential 编排底层助手
+# Get-CredentialBlobFromCM：Win32 CredReadW 回读（cmdkey 无法回读 secret，禁用）
+# Set-DotEnvValue / Get-DotEnvValue：单键原子替换（临时文件 + Move，先备份）
+# 安全边界：值只经内存与目标文件；日志只允许 hash 前缀/长度，禁止输出明文。
+# ============================================================
+Add-Type -Namespace JaxPet.Native -Name CredentialApi -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct CREDENTIAL {
+    public int Flags;
+    public int Type;
+    public string TargetName;
+    public string Comment;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+    public int CredentialBlobSize;
+    public IntPtr CredentialBlob;
+    public int Persist;
+    public int AttributeCount;
+    public IntPtr Attributes;
+    public string TargetAlias;
+    public string UserName;
+}
+[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern bool CredReadW(string target, int type, int flags, out IntPtr credPtr);
+[DllImport("advapi32.dll")]
+public static extern void CredFree(IntPtr cred);
+'@ -ErrorAction SilentlyContinue
+
+function Get-CredentialBlobFromCM([string]$Target) {
+    # 返回 active 槽 blob 的 ASCII 文本；absent 或读取失败返回 $null（调用方 fail-closed）
+    $ptr = [IntPtr]::Zero
+    try {
+        if (-not [JaxPet.Native.CredentialApi]::CredReadW($Target, 1, 0, [ref]$ptr)) { return $null }
+        $cred = [System.Runtime.InteropServices.Marshal]::PtrToStructure(
+            $ptr, [type][JaxPet.Native.CredentialApi+CREDENTIAL])
+        if ($cred.CredentialBlobSize -le 0) { return $null }
+        $bytes = New-Object byte[] $cred.CredentialBlobSize
+        [System.Runtime.InteropServices.Marshal]::Copy($cred.CredentialBlob, $bytes, 0, $cred.CredentialBlobSize)
+        return [Text.Encoding]::ASCII.GetString($bytes)
+    } catch { return $null }
+    finally { if ($ptr -ne [IntPtr]::Zero) { [JaxPet.Native.CredentialApi]::CredFree($ptr) } }
+}
+
+function Get-DotEnvValue([string]$Path, [string]$Key) {
+    if (-not (Test-Path $Path)) { return $null }
+    $m = Select-String -Path $Path -Pattern ("^" + [regex]::Escape($Key) + "\s*=\s*(.*)$") |
+        Select-Object -First 1
+    if (-not $m) { return $null }
+    return $m.Matches[0].Groups[1].Value.Trim().Trim('"')
+}
+
+function Set-DotEnvValue([string]$Path, [string]$Key, [string]$Value) {
+    # 单键原子替换：备份 → 临时文件写全量 → Move 覆盖 → 回读校验
+    if (-not (Test-Path $Path)) { return $false }
+    $backup = "$Path.backup-pre-sidecarprov-$(Get-Date -Format yyyyMMdd-HHmmss)"
+    Copy-Item -Path $Path -Destination $backup -Force
+    $lines = [IO.File]::ReadAllLines($Path)
+    $found = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match ("^" + [regex]::Escape($Key) + "\s*=")) {
+            $lines[$i] = "$Key=$Value"; $found = $true; break
+        }
+    }
+    if (-not $found) { return $false }
+    $tmp = "$Path.tmp-sidecarprov"
+    [IO.File]::WriteAllLines($tmp, $lines)
+    # PS 5.1 = .NET Framework：File.Move 目标存在即抛异常；File.Replace 第三参传 $null
+    # 会被字符串化成空路径（"路径的形式不合法"）→ 传时间戳备份路径：
+    # File.Replace 会把替换前的原内容写入该备份，与 Copy-Item 备份同值，无需额外清理。
+    [IO.File]::Replace($tmp, $Path, $backup)
+    return ((Get-DotEnvValue $Path $Key) -eq $Value)
+}

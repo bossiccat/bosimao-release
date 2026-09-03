@@ -4,6 +4,8 @@
 $ErrorActionPreference = "Stop"
 # scripts 的父目录即项目根
 $Root = Split-Path $PSScriptRoot -Parent
+# O-018 切片 3：复用 lib-common 的 CM 读取与 .env 原子写助手（与 jax-services.ps1 同源，防漂移）
+. (Join-Path $PSScriptRoot "lib-common.ps1")
 
 $backendProc = $null
 
@@ -25,6 +27,55 @@ function Invoke-OwnerCredentialProvision {
         return $false
     }
     Write-Host "[owner-credential][ok] owner credential 已就绪"
+    return $true
+}
+
+function Invoke-SidecarCredentialProvision {
+    # O-018 切片 3：sidecar credential「launcher → CM → .env 同值同步」编排
+    # dev.ps1 形态：backend 尚未启动（在下方才拉起），故无重启分支；同值幂等跳过。
+    $launcher = $null
+    $release = Join-Path $Root "pet-ui\src-tauri\target\release\provision_sidecar_credential_launcher.exe"
+    $debug   = Join-Path $Root "pet-ui\src-tauri\target\debug\provision_sidecar_credential_launcher.exe"
+    if (Test-Path $release) { $launcher = $release }
+    elseif (Test-Path $debug) { $launcher = $debug }
+    else {
+        Write-Warning "[sidecar-credential] launcher 未编译；请先: cd pet-ui/src-tauri; cargo build --bin provision_sidecar_credential_launcher [SIDECARPROV_001]"
+        return $false
+    }
+
+    $envPath = Join-Path $Root ".env"
+    $cmTarget = "JaxPet/com.jax.pet/voice-sidecar/v1"
+    $envValue = Get-DotEnvValue $envPath "VOICE_SIDECAR_CREDENTIAL"
+    $cmValue  = Get-CredentialBlobFromCM $cmTarget
+
+    # 幂等：两侧都有值且同值 → 不跑 launcher、不动盘
+    if ($cmValue -and $envValue -and ($cmValue -eq $envValue)) {
+        Write-Host "[sidecar-credential][ok] CM 与 .env 已同值，幂等跳过"
+        return $true
+    }
+
+    Merge-DuplicateProxyEnv
+    $p = Start-Process -FilePath $launcher -Wait -PassThru
+    if ($p.ExitCode -ne 0) {
+        Write-Error "[sidecar-credential] launcher 失败（退出码 $($p.ExitCode)），中止启动（fail-closed）[SIDECARPROV_002]"
+        return $false
+    }
+    $cmValue = Get-CredentialBlobFromCM $cmTarget
+    if (-not $cmValue) {
+        Write-Error "[sidecar-credential] provision 后 CM active 不可读，中止启动（fail-closed）[SIDECARPROV_003]"
+        return $false
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $hashPrefix = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($cmValue)))).Replace("-","").Substring(0,16).ToLower()
+    if ($envValue -eq $cmValue) {
+        Write-Host "[sidecar-credential][ok] 已同值（sha16=$hashPrefix），幂等跳过"
+        return $true
+    }
+    if (-not (Set-DotEnvValue $envPath "VOICE_SIDECAR_CREDENTIAL" $cmValue)) {
+        Write-Error "[sidecar-credential] .env 单键写入/校验失败，中止启动（fail-closed）[SIDECARPROV_004]"
+        return $false
+    }
+    Write-Host "[sidecar-credential][ok] .env 已同步 CM 值（len=$($cmValue.Length)，sha16=$hashPrefix，备份已落）"
     return $true
 }
 
@@ -103,6 +154,8 @@ try {
     Write-Host "==> 启动后端 (uvicorn :8000)"
     # owner credential 首启 provision（ADR-022）：backend 之前，失败即中止（fail-closed）
     if (-not (Invoke-OwnerCredentialProvision)) { throw "[owner-credential] provision 失败，中止启动" }
+    # sidecar credential「launcher → CM → .env」同值编排（O-018 切片 3）：失败即中止（fail-closed）
+    if (-not (Invoke-SidecarCredentialProvision)) { throw "[sidecar-credential] provision 失败，中止启动" }
     $backendProc = Start-Process -FilePath (Join-Path $Root ".venv/Scripts/pythonw.exe") `
         -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000" `
         -WorkingDirectory (Join-Path $Root "backend") -PassThru -NoNewWindow
