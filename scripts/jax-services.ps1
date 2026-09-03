@@ -567,24 +567,55 @@ function Show-Status {
     Write-Host "========================================"
 }
 
+# ---------------- fail-closed 退出码 epilogue（exit-code advisory 修复 2026-09-03） ----------------
+# 语义：start/stop/restart 任一服务操作失败 → exit 1；全部成功 → exit 0。
+#       status 为信息性命令，永远 exit 0（服务 DOWN 不算脚本失败）。
+#       并发互斥忙 → exit 2（上方既有行为，不变）。
+# 调用方安全：jax-watchdog.ps1 以子作用域 & 调用本脚本后用自身健康复查判定，
+#             不消费退出码；契约 backend/tests/contract/test_jax_services_exit_code_contract.py 锁定本语义。
+function Invoke-ExitCode {
+    param([bool]$HadFailure, [string]$Action)
+    if ($Action -eq "status") { exit 0 }
+    if ($HadFailure) { exit 1 }
+    exit 0
+}
+
 # ---------------- 主流程 ----------------
 $svcs = @()
 if ($Service -eq "all") { $svcs = @("model","backend","relay","rtc-bridge") } else { $svcs = @($Service) }
+$HadFailure = $false
 
 try {
     switch ($Action) {
         "start" {
-            foreach ($s in $svcs) { Invoke-SvcStart $s | Out-Null }
+            foreach ($s in $svcs) {
+                if (-not (Invoke-SvcStart $s)) {
+                    Write-Host "[services][x] $s 启动失败（fail-closed → exit 1）"
+                    $HadFailure = $true
+                }
+            }
         }
         "stop" {
-            foreach ($s in $svcs) { Stop-ServiceByName $s | Out-Null }
+            foreach ($s in $svcs) {
+                if (-not (Stop-ServiceByName $s)) {
+                    Write-Host "[services][x] $s 停止失败（fail-closed → exit 1）"
+                    $HadFailure = $true
+                }
+            }
         }
         "restart" {
             foreach ($s in $svcs) {
-                Stop-ServiceByName $s | Out-Null
+                # Stop 失败仍继续 Start（Start 自身幂等/身份校验会处置残留），但结果分别记账。
+                if (-not (Stop-ServiceByName $s)) {
+                    Write-Host "[services][x] $s 停止失败（fail-closed → exit 1）"
+                    $HadFailure = $true
+                }
                 # Stop-ServiceByName 已等待 PID 退出；此处只给端口/句柄释放一个短暂稳定窗口。
                 Start-Sleep -Seconds 1
-                Invoke-SvcStart $s | Out-Null
+                if (-not (Invoke-SvcStart $s)) {
+                    Write-Host "[services][x] $s 启动失败（fail-closed → exit 1）"
+                    $HadFailure = $true
+                }
             }
         }
         "status" {
@@ -595,3 +626,5 @@ try {
     $ServiceMutex.ReleaseMutex() | Out-Null
     $ServiceMutex.Dispose()
 }
+
+Invoke-ExitCode $HadFailure $Action
