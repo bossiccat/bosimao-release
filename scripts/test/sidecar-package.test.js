@@ -391,9 +391,16 @@ test('resource mapping preserves the dedicated runtime directory contract end to
   });
 
   const tauri = JSON.parse(readProjectFile('pet-ui/src-tauri/tauri.conf.json'));
-  // bundle.resources 保留 stable root 的完整 generation 树映射（不 flatten、不 symlink-follow）；
-  // certs/ca.crt 是独立的 Tauri 资源，不属于 sidecar manifest 的 bundle_resources。
-  assert.equal(tauri.bundle.resources['binaries/jax-rtc-sidecar-runtime/'], destination);
+  // de08042 (2026-09-03): bundle.resources 窄化为 current.json + generations/
+  // （排除 staging/pending-* 与 leases/locks，规避 tauri-build 全量拷贝在
+  // node_modules 上的非确定性 os error 5 与 makensis 超长路径放大）；
+  // 安装目的地仍为 jrt/。certs/ca.crt 是独立的 Tauri 资源，不属于
+  // sidecar manifest 的 bundle_resources（下方 manifest 断言仍用旧 map，两层契约独立）。
+  assert.deepEqual(tauri.bundle.resources, {
+    'binaries/jax-rtc-sidecar-runtime/current.json': 'jrt/current.json',
+    'binaries/jax-rtc-sidecar-runtime/generations/': 'jrt/generations/',
+    'certs/ca.crt': 'certs/ca.crt',
+  });
 
   const mainSource = readProjectFile('pet-ui/src-tauri/src/main.rs');
   assert.equal(rustConst(mainSource, 'SIDECAR_RUNTIME_DIR'), destination.replace(/\/$/, ''));

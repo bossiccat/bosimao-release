@@ -172,10 +172,32 @@ function acquireRuntimeLease(runtimeDir, options = {}) {
     }
     // 显式失败：释放失败必须抛出稳定诊断，绝不能静默留下锁文件，
     // 否则后续发布/迁移会被自己的残留锁永久阻断。
-    try {
-      (options.unlink || fs.unlinkSync)(lockFile);
-    } catch {
-      fail('SIDECAR_RUNTIME_COORDINATION_RELEASE_FAILED');
+    // 瞬态错误（AV/索引器瞬时占用锁文件 → EBUSY/EPERM/EACCES/EAGAIN）做
+    // 有界重试：锁此时仍归本进程所有（上方 token 已核验），重试语义安全；
+    // 非瞬态错误保持立即失败。耗尽后抛 RELEASE_FAILED 并保留最后 errno
+    // 与尝试次数（此前 catch 吞 errno 导致间歇性 RELEASE_FAILED 无法归因）。
+    const transientCodes = new Set(['EBUSY', 'EPERM', 'EACCES', 'EAGAIN']);
+    const maxAttempts = 5;
+    const delayMs = typeof options.retryDelayMs === 'number' ? options.retryDelayMs : 100;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        (options.unlink || fs.unlinkSync)(lockFile);
+        return;
+      } catch (error) {
+        const lastErrnoCode = (error && error.code) || '';
+        const transient = transientCodes.has(lastErrnoCode);
+        if (!transient || attempt === maxAttempts) {
+          const releaseError = new Error('SIDECAR_RUNTIME_COORDINATION_RELEASE_FAILED');
+          releaseError.code = 'SIDECAR_RUNTIME_COORDINATION_RELEASE_FAILED';
+          releaseError.last_errno_code = lastErrnoCode || 'UNKNOWN';
+          releaseError.attempts = attempt;
+          throw releaseError;
+        }
+        if (delayMs > 0) {
+          const shared = new Int32Array(new SharedArrayBuffer(4));
+          Atomics.wait(shared, 0, 0, delayMs);
+        }
+      }
     }
   };
 }

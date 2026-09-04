@@ -206,7 +206,9 @@ test('release fails closed when the owner record cannot be removed', () => {
   const release = acquireRuntimeLease(target, {
     inspectProcess: liveProcess(),
     unlink() {
-      throw new Error('EPERM');
+      const error = new Error('EPERM');
+      error.code = 'SOMETHING_NONTRANSIENT';
+      throw error;
     },
   });
   assert.throws(
@@ -214,6 +216,74 @@ test('release fails closed when the owner record cannot be removed', () => {
     (error) => error.code === 'SIDECAR_RUNTIME_COORDINATION_RELEASE_FAILED',
   );
 });
+
+test('release retries transient unlink failures before succeeding', () => {
+  const { runtimeDir: target } = tempIdentity();
+  const lockFile = coordinationLockPath(target);
+  let attempts = 0;
+  const realUnlink = fs.unlinkSync.bind(fs);
+  const release = acquireRuntimeLease(target, {
+    inspectProcess: liveProcess(),
+    retryDelayMs: 0,
+    unlink(file) {
+      attempts += 1;
+      if (attempts <= 2) {
+        const error = new Error('resource busy');
+        error.code = 'EBUSY';
+        throw error;
+      }
+      return realUnlink(file);
+    },
+  });
+  release();
+  assert.equal(attempts, 3);
+  assert.equal(fs.existsSync(lockFile), false);
+});
+
+test('release gives up after bounded attempts and preserves the last errno', () => {
+  const { runtimeDir: target } = tempIdentity();
+  let attempts = 0;
+  const release = acquireRuntimeLease(target, {
+    inspectProcess: liveProcess(),
+    retryDelayMs: 0,
+    unlink() {
+      attempts += 1;
+      const error = new Error('resource busy');
+      error.code = 'EBUSY';
+      throw error;
+    },
+  });
+  assert.throws(
+    () => release(),
+    (error) => error.code === 'SIDECAR_RUNTIME_COORDINATION_RELEASE_FAILED'
+      && error.last_errno_code === 'EBUSY'
+      && error.attempts === 5,
+  );
+  assert.equal(attempts, 5);
+});
+
+test('release does not retry non-transient unlink failures', () => {
+  const { runtimeDir: target } = tempIdentity();
+  let attempts = 0;
+  const release = acquireRuntimeLease(target, {
+    inspectProcess: liveProcess(),
+    retryDelayMs: 0,
+    unlink() {
+      attempts += 1;
+      const error = new Error('read-only file system');
+      error.code = 'EROFS';
+      throw error;
+    },
+  });
+  assert.throws(
+    () => release(),
+    (error) => error.code === 'SIDECAR_RUNTIME_COORDINATION_RELEASE_FAILED'
+      && error.last_errno_code === 'EROFS'
+      && error.attempts === 1,
+  );
+  assert.equal(attempts, 1);
+});
+
 
 test('a missing runtime parent yields a stable diagnostic instead of raw ENOENT', () => {
   const { root } = tempIdentity();
