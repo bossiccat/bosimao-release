@@ -178,8 +178,11 @@ class BridgeServer:
                 return
             try:
                 await self._redemption.redeem(hello)
-            except Exception:  # noqa: BLE001 - any redemption failure is fail-closed
-                logger.warning("sidecar hello redemption rejected")
+            except Exception as exc:  # noqa: BLE001 - any redemption failure is fail-closed
+                # 2026-09-05：补异常详情——此前裸 warning 导致 transport 失败无法归因
+                # （01:31/01:37 两次 rejected 无从区分超时/拒连/拒绝）。fail-closed 语义不变。
+                logger.warning("sidecar hello redemption rejected: %s: %s",
+                               type(exc).__name__, exc)
                 await self._send_to(
                     ws, {"type": "ctrl", "action": "exit", "reason": "hello_redemption_failed"}
                 )
