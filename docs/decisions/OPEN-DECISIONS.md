@@ -170,6 +170,7 @@
 - 影响：本地 rotate 即使成功，也不能宣称线上无中断轮换；直接替换服务端单值会使在线或新 child 立即 401。
 - Current Leaning：采用 `docs/windows-sidecar-credential-contract.md` §6.3 的内部部署契约，不修改现有 Bearer/OpenAPI。后端以受保护部署 secret 构造不可变 `SidecarCredentialHashSet(current_hash,next_hash?,next_enabled_at?,next_expires_at?,config_revision)`；inactive/scheduled/expired 只常量时间比较 current，active 对 current 与 next 无条件完成两次等长 ASCII `hmac.compare_digest` 后非短路 OR 合并，不记录命中槽；半配置/TTL 超过 600 秒/时钟或 revision 不可判定均 fail-closed。rollout 固定为全实例双值同 revision -> 本机 provision/rotate -> 真实 pending+sign 健康确认 -> next promote current -> 删除旧值；失败按窗口状态回滚或隔离不一致实例。
 - 边界：不得借此引入 sidecar device identity、`X-Sidecar-Device-Id`、registration API/数据库、第二 credential store；secret/hash 不得经 API、WebView、argv、日志或普通文件下发。
+- 2026-09-04 轮换窗口真机 E2E（隔离实例，证据 outputs/o019-rotation-window-e2e-20260904.md + json）：单实例形态 §6.3 全场景 12/12 PASS——双值进入（窗口内 C/N 均 200）、scheduled/expired 拒绝、promote 经真实进程重启（新值 200/旧值 40101）、next 缺时间戳+生产门拒绝启动（fail-closed）、nonce 重放 40102；窗口上限 >600s 配置实测被 build 侧拒绝（反向佐证）。配套单测 14/14（compare spy）。保持 OPEN 余项：全实例 revision 一致、真实多实例部署的部分实例失败回滚（外部条件）。
 - Resolves when：后端配置/validator 与测试按 §6.3 落地；compare spy 证明 active 时 current/next 始终各比较一次、current 命中也不短路，inactive/scheduled/expired 不比较 next，且不暴露命中槽；证明 current 与窗口内 next 均通过且主体/nonce/限流不变，next 未启用/恰到期/过期拒绝，配置损坏生产拒绝启动；完成所有实例 revision 一致、双值进入、本机 provision、真实 pending+sign 健康、promote、旧值 401、窗口到期与部分实例失败回滚的机械证据。未满足前保持 OPEN。
 
 ### O-020 Windows Credential Manager事务与真机E2E（2026-08-08 Task 19 追加）
