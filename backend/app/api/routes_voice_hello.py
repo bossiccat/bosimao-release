@@ -7,6 +7,7 @@ from typing import Literal
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from ..voice.auth import AuthError, CredentialValidator
 from ..voice.hello_proof import HelloProofError
@@ -86,7 +87,10 @@ def build_hello_router(
         except ValidationError:
             return _error(40021)
         try:
-            data = service.redeem(req.model_dump())
+            # 2026-09-05：service.redeem 挪线程池——同步状态机直跑 async 端点会占住
+            # backend 事件循环，hello-redeem 响应偶发 >2s（bridge ReadTimeout 实证，
+            # 18:33:34 堆栈），并波及同 loop 全部端点。
+            data = await run_in_threadpool(service.redeem, req.model_dump())
         except (HelloProofError, HelloProofConflict) as exc:
             return _error(exc.code)
         except Exception:  # noqa: BLE001
