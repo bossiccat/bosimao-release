@@ -5,10 +5,12 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import com.tencent.trtc.TRTCCloud
 import com.tencent.trtc.TRTCCloudDef
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -34,12 +36,22 @@ class RealCustomAudioSource : RtcClient.CustomAudioSource {
         private const val TAG = "RtcCustomAudio"
         private const val FRAME_SAMPLES = RtcCustomAudioPcm.SAMPLES_PER_20MS // 320
         private const val WATCHDOG_IDLE_MS = 5_000L
+        /** 电平日志周期（帧）：20ms/帧 × 100 = 2s */
+        private const val LEVEL_LOG_FRAMES = 100L
+
     }
 
     private val running = AtomicBoolean(false)
     private var thread: Thread? = null
 
+    /**
+     * 采集增益级（每个采集实例独立）：自适应增益 + 噪声门，替代固定 ×32。
+     * 详见 CaptureGainStage 文档与真机三段实测（过低/削波/底噪误触发）。
+     */
+    private val gainStage = CaptureGainStage()
+
     @Volatile private var aec: AcousticEchoCanceler? = null
+    @Volatile private var agc: AutomaticGainControl? = null
     @Volatile private var ns: NoiseSuppressor? = null
 
     @SuppressLint("MissingPermission") // RECORD_AUDIO 由服务层在进房前完成授权（同 MicRecorder 契约）
@@ -66,7 +78,7 @@ class RealCustomAudioSource : RtcClient.CustomAudioSource {
             running.set(false)
             return false
         }
-        // 平台 AEC/NS：回音根治核心。isAvailable=false 不阻断（真机日志留痕，降级为无 AEC 上行）。
+        // 平台 AEC/NS/AGC：回音根治核心。isAvailable=false 不阻断（真机日志留痕，降级为无特效上行）。
         try {
             if (AcousticEchoCanceler.isAvailable()) {
                 aec = AcousticEchoCanceler.create(record.audioSessionId)?.also {
@@ -80,8 +92,14 @@ class RealCustomAudioSource : RtcClient.CustomAudioSource {
                     Log.i(TAG, "NS enabled")
                 }
             }
+            if (AutomaticGainControl.isAvailable()) {
+                agc = AutomaticGainControl.create(record.audioSessionId)?.also {
+                    it.enabled = true
+                    Log.i(TAG, "AGC enabled")
+                }
+            } else Log.w(TAG, "AGC not available on this device")
         } catch (t: Throwable) {
-            Log.w(TAG, "AEC/NS attach failed: ${t.message}", t)
+            Log.w(TAG, "AEC/NS/AGC attach failed: ${t.message}", t)
         }
 
         thread = Thread({ loop(record, cloud) }, "jax-rtc-capture").apply { start() }
@@ -92,16 +110,30 @@ class RealCustomAudioSource : RtcClient.CustomAudioSource {
     private fun loop(record: AudioRecord, cloud: TRTCCloud) {
         val pcm = ShortArray(FRAME_SAMPLES)
         var lastFrameTs = System.currentTimeMillis()
+        var frameSeq = 0L
         try {
             record.startRecording()
             while (running.get()) {
                 val n = record.read(pcm, 0, FRAME_SAMPLES)
                 if (n > 0) {
                     lastFrameTs = System.currentTimeMillis()
+                    // 自适应增益 + 噪声门（2026-09-05：固定 ×32 削波且放大底噪致误唤醒）
+                    val gained = gainStage.process(pcm.copyOf(n))
+                    // 每 2s（100 帧 × 20ms）落一条电平日志：真机验收「说话 2000~5000 / 安静静音」
+                    // 的唯一客观依据，缺了它只能凭「听起来行不行」猜。
+                    if (++frameSeq % LEVEL_LOG_FRAMES == 0L) {
+                        Log.i(
+                            TAG,
+                            "lvl raw=" + gainStage.lastRawRms.toInt() +
+                                " gain=" + String.format(Locale.US, "%.1f", gainStage.currentGain) +
+                                " out=" + gainStage.lastOutRms.toInt() +
+                                " gate=" + gainStage.lastGateOpen
+                        )
+                    }
                     // javap 核对 13.4.0.20477：TRTCAudioFrame 仅 data/sampleRate/channel/timestamp/extraData
                     //（无 audioFormat/length，那是 Electron d.ts 的契约）
                     val frame = TRTCCloudDef.TRTCAudioFrame()
-                    frame.data = RtcCustomAudioPcm.shortToPcm16le(pcm.copyOf(n))
+                    frame.data = RtcCustomAudioPcm.shortToPcm16le(gained)
                     frame.sampleRate = RtcCustomAudioPcm.SAMPLE_RATE
                     frame.channel = 1
                     frame.timestamp = lastFrameTs
@@ -135,6 +167,7 @@ class RealCustomAudioSource : RtcClient.CustomAudioSource {
         thread = null
         try { aec?.enabled = false; aec?.release() } catch (_: Throwable) {}
         try { ns?.enabled = false; ns?.release() } catch (_: Throwable) {}
-        aec = null; ns = null
+        try { agc?.enabled = false; agc?.release() } catch (_: Throwable) {}
+        aec = null; ns = null; agc = null
     }
 }
