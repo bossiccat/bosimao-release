@@ -109,6 +109,7 @@ class PeerVoiceSession:
         self._down_speaking = False     # AI 播报中（down 持续流动）
         self._barge_drops = 0           # 打断丢弃的下行帧计数
         self._last_down_check = 0.0     # 上行 RMS 检查限流
+        self._last_up_rms_log = 0.0     # 上行 RMS 调试日志限流（2s 一次，排查"千问无响应"）
         # GPT-Live 式待命/唤醒状态机
         # _standby=True 时禁止模型输出（下行音频/文本均丢弃）；上行仍由当前 RTC 会话接收。
         # 注意：真正的唤醒门禁仍需手机侧 KWS/重进房；后端不能把云端模型当 KWS。
@@ -196,6 +197,9 @@ class PeerVoiceSession:
             logger.info("barge-in: user speech during AI playback, downlink flushed")
         if self._barge_in:
             self._last_down_check = now
+        if now - self._last_up_rms_log >= 2.0:
+            self._last_up_rms_log = now
+            logger.info("up rms=%.0f frames=%d", pcm_rms(pcm), self.stats["up_frames"])
         self._up_q.push(pcm)
         self._sync_queue_metrics()
         self._up_wake.set()

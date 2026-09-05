@@ -161,7 +161,7 @@ test('pending intent selection skips the current room and supports multiple devi
 });
 
 test('sidecar does not hard-code the first pending intent', () => {
-  assert.match(RTC_SOURCE, /selectPendingIntent\(intents,\s*currentRoom\)/);
+  assert.match(RTC_SOURCE, /selectPendingIntent\(intents,\s*currentRoom(,\s*skippedIntents)?\)/);
   assert.doesNotMatch(RTC_SOURCE, /const intent = intents\[0\]/);
 });
 

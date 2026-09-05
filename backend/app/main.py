@@ -1,6 +1,7 @@
 """FastAPI 应用入口 + 生命周期（启停编排器、会话清理）"""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -156,6 +157,30 @@ def _build_secured_session_router():
     return secured_router
 
 
+_LOOP_LAG_WARN_S = 2.0
+_LOOP_LAG_POLL_S = 5.0
+
+
+async def _watch_loop_lag(loop: asyncio.AbstractEventLoop) -> None:
+    """事件循环 lag 探针：sleep(poll) 的实际唤醒间隔减去 poll 即 lag。
+
+    真机实证（2026-09-05 19:18-19:20）：loop 被同步慢调用阻塞 111s，
+    hello proof（TTL 60s）过期 → 兑付 40112 → sidecar 退出。此类阻塞
+    必须留 WARNING 证据，否则无从归因。
+    """
+    last = loop.time()
+    while True:
+        await asyncio.sleep(_LOOP_LAG_POLL_S)
+        now = loop.time()
+        lag = now - last - _LOOP_LAG_POLL_S
+        last = now
+        if lag >= _LOOP_LAG_WARN_S:
+            logger.warning(
+                "event loop lag %.2fs detected (threshold %.1fs) — 同步慢调用占用事件循环",
+                lag, _LOOP_LAG_WARN_S,
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """启动：构建各服务并挂载 WS 路由；停止：清理资源"""
@@ -206,10 +231,16 @@ async def lifespan(app: FastAPI):
     app.state.bus = bus
     app.state.brain_pipeline = brain_pipeline
 
+    # 事件循环 lag 监控（2026-09-05）：真机实证 backend loop 被阻塞 111s（19:18:39
+    # → 19:20:25），hello proof TTL=60s 在等待中过期 → 兑付 40112。同步状态机已
+    # 挪线程池，但任何新同步慢调用都会复发——lag 超阈值必须留证据。
     await orch.start()
+    loop = asyncio.get_running_loop()
+    loop_lag_task = loop.create_task(_watch_loop_lag(loop))
     try:
         yield
     finally:
+        loop_lag_task.cancel()
         await orch.stop()
         await client.close()
         await deepseek.close()

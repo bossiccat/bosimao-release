@@ -5,6 +5,7 @@ import logging
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from ..voice.auth import AuthError
 from ..voice.repositories.hello_proofs import HelloProofConflict
@@ -58,13 +59,17 @@ def build_session_router(deps: SecuredVoiceDeps) -> APIRouter:
         if denied is not None:
             return denied
         try:
-            data = deps.service.issue(req.device_id)
+            # 2026-09-05：issue + 入账同步状态机挪线程池（与 sign/redeem 同款，
+            # 防占住事件循环拖慢同 loop 全部端点）
+            data = await run_in_threadpool(deps.service.issue, req.device_id)
             data["generation"] = 0
-            deps.ledger.create_session(
+            await run_in_threadpool(
+                deps.ledger.create_session,
                 session_id=data["session_id"], device_id=principal.subject_id,
                 room_id=data["room_id"], generation=0, state="SIGNING",
             )
-            deps.store.enqueue_pending_session(
+            await run_in_threadpool(
+                deps.store.enqueue_pending_session,
                 data["session_id"], principal.subject_id, data["room_id"],
                 0, as_epoch(data["expires_at"]),
             )
@@ -122,10 +127,17 @@ def build_session_router(deps: SecuredVoiceDeps) -> APIRouter:
         if deps.sidecar_sign is None:
             return deps.error(50303)
         try:
-            data = deps.sidecar_sign.sign(SidecarSignRequest(
-                session_id=req.session_id, device_id=req.device_id,
-                claim_token=req.claim_token, user_id=req.user_id,
-            ))
+            # 2026-09-05：sign 同步状态机（SQLite BEGIN IMMEDIATE + Ed25519）挪线程池——
+            # 与 hello-redeem（dea512e）同款修复：同步状态机直跑 async 端点会占住
+            # 事件循环。真机实证（19:18-19:20）：sign 往返挂 111s，hello proof
+            # TTL=60s 在等待中过期 → 兑付 40112 → sidecar 兑付失败退出。
+            data = await run_in_threadpool(
+                deps.sidecar_sign.sign,
+                SidecarSignRequest(
+                    session_id=req.session_id, device_id=req.device_id,
+                    claim_token=req.claim_token, user_id=req.user_id,
+                ),
+            )
         except SignClaimRejected:
             return deps.error(40901)
         except HelloProofConflict as exc:

@@ -77,6 +77,10 @@ class QwenRealtimeBridge:
 
     async def _handle_event(self, event: dict) -> None:
         kind = event.get("type", "")
+        # 关键事件日志：排查"千问无响应"时确认 VAD/提交/响应生命周期（2026-09-04）
+        if kind in {"input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped",
+                    "input_audio_buffer.committed", "response.created", "error"}:
+            logger.info("qwen event: %s %s", kind, str(event.get("error", ""))[:200])
         if kind == "response.audio.delta" and event.get("delta"):
             await self._invoke(self._on_audio_out, pcm24k_to_pcm16k(base64.b64decode(event["delta"])))
         elif kind in {"response.audio_transcript.delta", "response.text.delta"} and event.get("delta") and self._on_text:

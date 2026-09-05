@@ -17,6 +17,11 @@ const { controlPlaneHeaders } = require('./security');
 const { requestRendererExit } = require('./exit-protocol');
 const { startPollingRuntime } = require('./rtc-startup');
 const { selectPendingIntent } = require('./intent-selection');
+const {
+  createIntentSkipList,
+  createRecoveryState,
+  fetchJsonWithTimeout,
+} = require('./intent-recovery');
 const { CMD_ID_TERMINATE, makeTerminationCmdHandler } = require('./rtc-termination');
 const { frameToS16Mono16k, makeAudioFrame16k } = require('./audio');
 const { injectTestAudio } = require('./rtc-test-audio');
@@ -63,7 +68,14 @@ function runSidecar() {
     },
     (action, reason) => { // 控制面
       log('CTRL', `收到 ctrl action=${action} reason=${reason}`);
-      if (action === 'exit' && !exited) exitSidecar(reason || 'ctrl_exit');
+      if (action === 'exit' && !exited) {
+        // 兑付失败可自愈（hello proof 过期等）：退房清会话继续轮询，不杀进程
+        if (reason === 'hello_redemption_failed') {
+          recoverFromRedemptionFailure();
+          return;
+        }
+        exitSidecar(reason || 'ctrl_exit');
+      }
       // E2E 测试（v0.6.4）：注入 2s 440Hz 测试音频上行 → TRTC 分发给手机端，
       // 用于验证「AI 音频 → 手机端播放」链路（手机端 DiagLog 应出现 firstAudioFrame/voiceVolume）
       if (action === 'test_audio') injectTestAudio(cloud, makeAudioFrame16k, log);
@@ -88,6 +100,14 @@ function runSidecar() {
         bridge.sendUpAudio(pcm);
         stats.upFrames += 1;
         stats.upBytes += pcm.length;
+        // 2026-09-05：上行内容 RMS 判别（VOL 有能量但 bridge up rms=0 的归因分叉点）
+        const now = Date.now();
+        if (now - (stats._lastUpRmsLog || 0) >= 2000) {
+          stats._lastUpRmsLog = now;
+          let s = 0; const nS = Math.min(pcm.length >> 1, 1600);
+          for (let i = 0; i < nS; i++) { const v = pcm.readInt16LE(i * 2); s += v * v; }
+          log('UPRMS', `rms=${Math.sqrt(s / nS).toFixed(0)} bytes=${pcm.length} sr=${frame.sampleRate} ch=${frame.channel} vol=${frame.volume ?? 'n/a'}`);
+        }
       }
     },
     onCapturedAudioFrame: null,
@@ -138,17 +158,23 @@ function runSidecar() {
   cloud.on('onError', (errCode, errMsg) => log('ERR', `onError errCode=${errCode} msg=${errMsg}`));
   cloud.on('onUserAudioAvailable', (userId, available) => {
     log('AUDIO', `远端音频可用 userId=${userId} available=${available}`);
-    // 回音抑制（2026-08-26 真机实锤：PC 扬声器播出手机声音）：
-    // sidecar 是无头对端，只经 setAudioFrameCallback 拿远端 PCM 送 rtc_bridge，
-    // 不应在 PC 本地播放远端音频。TRTC 默认 autoRecvAudio=true 会自动拉流并播放，
-    // 这里显式把该路远端音量清零（回调仍触发、PCM 仍上行，只是不进扬声器）。
-    try {
-      cloud.setRemoteAudioVolume(userId, 0);
-      if (available) log('AUDIO', `远端播放已静音（回音抑制） userId=${userId}`);
-    } catch (e) {
-      log('ERR', `setRemoteAudioVolume 失败 userId=${userId}: ${e.message}`);
-    }
+    // 回音抑制调查（2026-09-04）：setRemoteAudioVolume(userId,0) 已移除（实测连带清零
+    // onPlayAudioFrame 帧数据）；setApplicationPlayVolume 在本 SDK 绑定缺失（not a function）。
+    // 远端音量保持默认 100，先保上行链路，PC 扬声器抑制待换可用 API。
   });
+  // 上行链路判别（2026-09-04）：onPlayAudioFrame 全零时，用 SDK 音量回调区分
+  // 「上行真空（手机没发/发静音）」vs「帧回调内容被清」——SDK 音量直接反映收流能量。
+  try {
+    cloud.enableAudioVolumeEvaluation(500);
+    cloud.on('onUserVoiceVolume', (userVolumes, userVolumesCount, totalVolume) => {
+      try {
+        const arr = (userVolumes || []).map(u => `${u.userId.slice(0, 8)}:${u.volume}`).join(',');
+        log('VOL', `[${arr}] total=${totalVolume}`);
+      } catch (e) { /* ignore */ }
+    });
+  } catch (e) {
+    log('ERR', `enableAudioVolumeEvaluation 失败: ${e.message}`);
+  }
   cloud.on('onUserSigExpired', () => {
     log('SIG', 'userSig 过期回调；由 rtc_bridge 侧重新签发后重进房（MVP 记录日志）');
   });
@@ -173,11 +199,42 @@ function runSidecar() {
 // ---------- 意图轮询（v0.6.1）：PC 不知道手机 device_id，枚举 pending 进对应房间 ----------
 let currentRoom = null;
 let currentSessionId = null; // Task #23：当前会话 ID（terminate 中继对账键；进房赋值/离开清空）
+// 兑付失败自愈状态（2026-09-05）：意图判死列表 + 连续失败计数
+const skippedIntents = createIntentSkipList();
+const redemptionRecovery = createRecoveryState();
+let redemptionRecoveryTimer = null;
+const RECOVERY_OBSERVATION_MS = 20000;
+
+// 任一会话存活超过观察窗（兑付成功且未被 ctrl exit 打断）即重置连续失败计数
+function scheduleRecoveryReset() {
+  if (redemptionRecoveryTimer) clearTimeout(redemptionRecoveryTimer);
+  redemptionRecoveryTimer = setTimeout(() => {
+    redemptionRecoveryTimer = null;
+    redemptionRecovery.reset();
+  }, RECOVERY_OBSERVATION_MS);
+}
+
+// hello proof TTL=60s：backend 事件循环阻塞/网络抖动都可能让 proof 在发送前
+// 过期（40112）。此时意图已消费、重签必被拒——判死该意图，退房清会话继续
+// 轮询；用户再次「立即监听」产生新会话即可恢复。连续失败达上限才退出防崩溃循环。
+function recoverFromRedemptionFailure() {
+  if (redemptionRecoveryTimer) { clearTimeout(redemptionRecoveryTimer); redemptionRecoveryTimer = null; }
+  skippedIntents.add(currentSessionId);
+  const keepGoing = redemptionRecovery.recordFailure();
+  log('RECOVERY', `兑付失败自愈: 连续第 ${redemptionRecovery.consecutiveFailures} 次（意图 ${currentSessionId} 已判死）`);
+  try { cloud.exitRoom(); } catch (e) { /* ignore */ }
+  if (bridge) bridge.clearSession();
+  currentRoom = null;
+  currentSessionId = null;
+  if (!keepGoing) {
+    exitSidecar('hello_redemption_failed_exhausted');
+  }
+}
 let pollingBusy = false;
 
 async function fetchSigForDevice(intent) {
   // sign_for_sidecar 会消费意图（防重复进房），返回同一房间的 PC userSig
-  const resp = await fetch(`${ARGS.signUrl}/api/v1/voice/session/sign`, {
+  const parsed = await fetchJsonWithTimeout(`${ARGS.signUrl}/api/v1/voice/session/sign`, {
     method: 'POST',
     headers: controlPlaneHeaders({ credential: config.sidecarCredential }),
     body: JSON.stringify({
@@ -187,27 +244,31 @@ async function fetchSigForDevice(intent) {
       user_id: config.SIDECAR_USER_ID,
     }),
   });
-  const parsed = await resp.json();
   if (parsed.code === 0 && parsed.data && parsed.data.user_sig) {
     log('SIG', '意图消费成功');
     return parsed.data;
   }
-  throw new Error(`sign failed code=${Number(parsed.code) || 50300}`);
+  // 确定性拒绝（如意图已被消费 40901）→ 调用方应把该意图判死进跳过列表；
+  // err.definitive=false 的网络/超时类异常不判死（意图仍有效，下轮可重试）
+  const err = new Error(`sign failed code=${Number(parsed.code) || 50300}`);
+  err.definitive = true;
+  throw err;
 }
 
 async function pollAndJoin() {
   if (exited || pollingBusy) return;
   pollingBusy = true;
+  let selectedIntent = null;
   try {
-    const resp = await fetch(`${ARGS.signUrl}/api/v1/voice/session/pending`, {
+    const parsed = await fetchJsonWithTimeout(`${ARGS.signUrl}/api/v1/voice/session/pending`, {
       method: 'GET',
       headers: controlPlaneHeaders({ credential: config.sidecarCredential }),
     });
-    const parsed = await resp.json();
     const intents = (parsed.data && parsed.data.intents) || [];
     if (intents.length === 0) { pollingBusy = false; return; }
-    const intent = selectPendingIntent(intents, currentRoom);
+    const intent = selectPendingIntent(intents, currentRoom, skippedIntents);
     if (!intent) { pollingBusy = false; return; }
+    selectedIntent = intent;
     log('SIG', '发现会话意图');
     if (currentRoom) {
       try { cloud.exitRoom(); } catch (e) { /* ignore */ }
@@ -222,7 +283,12 @@ async function pollAndJoin() {
     currentRoom = cred.room_id;
     currentSessionId = cred.hello.session_id; // Task #23：终止通知对账键
     enterRoom(cred);
+    scheduleRecoveryReset();
   } catch (e) {
+    if (e && e.definitive && selectedIntent) {
+      skippedIntents.add(selectedIntent.session_id);
+      log('ERR', `意图判死: ${selectedIntent.session_id}（${e.message}）`);
+    }
     log('ERR', `意图轮询失败: ${e.message}`);
   }
   pollingBusy = false;
