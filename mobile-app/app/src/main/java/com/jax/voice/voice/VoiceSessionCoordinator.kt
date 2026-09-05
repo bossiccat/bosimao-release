@@ -105,21 +105,30 @@ class VoiceSessionCoordinator internal constructor(
 
     /** 发起会话（三入口统一命令；活动会话期间幂等忽略） */
     fun start(source: String) {
+        // 入队日志（入口侧）：没有它就无法区分「事件根本没进队列（如协程/lifecycle 未启动）」
+        // 与「进了队列但被状态机拒绝」。正是排查「点了没反应」时要先分清的两个分支。
+        logger.i(TAG, "start requested source=$source currentGeneration=$generation state=${_model.value.state}")
         scope.launch { channel.send(Event.Start(source)) }
     }
 
     /** 取消当前会话（IDLE/EXITING 幂等忽略；SIGNING 直接回 IDLE） */
     fun cancel() {
+        logger.i(TAG, "cancel enqueued currentGeneration=$generation state=${_model.value.state}")
         scope.launch { channel.send(Event.Cancel) }
     }
 
     /** 上报指定 generation 的真实 RTC 进房成功；旧会话回调由 actor 丢弃。 */
     fun postEnterSucceeded(generation: Long) {
+        logger.i(TAG, "enter-succeeded enqueued generation=$generation currentGeneration=${this.generation} state=${_model.value.state}")
         scope.launch { channel.send(Event.EnterSucceeded(generation)) }
     }
 
     /** 上报当前会话失败（如 RTC onError）；IDLE 时忽略 */
     fun postFailure(code: String, message: String) {
+        // 关键：这里打的 generation 是「调用瞬间 Coordinator 认定的 gen」。外部调用方（RTC
+        // onError 回调）只持有旧 gen 快照，本方法在发送时才读取当前 gen —— 不一致就会被
+        // handleFailure 判为陈旧丢弃。把两个值都打出来，否则「失败了却什么都没发生」无从查。
+        logger.i(TAG, "failure enqueued code=$code message=$message stampedGeneration=$generation currentGeneration=${this.generation} state=${_model.value.state}")
         scope.launch { channel.send(Event.Failure(generation, code, message)) }
     }
 
@@ -388,6 +397,8 @@ class VoiceSessionCoordinator internal constructor(
     private fun scheduleTimeout(ms: Long, phase: VoiceSessionState) {
         cancelTimeout()
         val gen = generation
+        // 武装留痕：区分「看门狗装了但没触发（会话正常推进）」与「压根没装（漏了超时兜底）」
+        logger.d(TAG, "timeout armed phase=$phase generation=$gen ${ms}ms")
         timeoutJob = scope.launch {
             delay(ms)
             channel.send(Event.Timeout(gen, phase))

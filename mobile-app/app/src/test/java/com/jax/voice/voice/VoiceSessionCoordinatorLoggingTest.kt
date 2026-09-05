@@ -130,12 +130,13 @@ class VoiceSessionCoordinatorLoggingTest {
     }
 
     /** 轮询等待日志出现：日志在 publish 之前写入，但效果协程是异步的，避免取值竞态 */
-    private suspend fun awaitLogged(substring: String): LogEntry = withTimeout(3_000) {
-        while (true) {
-            val hit = logger.entries.firstOrNull { it.message.contains(substring) }
-            if (hit != null) return@withTimeout hit
-            delay(5)
+    private suspend fun awaitLogged(substring: String): LogEntry = withTimeout(3_000L) {
+        var hit: LogEntry? = null
+        while (hit == null) {
+            hit = logger.entries.firstOrNull { it.message.contains(substring) }
+            if (hit == null) delay(5L)
         }
+        hit!!
     }
 
     private fun assertTagged(entry: LogEntry) {
@@ -313,5 +314,68 @@ class VoiceSessionCoordinatorLoggingTest {
         val entry = awaitLogged("exit succeeded")
         assertTagged(entry)
         assertTrue("exit 日志缺 generation: ${entry.message}", entry.message.contains("generation=1"))
+    }
+
+    // ---- 入口入队：区分「事件没进队列」与「进了队列被状态机拒绝」——「点了没反应」的第一道分水岭 ----
+    @Test
+    fun `start enqueue is logged before the state machine can reject it`() = runBlocking<Unit> {
+        coordinator = buildCoordinator()
+
+        coordinator.start("notification_talk")
+        val entry = awaitLogged("start requested")
+        assertTagged(entry)
+        assertTrue("入队日志必须带 source（三入口归因）: ${entry.message}", entry.message.contains("source=notification_talk"))
+        assertTrue("入队日志必须带入队瞬间的 generation: ${entry.message}", entry.message.contains("currentGeneration=0"))
+
+        // 若状态机随后接受了，还会有一条 start accepted —— 两条并存才能定位"没反应"卡在哪
+        awaitState(VoiceSessionState.SIGNING)
+        awaitLogged("start accepted")
+    }
+
+    /**
+     * postFailure 是唯一一个「generation 由调用方携带、却在发送时才读取当前值」的入口：
+     * 外部只持有旧 gen 快照，方法内读的是 Coordinator 当前 gen，不一致就会被判为陈旧丢弃。
+     * 两个值都必须落日志，否则真机上「失败了却什么都没发生」完全无从查起。
+     */
+    @Test
+    fun `postFailure enqueue logs both stamped and current generation`() = runBlocking<Unit> {
+        coordinator = buildCoordinator()
+
+        coordinator.start("main")
+        awaitState(VoiceSessionState.SIGNING)
+        coordinator.postFailure("rtc_error", "boom")
+
+        val entry = awaitLogged("failure enqueued")
+        assertTagged(entry)
+        assertTrue("必须记录调用方携带的 generation: ${entry.message}", entry.message.contains("stampedGeneration=1"))
+        assertTrue(
+            "必须记录 Coordinator 当前 generation，否则无法判断是否会被判为陈旧丢弃: ${entry.message}",
+            entry.message.contains("currentGeneration=1")
+        )
+    }
+
+    /**
+     * 凭证把关：日志会被导出、贴到工单和聊天里，userSig 一旦进日志就是长期泄露。
+     * 这条是给"顺手多打一点字段"的后续修改设的闸。
+     */
+    @Test
+    fun `logs never contain credentials`() = runBlocking<Unit> {
+        coordinator = buildCoordinator()
+        val s = session("s1")
+
+        coordinator.start("main")
+        awaitState(VoiceSessionState.SIGNING)
+        awaitSignGate(1).complete(s)
+        awaitState(VoiceSessionState.ENTERING)
+        enterGate.complete(Unit)
+        coordinator.postEnterSucceeded(1)
+        awaitState(VoiceSessionState.IN_ROOM)
+        awaitLogged("enter succeeded")
+
+        val leaks = logger.entries.filter { it.message.contains(s.userSig) || it.message.contains("userSig=") }
+        assertTrue("日志不得输出 userSig（日志会被导出/共享）: ${leaks.map { it.message }}", leaks.isEmpty())
+
+        val literalLeaks = logger.entries.filter { "sig-" in it.message }
+        assertTrue("日志不得出现 userSig 字面量: ${literalLeaks.map { it.message }}", literalLeaks.isEmpty())
     }
 }
