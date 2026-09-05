@@ -25,6 +25,16 @@ class FloatingOverlay(private val context: Context) {
     companion object {
         private const val TAG = "FloatingOverlay"
         private const val BALL_SIZE_DP = 56
+        /**
+         * 权限缺失时的重试/告警节流间隔。
+         *
+         * 背景（2026-09-05 真机实测）：MainActivity 的 UI 状态流每 40ms 回调一次并调用
+         * show()，未授权时每次都打一条 W 日志 —— 实测 25 条/秒、30s 内 1000+ 条，
+         * 直接占满 logcat 缓冲把关键日志（会话/sign/TRTC）挤出去，导致真机问题无法
+         * 取证（曾据此误判「点击后 App 无任何日志」）。同时是无谓的持续 CPU/IO 开销。
+         * 因此这里既要节流日志，也要节流重试本身。
+         */
+        private const val PERMISSION_RETRY_INTERVAL_MS = 5_000L
     }
 
     private var windowManager: WindowManager? = null
@@ -52,10 +62,19 @@ class FloatingOverlay(private val context: Context) {
         }
     }
 
+    /** 权限缺失节流闸门：避免每帧重试 + 刷日志（详见 OverlayPermissionGate 文档） */
+    private val permissionGate = OverlayPermissionGate(PERMISSION_RETRY_INTERVAL_MS)
+
+    /** 测试与自诊断用：累计被节流的 show() 次数（不依赖 logcat 计数） */
+    val throttledShowCount: Int
+        get() = permissionGate.throttledCount
+
     private fun showInner() {
         if (ball != null) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
-            Log.w(TAG, "overlay permission not granted")
+            if (permissionGate.shouldAttempt()) {
+                Log.w(TAG, "overlay permission not granted")
+            }
             return
         }
         val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
