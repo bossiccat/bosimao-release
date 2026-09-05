@@ -39,6 +39,9 @@ class RtcClientTest {
 
     private var enterRoomCount = 0
     private var startLocalAudioCalled = false
+    private var customSourceStartCount = 0
+    private var customSourceStopCount = 0
+    private var enableCustomCaptureCalled = false
     private var exitRoomCalled = false
     private var stopLocalAudioCalled = false
     private var muted: Boolean? = null
@@ -63,6 +66,9 @@ class RtcClientTest {
         VoiceController.reset()
         enterRoomCount = 0
         startLocalAudioCalled = false
+        customSourceStartCount = 0
+        customSourceStopCount = 0
+        enableCustomCaptureCalled = false
         exitRoomCalled = false
         stopLocalAudioCalled = false
         muted = null
@@ -75,6 +81,7 @@ class RtcClientTest {
         every { engine.addListener(any()) } answers { listener = arg(0) }
         every { engine.enterRoom(any(), any()) } answers { enterRoomCount++ }
         every { engine.startLocalAudio(any()) } answers { startLocalAudioCalled = true }
+        every { engine.enableCustomAudioCapture(any()) } answers { enableCustomCaptureCalled = true }
         every { engine.exitRoom() } answers { exitRoomCalled = true }
         every { engine.stopLocalAudio() } answers { stopLocalAudioCalled = true }
         every { engine.muteLocalAudio(any()) } answers { muted = firstArg() }
@@ -88,7 +95,11 @@ class RtcClientTest {
             onError = { code, msg -> errors.add(code to msg) },
             onExited = { exitedCount++ },
             onEntered = { enteredCount++ },
-            engineFactory = { engine }
+            engineFactory = { engine },
+            customAudioSource = object : RtcClient.CustomAudioSource {
+                override fun start(cloud: TRTCCloud): Boolean { customSourceStartCount++; return true }
+                override fun stop() { customSourceStopCount++ }
+            }
         )
     }
 
@@ -102,9 +113,9 @@ class RtcClientTest {
         listener.onUserVoiceVolume(arrayListOf<TRTCCloudDef.TRTCVolumeInfo>(), total)
     private fun fireOnError(code: Int, msg: String) = listener.onError(code, msg, null)
 
-    // ---- S1: 进房成功 -> CONNECTED + startLocalAudio ----
+    // ---- S1: 进房成功 -> CONNECTED + 自定义采集启用（2026-09-05 契约：替代 startLocalAudio）----
     @Test
-    fun `wake then enter room success CONNECTED and startLocalAudio called`() {
+    fun `wake then enter room success CONNECTED and custom capture enabled`() {
         client.enterRoom(makeSession())
         // 进房前 = CONNECTING
         assertEquals(ConnectionState.CONNECTING, states.last())
@@ -112,13 +123,15 @@ class RtcClientTest {
         assertEquals("同步 enterRoom 返回不得触发进房确认", 0, enteredCount)
         fireOnEnterRoom(0)
         assertEquals(ConnectionState.CONNECTED, states.last())
-        assertTrue("startLocalAudio(SPEECH) 应被调用", startLocalAudioCalled)
+        assertTrue("进房成功必须启用自定义采集", enableCustomCaptureCalled)
+        assertTrue("自定义采集源必须被启动", customSourceStartCount == 1)
+        assertFalse("MUSIC 档内部采集必须移除（回音根因，2026-09-05）", startLocalAudioCalled)
         assertEquals("应只进房一次", 1, enterRoomCount)
         assertTrue(client.isInRoom())
         // 真实 onEnterRoom 成功回调触发进房确认
         assertEquals("onEnterRoom 成功必须触发 onEntered", 1, enteredCount)
         // mic handoff：会话期不触发 onExited（MicRecorder 保持停止）
-        assertEquals("会话期不得触发 onExited（mic 由 TRTC 独占）", 0, exitedCount)
+        assertEquals("会话期不得触发 onExited（mic 由自定义采集接管）", 0, exitedCount)
     }
 
     // ---- S2: 进房失败 -> 错误态 + 非 CONNECTED ----

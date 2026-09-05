@@ -40,7 +40,9 @@ class RtcClient(
     /** 远端播放 UI 事件（Task 7：正常停止 = RemoteAudioStopped，Task 8 接入 BargeInController） */
     private val onRemoteAudioEvent: (RtcPlaybackSubscription.RemoteAudioEvent) -> Unit = {},
     /** 引擎工厂（测试注入，QA L0 RTC-CLIENT-TEST-DESIGN §2）：默认 TRTCCloud.sharedInstance(appContext) */
-    private val engineFactory: (Context) -> TRTCCloud = { ctx -> TRTCCloud.sharedInstance(ctx) }
+    private val engineFactory: (Context) -> TRTCCloud = { ctx -> TRTCCloud.sharedInstance(ctx) },
+    /** 会话期自定义采集源（测试注入 fake；默认 RealCustomAudioSource：MIC+平台AEC+sendCustomAudioData） */
+    private val customAudioSource: CustomAudioSource = RealCustomAudioSource()
 ) {
     companion object {
         private const val TAG = "RtcClient"
@@ -51,6 +53,16 @@ class RtcClient(
         private const val REMOTE_LEAVE_TIMEOUT_MS = 60_000L // 对端离开超时退房
         /** 自定义命令 cmdId=1：会话终止通知（与 sidecar rtc.js onRecvCustomCmdMsg 约定一致，Task #23） */
         const val CMD_ID_TERMINATE = 1
+    }
+
+    /**
+     * 会话期自定义音频源（2026-09-05 回音/误打断根治）：进房成功后由 RtcClient 驱动启停，
+     * 真实实现 [RealCustomAudioSource]（AudioSource.MIC + Android AEC/NS + sendCustomAudioData）。
+     * 启动失败不阻断进房状态（采集缺失只影响上行，真机日志留痕）。
+     */
+    interface CustomAudioSource {
+        fun start(cloud: TRTCCloud): Boolean
+        fun stop()
     }
 
     @Volatile private var inRoom = false // 本地维护；13.4 SDK 无 isInRoom 公开方法
@@ -112,6 +124,19 @@ class RtcClient(
             if (result >= 0) {
                 inRoom = true
                 VoiceController.setLastError("")
+                // 采集源切换（2026-09-05 回音/误打断根治）：自定义采集替代 MUSIC 档内部采集。
+                // 背景：SPEECH 档 VOICE_COMMUNICATION 源在本机（Samsung S26U，AGM LPI 路径）送出全零，
+                // MUSIC 档（MIC 源）有声但无 AEC/NS → 千问回复外放被采回 → 误 barge-in 截断回复
+                // （bridge dropped=3/4）。自定义采集走 MIC 源 + Android AcousticEchoCanceler。
+                try {
+                    cloud.enableCustomAudioCapture(true)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "enableCustomAudioCapture(true) failed: ${t.message}", t)
+                }
+                val srcOk = try { customAudioSource.start(cloud) } catch (t: Throwable) {
+                    Log.e(TAG, "custom audio source start failed: ${t.message}", t); false
+                }
+                DiagLog.log("Rtc", "custom capture start ok=$srcOk")
                 onState(ConnectionState.CONNECTED)
                 onEntered()
             } else {
@@ -209,7 +234,10 @@ class RtcClient(
         onPhase(VoicePhase.LISTENING)
         onState(ConnectionState.CONNECTING)
         cloud.enterRoom(params, TRTCCloudDef.TRTC_APP_SCENE_AUDIOCALL)
-        cloud.startLocalAudio(TRTCCloudDef.TRTC_AUDIO_QUALITY_SPEECH) // 语音档（16k），纯音频不预览
+        // 采集源契约（2026-09-05 定稿）：上行 = 自定义采集（onEnterRoom 成功后启用）。
+        // 历史：SPEECH 档（VOICE_COMMUNICATION 源）在本机送全零 → MUSIC 档（MIC 源）有声音
+        // 但无 AEC/NS（回音根因）→ 现改为 AudioSource.MIC + 平台 AEC 的自定义采集
+        // （RealCustomAudioSource），不再调用 startLocalAudio。
         cloud.enableAudioVolumeEvaluation(
             true,
             TRTCCloudDef.TRTCAudioVolumeEvaluateParams().apply {
@@ -239,6 +267,13 @@ class RtcClient(
         inRoom = false
         cancelEnterTimeout()
         onState(ConnectionState.DISCONNECTED)
+        // 自定义采集对称关闭（2026-09-05）：先停源（停止 read/send），再关 SDK 自定义采集
+        try { customAudioSource.stop() } catch (t: Throwable) {
+            Log.w(TAG, "custom audio source stop failed: ${t.message}", t)
+        }
+        try { cloud.enableCustomAudioCapture(false) } catch (t: Throwable) {
+            Log.w(TAG, "enableCustomAudioCapture(false) failed: ${t.message}", t)
+        }
         cloud.exitRoom()
         try { cloud.setAudioFrameListener(null) } catch (t: Throwable) {
             Log.w(TAG, "clear audio frame listener failed: ${t.message}", t)
@@ -289,6 +324,21 @@ class RtcClient(
         cloud.muteLocalAudio(muted)
     }
 
+    /**
+     * 自定义采集上行帧（16k/mono/20ms=320样本→640B PCM16LE，SPEC §4.1/AC-08 契约）。
+     * 未进房静默忽略（防退房竞态期残留帧发送）；格式与 RealCustomAudioSource 直发一致。
+     */
+    fun sendCustomAudioFrame(samples: ShortArray) {
+        if (!inRoom) return
+        // javap 核对 13.4.0.20477：TRTCAudioFrame 仅 data/sampleRate/channel/timestamp/extraData
+        val frame = TRTCCloudDef.TRTCAudioFrame()
+        frame.data = RtcCustomAudioPcm.shortToPcm16le(samples)
+        frame.sampleRate = RtcCustomAudioPcm.SAMPLE_RATE
+        frame.channel = 1
+        frame.timestamp = System.currentTimeMillis()
+        cloud.sendCustomAudioData(frame)
+    }
+
     fun isInRoom(): Boolean = inRoom
 
     /** 销毁引擎（服务停止时调用；destroySharedInstance 是静态方法，销毁后需重新 sharedInstance） */
@@ -297,6 +347,7 @@ class RtcClient(
             cancelExitTimeout()
             cancelEnterTimeout()
             cancelLeaveTimeout()
+            try { customAudioSource.stop() } catch (_: Throwable) {}
             cloud.removeListener(listener)
             cloud.setAudioFrameListener(null)
             if (inRoom) {
