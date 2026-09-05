@@ -1,6 +1,7 @@
 """Fail-closed one-shot Control Plane hello redemption client."""
 from __future__ import annotations
 
+import asyncio
 import ssl
 from typing import Literal
 
@@ -86,18 +87,31 @@ class HelloRedemptionClient:
 
     async def redeem(self, hello: dict) -> dict:
         payload = validate_hello(hello)
+        # 2026-09-05：ConnectTimeout 单次安全重试——连接未建立=请求未发出=jti 未消费，
+        # 重试无重放/双消费风险；ReadTimeout（请求已到达）绝不重试（40914 fail-closed）。
+        # 背景：兑付恰逢 App sign 峰值时，backend accept 偶发 >0.5s（18:44:36 实证）。
         try:
-            async with httpx.AsyncClient(
-                verify=self._ssl_context,
-                timeout=self._timeout,
-                transport=self._transport,
-                # 控制面为内部 mTLS 链路，禁止继承 HTTP(S)_PROXY 以免凭据/流量
-                # 被导向环境代理；目标 URL 已在初始化时强制要求 https。
-                trust_env=False,
-            ) as client:
-                response = await client.post(self._url, json=payload, headers=self._headers)
+            return await self._redeem_once(payload)
+        except httpx.ConnectTimeout as first_exc:
+            await asyncio.sleep(0.1)
+            try:
+                return await self._redeem_once(payload)
+            except httpx.HTTPError as exc:
+                raise HelloRedemptionError("redemption transport failed (retry)") from exc
         except httpx.HTTPError as exc:
             raise HelloRedemptionError("redemption transport failed") from exc
+
+    async def _redeem_once(self, payload: dict) -> dict:
+        # httpx.HTTPError 直接冒泡（redeem 统一分类：ConnectTimeout 可重试，其余包装 fail-closed）
+        async with httpx.AsyncClient(
+            verify=self._ssl_context,
+            timeout=self._timeout,
+            transport=self._transport,
+            # 控制面为内部 mTLS 链路，禁止继承 HTTP(S)_PROXY 以免凭据/流量
+            # 被导向环境代理；目标 URL 已在初始化时强制要求 https。
+            trust_env=False,
+        ) as client:
+            response = await client.post(self._url, json=payload, headers=self._headers)
         if response.status_code != 200:
             raise HelloRedemptionError("redemption rejected")
         try:
