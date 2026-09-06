@@ -36,8 +36,14 @@ class RealCustomAudioSource : RtcClient.CustomAudioSource {
         private const val TAG = "RtcCustomAudio"
         private const val FRAME_SAMPLES = RtcCustomAudioPcm.SAMPLES_PER_20MS // 320
         private const val WATCHDOG_IDLE_MS = 5_000L
-        /** 电平日志周期（帧）：20ms/帧 × 100 = 2s */
-        private const val LEVEL_LOG_FRAMES = 100L
+        /**
+         * 电平日志周期（帧）：20ms/帧 × 25 = 500ms。
+         *
+         * 原为 100 帧（2s）——真机取证时发现 2s 采样间隔粗到看不见收敛过程：增益从 32 掉到 14
+         * 只要 ~300ms，2s 后早已收敛完毕，样本里只看到「增益怎么一会 21 一会 30」的噪声，
+         * 无法判断是没收敛还是被底噪顶上去了。500ms 既能看清收敛，又远达不到「日志风暴」量级。
+         */
+        private const val LEVEL_LOG_FRAMES = 25L
 
     }
 
@@ -119,15 +125,19 @@ class RealCustomAudioSource : RtcClient.CustomAudioSource {
                     lastFrameTs = System.currentTimeMillis()
                     // 自适应增益 + 噪声门（2026-09-05：固定 ×32 削波且放大底噪致误唤醒）
                     val gained = gainStage.process(pcm.copyOf(n))
-                    // 每 2s（100 帧 × 20ms）落一条电平日志：真机验收「说话 2000~5000 / 安静静音」
+                    // 每 500ms（25 帧 × 20ms）落一条电平日志：真机验收「说话 2000~5000 / 安静静音」
                     // 的唯一客观依据，缺了它只能凭「听起来行不行」猜。
+                    // floor= 噪声底 / adp= 本帧是否参与收敛 —— 用来区分「在收敛」与「被底噪门槛挡住」，
+                    // 没有这两个字段就无法在真机上区分 D1 runaway 与正常收敛。
                     if (++frameSeq % LEVEL_LOG_FRAMES == 0L) {
                         Log.i(
                             TAG,
                             "lvl raw=" + gainStage.lastRawRms.toInt() +
                                 " gain=" + String.format(Locale.US, "%.1f", gainStage.currentGain) +
                                 " out=" + gainStage.lastOutRms.toInt() +
-                                " gate=" + gainStage.lastGateOpen
+                                " gate=" + gainStage.lastGateOpen +
+                                " floor=" + String.format(Locale.US, "%.1f", gainStage.currentNoiseFloor) +
+                                " adp=" + gainStage.lastAdapted
                         )
                     }
                     // javap 核对 13.4.0.20477：TRTCAudioFrame 仅 data/sampleRate/channel/timestamp/extraData
