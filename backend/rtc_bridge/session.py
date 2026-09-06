@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import time
 from typing import Any, Awaitable, Callable
 
@@ -19,6 +20,7 @@ from app.voice.qwen_realtime_bridge import QwenRealtimeBridge
 from app.voice.end_detect import EndDetectFeeder, pcm_rms
 
 from .bounded_audio_queue import BoundedAudioQueue
+from .pcm_dump import PcmDumpSink
 from .shaper import DownlinkShaper
 
 logger = logging.getLogger(__name__)
@@ -155,6 +157,12 @@ class PeerVoiceSession:
             "marker_tail_drops": 0,     # 标记尾音丢弃计数（[STANDBY]/[ACTIVE] 尾音）
         }
         self.last_activity_ts = time.time()
+        # P0 取证（2026-09-06）：JAX_DOWN_PCM_DUMP=<prefix> 开启时把下行/上行
+        # PCM 原样落盘，人耳复核最后一跳；默认关闭零开销
+        dump_prefix = os.environ.get("JAX_DOWN_PCM_DUMP", "").strip()
+        self._pcm_dump = PcmDumpSink(dump_prefix) if dump_prefix else None
+        if self._pcm_dump is not None:
+            logger.info("[lat] pcm dump enabled prefix=%s", dump_prefix)
 
     def _build_apm(self) -> ApmBridge:
         """创建 ApmBridge 并绑回调；feed_pcm 由 feeder 持有（重建时重绑）"""
@@ -237,6 +245,9 @@ class PeerVoiceSession:
                     pass  # 周期唤醒：维持 barge-in 窗口超时判定
                 continue
             self._sync_queue_metrics()
+            if self._pcm_dump is not None:
+                # P0 取证：上行原始帧（实际送上云端；队列丢弃另有计数）落盘
+                self._pcm_dump.write_up(entry.payload)
             try:
                 await self.feeder.feed(entry.payload)
             except Exception as e:  # noqa: BLE001
@@ -360,6 +371,10 @@ class PeerVoiceSession:
                 asyncio.create_task(self._router.feed(stripped))
 
     async def _send_frame(self, frame: bytes) -> None:
+        if self._pcm_dump is not None:
+            # P0 取证：下行帧在 shaper 节拍后、实际发往 sidecar 前落盘——
+            # dump 里的洞 = 真实送达的洞
+            self._pcm_dump.write_down(frame)
         await self._send_msg({"type": MSG_DOWN_AUDIO, "pcm_b64": base64.b64encode(frame).decode("ascii")})
 
     async def _on_text(self, text: str) -> None:
@@ -480,6 +495,9 @@ class PeerVoiceSession:
         self._standby_pending = False
         if self._router is not None:
             self._router.clear()
+        if self._pcm_dump is not None:
+            # P0 取证：会话结束冲刷缓冲 + 落 meta.json
+            await self._pcm_dump.close()
         try:
             await self.apm.close()
         except Exception:  # noqa: BLE001
