@@ -64,6 +64,18 @@ class VoiceForegroundService : Service() {
     @Volatile private var micRestartCount = 0
     @Volatile private var stopping = false
 
+    /**
+     * 管线存活判据：必须与 micRecorder 解耦。
+     *
+     * micRecorder 会被 [stopMicForCall] 置 null（会话期把 mic 让给 RealCustomAudioSource），
+     * 用它当判据等于「判据恒为空」——真机实测 4 次点击 = 4 个 coordinator + 5 条
+     * jax-rtc-capture 线程。0 = 未构建；>0 = 已构建，值为构建序号，回调用它做代际校验。
+     */
+    @Volatile private var pipelineSeq = 0
+
+    /** 构建中标记：阻断 releasePipeline 期间旧 coordinator 异步回 IDLE 触发的 restartMicRecorder 抢建 */
+    @Volatile private var buildingPipeline = false
+
     /** 最近一次签发的会话信息（Task #23：退出时提供 terminate 所需 room_id/sessionId 上下文） */
     @Volatile private var lastSignedSession: VoiceSessionInfo? = null
 
@@ -89,12 +101,13 @@ class VoiceForegroundService : Service() {
                 // 播放中点击同样是显式打断；非 SPEAKING 时由控制器幂等忽略。
                 bargeInController?.interrupt("tap")
                 // P0 独立入口（悬浮窗/通知，§5.3）：保证管线后投递同一 Start 命令
-                if (micRecorder == null) startPipeline()
+                // 不再判 micRecorder —— 它在会话期恒为 null，判了必然每次点击都重建管线
+                startPipeline()
                 // Task 8：三入口统一命令，source 来自 Intent（main/overlay/notification）
                 coordinator?.start(VoiceEntry.resolveSource(intent, "notification_talk"))
             }
             ACTION_PAUSE -> {
-                if (micRecorder == null) startPipeline()
+                startPipeline()
                 wakeActive = !wakeActive
                 dispatcher?.wakeEnabled = wakeActive
                 updateNotificationTitle()
@@ -104,7 +117,11 @@ class VoiceForegroundService : Service() {
     }
 
     private fun startPipeline() {
-        if (micRecorder != null) return
+        // 判据只看 pipelineSeq：micRecorder 在会话期恒为 null，用它判断会每次点击都重建整条管线
+        if (pipelineSeq > 0) {
+            Log.d(TAG, "startPipeline skipped: already built seq=$pipelineSeq")
+            return
+        }
         try {
             startPipelineInner()
         } catch (t: Throwable) {
@@ -114,30 +131,72 @@ class VoiceForegroundService : Service() {
         }
     }
 
+    /**
+     * 释放整条管线（构建前/服务销毁时调用）。顺序：先 cancel 会话 → 再 release 采集与 RTC →
+     * 最后 release 唤醒引擎。每步独立 try/catch，避免一处抛错导致后面全漏。
+     *
+     * 关于 [RtcClient.release] 内部的 `TRTCCloud.destroySharedInstance()`：
+     * TRTCCloud 是进程级单例，destroy 之后再次 `sharedInstance(ctx)` 会重建全新实例
+     * （SDK 官方生命周期即如此设计），而新 RtcClient 的 cloud 是 `by lazy`，取用时才创建，
+     * 因此「先 destroy 旧的、再 lazy 建新的」顺序是安全的。不 release 反而更糟——旧 client
+     * 的 listener 会永久挂在共享 TRTCCloud 上，回调扇出到已废弃的管线。
+     */
+    private fun releasePipeline() {
+        Log.i(TAG, "pipeline released seq=$pipelineSeq")
+        try { coordinator?.cancel() } catch (t: Throwable) { Log.w(TAG, "coordinator cancel failed: ${t.message}") }
+        try { rtcClient?.release() } catch (t: Throwable) { Log.w(TAG, "rtcClient release failed: ${t.message}") }
+        try { wakeEngine?.release() } catch (t: Throwable) { Log.w(TAG, "wakeEngine release failed: ${t.message}") }
+        coordinator = null
+        rtcClient = null
+        wakeEngine = null
+        bargeInController = null
+    }
+
     private fun startPipelineInner() {
+        buildingPipeline = true
+        releasePipeline()
+        pipelineSeq++
+        Log.i(TAG, "pipeline built seq=$pipelineSeq")
+        // 代际戳：本条管线创建的所有回调用它校验自己是否仍属于「当前」管线
+        val seq = pipelineSeq
+        /**
+         * 陈旧回调守卫：旧管线的 RtcClient 回调不得再打到当前 coordinator / gate 上。
+         * 真机故障「16:57:47 才进房的会话被 16:57:49 的 enter_timeout 踢掉」即由此串台造成。
+         * 注意只用于低频回调；onRms/onState/onPhase 走静默判等，避免日志风暴。
+         */
+        fun stale(what: String): Boolean {
+            if (pipelineSeq == seq) return false
+            Log.w(TAG, "stale callback dropped: $what seq=$seq current=$pipelineSeq")
+            return true
+        }
         notifications = VoiceServiceNotifications(this)
         notifications!!.startForegroundCompat()
         rtcClient = RtcClient(
             appContext = applicationContext,
-            onState = { VoiceController.setConnection(it) },
+            onState = { if (pipelineSeq == seq) VoiceController.setConnection(it) },
             onPhase = {
-                VoiceController.setPhase(it)
-                val experience = ExperienceState.fromPhase(it)
-                bargeInController?.onExperienceChange(experience)
-                VoiceController.publishExperience(experience)
-            },
-            onRms = { VoiceController.setRms(it) },
-            onLocalVoiceActivity = { bargeInController?.interrupt("user_voice") },
-            onError = { code, msg ->
-                if (code == "apm_reconnect_gave_up") {
-                    VoiceController.publishError(code, msg)
-                } else {
-                    VoiceController.setLastError("进房失败: $code $msg")
+                if (pipelineSeq == seq) {
+                    VoiceController.setPhase(it)
+                    val experience = ExperienceState.fromPhase(it)
+                    bargeInController?.onExperienceChange(experience)
+                    VoiceController.publishExperience(experience)
                 }
-                coordinator?.postFailure(code, msg)
             },
-            onExited = { exitGate?.complete(Unit) },
-            onEntered = { enterGate?.complete(Unit) }
+            onRms = { if (pipelineSeq == seq) VoiceController.setRms(it) },
+            onLocalVoiceActivity = { if (pipelineSeq == seq) bargeInController?.interrupt("user_voice") },
+            onError = { code, msg ->
+                // 守卫前置：旧管线的 enter_timeout 打到当前 coordinator 会直接踢掉刚进房的会话
+                if (!stale("onError($code)")) {
+                    if (code == "apm_reconnect_gave_up") {
+                        VoiceController.publishError(code, msg)
+                    } else {
+                        VoiceController.setLastError("进房失败: $code $msg")
+                    }
+                    coordinator?.postFailure(code, msg)
+                }
+            },
+            onExited = { if (!stale("onExited")) exitGate?.complete(Unit) },
+            onEntered = { if (!stale("onEntered")) enterGate?.complete(Unit) }
         )
         bargeInController = BargeInController(
             interruptPlayback = { rtcClient?.interruptRemotePlayback() },
@@ -164,10 +223,15 @@ class VoiceForegroundService : Service() {
 
         dispatcher = FrameDispatcher(wakeEngine = engine, onRms = { VoiceController.setRms(it) })
             .also { it.wakeEnabled = wakeActive }
+        // 防御：releasePipeline 期间旧 coordinator 若异步回 IDLE 并抢建了 MicRecorder，
+        // 直接覆盖会漏掉它的 AudioRecord 线程（正是本次要根治的泄漏类型）
+        micRecorder?.stop()
+        micRecorder = null
         micRecorder = MicRecorder { samples -> dispatcher?.onFrame(samples) }
         micRecorder!!.setOnDied { onMicDied() }
         if (!micRecorder!!.start()) {
             Log.e(TAG, "mic start failed")
+            buildingPipeline = false
             stopSelf()
             return
         }
@@ -176,6 +240,7 @@ class VoiceForegroundService : Service() {
         VoiceController.setPhase(VoicePhase.MONITORING)
         updateNotificationTitle()
         Log.i(TAG, "pipeline started: mic 16k + KWS + serialized coordinator")
+        buildingPipeline = false
     }
 
     /** 效果注入：签发/进房/退房只在此接线，会话裁决全部交给 coordinator */
@@ -311,6 +376,8 @@ class VoiceForegroundService : Service() {
             dispatcher = null
             wakeEngine?.release()
             wakeEngine = null
+            // 必须归零：否则 startPipeline() 的 pipelineSeq 守卫会永久拦住重建（P0-1 唯一回归点）
+            pipelineSeq = 0
             VoiceController.setService(ServiceState.STOPPED)
             VoiceController.setPhase(VoicePhase.IDLE)
             if (micRestartCount < 3) {
@@ -332,6 +399,11 @@ class VoiceForegroundService : Service() {
     /** 会话结束后重建监听管线（幂等：双回调只重建一次，防双 AudioRecord 抢占 mic） */
     private fun restartMicRecorder() {
         if (micRecorder != null) return
+        // 管线构建中：旧 coordinator 回 IDLE 触发的重建必须让位，否则会被随后创建的 MicRecorder 覆盖成泄漏
+        if (buildingPipeline) {
+            Log.d(TAG, "restartMicRecorder skipped: pipeline building")
+            return
+        }
         try {
             val engine = wakeEngine
             val d = FrameDispatcher(wakeEngine = engine, onRms = { VoiceController.setRms(it) })
@@ -368,14 +440,11 @@ class VoiceForegroundService : Service() {
 
     override fun onDestroy() {
         stopping = true
-        coordinator = null
         micRecorder?.stop()
         micRecorder = null
-        wakeEngine?.release()
-        wakeEngine = null
         dispatcher = null
-        rtcClient?.release()
-        rtcClient = null
+        releasePipeline() // coordinator.cancel() + rtcClient.release() + wakeEngine.release() + 全部置 null
+        pipelineSeq = 0   // 服务销毁：seq 归零，允许下次 onCreate 重新构建
         scope.cancel()
         VoiceController.setService(ServiceState.STOPPED)
         VoiceController.setPhase(VoicePhase.IDLE)

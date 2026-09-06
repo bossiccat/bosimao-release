@@ -41,10 +41,17 @@ class RtcClient(
     private val onRemoteAudioEvent: (RtcPlaybackSubscription.RemoteAudioEvent) -> Unit = {},
     /** 引擎工厂（测试注入，QA L0 RTC-CLIENT-TEST-DESIGN §2）：默认 TRTCCloud.sharedInstance(appContext) */
     private val engineFactory: (Context) -> TRTCCloud = { ctx -> TRTCCloud.sharedInstance(ctx) },
-    /** 会话期自定义采集源（测试注入 fake；默认 RealCustomAudioSource：MIC+平台AEC+sendCustomAudioData） */
-    private val customAudioSource: CustomAudioSource = RealCustomAudioSource()
+    /** 会话期自定义采集源（测试注入 fake；默认 RealCustomAudioSource 进程内单例：MIC+平台AEC+sendCustomAudioData） */
+    private val customAudioSource: CustomAudioSource = RealCustomAudioSource.get()
 ) {
+    /**
+     * 实例标识（真机取证）：TRTCCloud 是进程级单例，多个 RtcClient 会把 listener 挂到同一个
+     * 引擎上并各自收到回调。没有这个 id，日志里无法分清是哪一代 client 出的错。
+     */
+    private val instanceId: String = "rtc#${SEQ.incrementAndGet()}"
+
     companion object {
+        private val SEQ = java.util.concurrent.atomic.AtomicInteger(0)
         private const val TAG = "RtcClient"
         // 常量（MOBILE-INTEGRATION §1.3 / P2-2 / v0.6.2 / P2-3）
         private const val VOLUME_INTERVAL_MS = 300 // 音量回调间隔
@@ -90,7 +97,11 @@ class RtcClient(
             if (!exitHandled && !inRoom) {
                 exitHandled = true
                 inRoom = false
-                Log.e(TAG, "onEnterRoom timeout (${ENTER_TIMEOUT_MS}ms): forcing enter failure recovery")
+                Log.e(TAG, "onEnterRoom timeout (${ENTER_TIMEOUT_MS}ms): forcing enter failure recovery [$instanceId]")
+                // P1-2：进房超时不代表采集没起来（onEnterRoom 回调与超时可能竞态），必须显式停采集
+                try { customAudioSource.stop() } catch (t: Throwable) {
+                    Log.w(TAG, "custom audio source stop failed: ${t.message}", t)
+                }
                 onState(ConnectionState.DISCONNECTED)
                 onError("enter_timeout", "进房超时（${ENTER_TIMEOUT_MS / 1000}s 无回调）")
             }
@@ -119,7 +130,7 @@ class RtcClient(
     private val listener = object : TRTCCloudListener() {
         override fun onEnterRoom(result: Long) {
             cancelEnterTimeout()
-            DiagLog.log("Rtc", "onEnterRoom result=$result")
+            DiagLog.log("Rtc", "onEnterRoom result=$result [$instanceId]")
             // 判成功：真实 SDK result>0=成功（耗时ms）、result<0=失败；result==0 为测试 mock 成功哨兵
             if (result >= 0) {
                 inRoom = true
@@ -146,7 +157,7 @@ class RtcClient(
             }
         }
         override fun onExitRoom(reason: Int) {
-            Log.i(TAG, "onExitRoom reason=$reason (0主动退出/1被踢/2房间解散)")
+            Log.i(TAG, "onExitRoom reason=$reason (0主动退出/1被踢/2房间解散) [$instanceId]")
             cancelExitTimeout()
             cancelLeaveTimeout()
             inRoom = false
@@ -211,7 +222,7 @@ class RtcClient(
             DiagLog.log("Rtc", "onRecvCustomCmdMsg user=$userId cmdId=$cmdId seq=$seq len=${message?.size ?: 0}")
         }
         override fun onError(errCode: Int, errMsg: String, extraInfo: Bundle?) {
-            Log.e(TAG, "TRTC error: $errCode $errMsg")
+            Log.e(TAG, "TRTC error: $errCode $errMsg [$instanceId]")
             onError("$errCode", errMsg)
             if (inRoom) onState(ConnectionState.DISCONNECTED) // 进房后错误（SDK 自行重连）
         }
@@ -220,7 +231,7 @@ class RtcClient(
     /** 进房（纯音频 AudioCall 场景）+ 开本地采集上行 + 音量回调。调用方必须先停 MicRecorder（mic handoff）。 */
     fun enterRoom(session: VoiceSessionApi.VoiceSession) {
         if (inRoom) {
-            Log.w(TAG, "enterRoom ignored: already in room")
+            Log.w(TAG, "enterRoom ignored: already in room [$instanceId]")
             return
         }
         exitHandled = false
@@ -251,16 +262,23 @@ class RtcClient(
             Log.w(TAG, "muteAllRemoteAudio(false) failed: ${t.message}", t)
         }
         scheduleEnterTimeout() // 15s 无 onEnterRoom → 强制失败恢复（防 SDK 吞掉 enterRoom）
-        DiagLog.log("Rtc", "enterRoom room=${session.roomId} userId=${session.userId} scene=${session.scene}")
+        Log.i(TAG, "enterRoom room=${session.roomId} strRoomId=${session.roomId} [$instanceId]")
+        DiagLog.log("Rtc", "enterRoom room=${session.roomId} userId=${session.userId} scene=${session.scene} [$instanceId]")
     }
 
     /** 退房（异步：等 onExitRoom 回调；3s 超时兜底强制恢复）。进房进行中也可退房（取消在途 enter，Task 6）。 */
     fun exitRoom() {
         val pendingEnter = timeouts.enterThread != null
         if (!inRoom && !pendingEnter) {
-            Log.w(TAG, "exitRoom ignored: not in room / no pending enter")
+            Log.w(TAG, "exitRoom ignored: not in room / no pending enter [$instanceId]")
+            // P1-2：早退分支同样要保证自定义采集已停，否则退房路径漏掉 stop 会留下采集线程。
+            // 不碰 cloud（lazy）——本分支意味着从未成功进房，也就从未 enableCustomAudioCapture(true)。
+            try { customAudioSource.stop() } catch (t: Throwable) {
+                Log.w(TAG, "custom audio source stop failed: ${t.message}", t)
+            }
             return
         }
+        Log.i(TAG, "exitRoom [$instanceId] inRoom=$inRoom pendingEnter=$pendingEnter")
         // 进房超时兜底可能已置位 exitHandled；退房是新的完成周期，必须重置（对称于 enterRoom 开头），
         // 否则 onExitRoom/退房兜底的 onExited 全被吞，mic 恢复被迫等 coordinator 5s 退出超时。
         exitHandled = false

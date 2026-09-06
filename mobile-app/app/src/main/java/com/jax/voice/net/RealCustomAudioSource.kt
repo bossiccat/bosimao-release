@@ -29,13 +29,29 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 生命周期：RtcClient onEnterRoom 成功 → start(cloud)；exitRoom/release → stop()。
  * mic handoff 结构不变：KWS MicRecorder 在 SIGNING 停止，本源只活在会话期，退房后由
  * onExited 恢复 KWS 采集（两源不并发）。
+ *
+ * 进程内单例（2026-09-06 线程泄漏根治）：TRTCCloud 本身是进程级单例，采集源与它同生命周期。
+ * 此前每个 RtcClient 各持一个实例，`running.compareAndSet` 只是实例内幂等，跨实例完全失效
+ * ——真机实测并存 5 条 jax-rtc-capture 同时向同一个 TRTCCloud sendCustomAudioData（上行叠加抢麦）。
+ * 单例后 start() 先 stop() 再起线程，即使上游漏调 stop 也不会泄漏。
  */
-class RealCustomAudioSource : RtcClient.CustomAudioSource {
+class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource {
 
     companion object {
         private const val TAG = "RtcCustomAudio"
         private const val FRAME_SAMPLES = RtcCustomAudioPcm.SAMPLES_PER_20MS // 320
         private const val WATCHDOG_IDLE_MS = 5_000L
+        private const val CAPTURE_THREAD_NAME = "jax-rtc-capture"
+
+        @Volatile private var INSTANCE: RealCustomAudioSource? = null
+
+        /** 进程内唯一实例：所有 RtcClient 共用，杜绝多路采集并存 */
+        @Synchronized
+        fun get(): RealCustomAudioSource = INSTANCE ?: RealCustomAudioSource().also { INSTANCE = it }
+
+        /** 真机取证：直接观测「5 路是否降为 1 路」 */
+        private fun captureThreadCount(): Int =
+            Thread.getAllStackTraces().keys.count { it.name == CAPTURE_THREAD_NAME }
         /**
          * 电平日志周期（帧）：20ms/帧 × 25 = 500ms。
          *
@@ -51,17 +67,26 @@ class RealCustomAudioSource : RtcClient.CustomAudioSource {
     private var thread: Thread? = null
 
     /**
-     * 采集增益级（每个采集实例独立）：自适应增益 + 噪声门，替代固定 ×32。
+     * 采集增益级：自适应增益 + 噪声门，替代固定 ×32。
      * 详见 CaptureGainStage 文档与真机三段实测（过低/削波/底噪误触发）。
+     * 单例下每次 start 重建：新会话 = 新环境，噪声底不该沿用上一会话。
      */
-    private val gainStage = CaptureGainStage()
+    private var gainStage = CaptureGainStage()
 
     @Volatile private var aec: AcousticEchoCanceler? = null
     @Volatile private var agc: AutomaticGainControl? = null
     @Volatile private var ns: NoiseSuppressor? = null
 
     @SuppressLint("MissingPermission") // RECORD_AUDIO 由服务层在进房前完成授权（同 MicRecorder 契约）
+    @Synchronized
     override fun start(cloud: TRTCCloud): Boolean {
+        // 单例语义：上一次会话若遗留了采集线程（上游漏调 stop / 异常退房），这里先停干净再起新线程。
+        // 否则 N 条 jax-rtc-capture 会并存并同时向同一个 TRTCCloud 送音频（上行叠加抢麦）。
+        if (running.get() || thread != null) {
+            Log.w(TAG, "start while running (inst=${instId()}) — stopping previous capture first")
+            stop()
+        }
+        gainStage = CaptureGainStage() // 新会话重置噪声底与增益，不沿用上一会话的收敛结果
         if (!running.compareAndSet(false, true)) return true
         val minBuf = AudioRecord.getMinBufferSize(
             RtcCustomAudioPcm.SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
@@ -108,10 +133,15 @@ class RealCustomAudioSource : RtcClient.CustomAudioSource {
             Log.w(TAG, "AEC/NS/AGC attach failed: ${t.message}", t)
         }
 
-        thread = Thread({ loop(record, cloud) }, "jax-rtc-capture").apply { start() }
-        Log.i(TAG, "custom capture started (16k/mono/20ms)")
+        thread = Thread({ loop(record, cloud) }, CAPTURE_THREAD_NAME).apply { start() }
+        Log.i(
+            TAG,
+            "custom capture started (16k/mono/20ms) inst=${instId()} captureThreads=${captureThreadCount()}"
+        )
         return true
     }
+
+    private fun instId(): String = Integer.toHexString(System.identityHashCode(this))
 
     private fun loop(record: AudioRecord, cloud: TRTCCloud) {
         val pcm = ShortArray(FRAME_SAMPLES)
@@ -166,11 +196,16 @@ class RealCustomAudioSource : RtcClient.CustomAudioSource {
         } finally {
             try { record.stop() } catch (_: Exception) {}
             try { record.release() } catch (_: Exception) {}
-            Log.i(TAG, "custom capture stopped")
+            Log.i(TAG, "capture loop exited inst=${instId()} captureThreads=${captureThreadCount()}")
         }
     }
 
+    @Synchronized
     override fun stop() {
+        if (!running.get() && thread == null) {
+            Log.d(TAG, "stop ignored: not running inst=${instId()}")
+            return
+        }
         running.set(false)
         thread?.interrupt()
         try { thread?.join(2_000) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
@@ -179,5 +214,6 @@ class RealCustomAudioSource : RtcClient.CustomAudioSource {
         try { ns?.enabled = false; ns?.release() } catch (_: Throwable) {}
         try { agc?.enabled = false; agc?.release() } catch (_: Throwable) {}
         aec = null; ns = null; agc = null
+        Log.i(TAG, "custom capture stopped inst=${instId()} captureThreads=${captureThreadCount()}")
     }
 }
