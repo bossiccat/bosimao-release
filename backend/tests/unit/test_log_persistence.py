@@ -26,7 +26,9 @@ def test_add_rotating_file_handler_persists_logs(tmp_path, caplog):
         log_dir=tmp_path, max_bytes=1024 * 1024, backup_count=2,
     )
     assert handler is not None, "应返回创建的 RotatingFileHandler"
-    target.warning("[lat] persistence probe %s", "ok")
+    # 用 ERROR 级探针：全量回归时其他测试模块顶层 logging.disable(WARNING)
+    # 是进程全局的，WARNING 及以下会被压掉
+    target.error("[lat] persistence probe %s", "ok")
     handler.flush()
 
     log_file = tmp_path / "test_persist_p0_1.log"
