@@ -5,11 +5,13 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from typing import Any, Awaitable, Callable
 
 import numpy as np
 
 from .apm_handshake import connect_ws
+from .apm_reconnect import ReconnectScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -29,19 +31,41 @@ def pcm24k_to_pcm16k(data: bytes) -> bytes:
     return samples[idx[idx < len(samples)]].tobytes()
 
 
+QWEN_RECONNECT_MAX_ATTEMPTS = 5
+
+
 class QwenRealtimeBridge:
-    def __init__(self, on_audio_out: Callable[[bytes], Awaitable[None]], on_text: Callable[[str], Awaitable[None]] | None = None, on_tool_call: Callable[[str, dict, str], Awaitable[str]] | None = None, api_url: str = "", token: str = "", system_prompt: str = "") -> None:
+    def __init__(self, on_audio_out: Callable[[bytes], Awaitable[None]], on_text: Callable[[str], Awaitable[None]] | None = None, on_tool_call: Callable[[str, dict, str], Awaitable[str]] | None = None, api_url: str = "", token: str = "", system_prompt: str = "", on_error: Callable[[str], Awaitable[None]] | None = None) -> None:
         self._on_audio_out = on_audio_out
         self._on_text = on_text
         self._on_tool_call = on_tool_call
         self._api_url = api_url
         self._token = token
         self._system_prompt = system_prompt
+        self._on_error = on_error         # 重连放弃后上报（手机端可感知，不静默）
         self._ws: Any = None
         self._recv_task: asyncio.Task | None = None
         self._closed = False
         self._started = False
+        self._dead = False                # 重连放弃后的终态：须上层重建实例恢复
+        self._reconnect_lock = asyncio.Lock()
+        self._last_drop_log = 0.0         # 断线窗口丢帧日志节流（≥2s 一条）
+        self._last_error = ""             # 最近一次链路错误（idle 超时/1007 等）
         self.session_id = ""
+        self.reconnects = 0               # 成功重连次数（观测）
+        self.dropped_frames = 0           # 断线窗口丢弃的上行帧计数
+        # P0（2026-09-06 真机实锤）：recv 循环异常退出后旧实现零重连，
+        # 云端 180s idle 超时即永久静音 → 指数退避自动重连（1s/2s/.../60s 封顶）
+        self._scheduler = ReconnectScheduler(
+            attempt=self._reconnect_attempt,
+            on_give_up=self._on_reconnect_give_up,
+            max_attempts=QWEN_RECONNECT_MAX_ATTEMPTS,
+        )
+
+    @property
+    def dead(self) -> bool:
+        """重连放弃后的终态：须由上层重建实例（peer enter 重建路径）恢复"""
+        return self._dead
 
     async def start(self) -> None:
         if self._started or self._closed:
@@ -51,24 +75,102 @@ class QwenRealtimeBridge:
         self._recv_task = asyncio.create_task(self._recv_loop())
 
     async def feed_pcm(self, pcm: bytes) -> None:
-        if self._closed:
+        if self._closed or self._dead:
             return
         if not self._started:
             await self.start()
         if self._ws is None:
+            # 断线窗口（退避重连中）：丢弃并计数，节流日志（≥2s 一条），不向 20ms 高频调用方抛异常
+            self.dropped_frames += 1
+            now = time.time()
+            if now - self._last_drop_log >= 2.0:
+                self._last_drop_log = now
+                logger.warning("qwen link down, drop uplink frame #%d", self.dropped_frames)
             return
-        await self._ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()}))
+        try:
+            await self._ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()}))
+        except Exception as exc:  # noqa: BLE001
+            if self._closed or self._dead:
+                return
+            # 发送失败 = 链路断：标记断链并交退避调度器（recv 循环也会感知退出）
+            logger.warning("qwen uplink send failed (%s), scheduling reconnect", exc)
+            self._last_error = str(exc)
+            self._ws = None
+            self.dropped_frames += 1
+            self._scheduler.schedule()
 
     async def _recv_loop(self) -> None:
-        while not self._closed and self._ws is not None:
+        # ws 作快照：循环期间 _ws 可能被发送路径置 None（同一断链事件）
+        ws = self._ws
+        while not self._closed and not self._dead and ws is not None:
             try:
-                event = json.loads(await self._ws.recv())
+                event = json.loads(await ws.recv())
                 await self._handle_event(event)
             except asyncio.CancelledError:
                 return
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
+                if self._closed:
+                    return
+                self._last_error = str(exc)
                 logger.warning("qwen recv loop ended: %s", exc)
-                return
+                break
+        # P0：recv 循环退出（连接断/服务端 1007 关链路）= 链路 down → 退避重连。
+        # 仅当仍是本代链路才调度：若期间已重连成功（_ws 换代），跳过防误伤。
+        if not self._closed and not self._dead and self._ws is ws:
+            self._ws = None
+            self._scheduler.schedule()
+
+    async def _reconnect_attempt(self) -> bool:
+        """scheduler 单次尝试：完整重握手（新 ws + 新 session_id，重带提示词/工具）"""
+        async with self._reconnect_lock:
+            if self._closed or self._dead:
+                return True  # 已关闭/已放弃：让循环退出
+            try:
+                if self._ws is not None:
+                    try:
+                        await self._ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._ws = None
+                if self._recv_task is not None:
+                    self._recv_task.cancel()
+                    try:
+                        await self._recv_task
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
+                    self._recv_task = None
+                self._ws, self.session_id = await connect_qwen(self._api_url, self._token, self._system_prompt, QWEN_COORDINATION_TOOLS)
+                self._recv_task = asyncio.create_task(self._recv_loop())
+                self.reconnects += 1
+                logger.info("qwen reconnected, session_id=%s", self.session_id)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("qwen reconnect attempt failed: %s", exc)
+                self._last_error = str(exc)
+                # 半开连接（握手中途失败）必须关闭，防泄漏
+                if self._ws is not None:
+                    try:
+                        await self._ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                self._ws = None
+                return False
+
+    async def _on_reconnect_give_up(self) -> None:
+        """连续失败达上限：进入终态并经 on_error 上报（手机端感知"云端引擎断开"）"""
+        self._dead = True
+        message = f"云端引擎断开：连续 {self._scheduler.max_attempts} 次重连失败"
+        if self._last_error:
+            message = f"{message}: {self._last_error}"
+        if self._on_error is None:
+            logger.error("qwen bridge gave up reconnecting: %s", message)
+            return
+        try:
+            cb = self._on_error(message)
+            if asyncio.iscoroutine(cb):
+                asyncio.get_running_loop().create_task(cb)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("on_error callback failed: %s", e)
 
     async def _invoke(self, callback, *args) -> None:
         result = callback(*args)
@@ -100,6 +202,7 @@ class QwenRealtimeBridge:
 
     async def close(self) -> None:
         self._closed = True
+        self._scheduler.cancel()
         if self._recv_task:
             self._recv_task.cancel()
         if self._ws:

@@ -110,6 +110,7 @@ class PeerVoiceSession:
         self._barge_drops = 0           # 打断丢弃的下行帧计数
         self._last_down_check = 0.0     # 上行 RMS 检查限流
         self._last_up_rms_log = 0.0     # 上行 RMS 调试日志限流（2s 一次，排查"千问无响应"）
+        self._last_feed_fail_log = 0.0  # 喂帧失败日志限流（≥2s 一条，防断链时刷爆日志）
         # GPT-Live 式待命/唤醒状态机
         # _standby=True 时禁止模型输出（下行音频/文本均丢弃）；上行仍由当前 RTC 会话接收。
         # 注意：真正的唤醒门禁仍需手机侧 KWS/重进房；后端不能把云端模型当 KWS。
@@ -155,6 +156,7 @@ class PeerVoiceSession:
                 api_url=self._qwen_api_url,
                 token=self._qwen_token,
                 system_prompt=self._qwen_system_prompt,
+                on_error=self._on_qwen_error,
             )
         else:
             self.apm = ApmBridge(
@@ -226,7 +228,12 @@ class PeerVoiceSession:
             try:
                 await self.feeder.feed(entry.payload)
             except Exception as e:  # noqa: BLE001
-                logger.warning("feed apm failed: %s", e)
+                # P0（2026-09-06 真机实锤）：云端断链时该日志每帧一条刷爆
+                # （单日 81302 条）——节流到 ≥2s 一条
+                now = time.time()
+                if now - self._last_feed_fail_log >= 2.0:
+                    self._last_feed_fail_log = now
+                    logger.warning("feed apm failed: %s", e)
 
     def _sync_queue_metrics(self) -> None:
         up = self._up_q.metrics()
@@ -360,6 +367,15 @@ class PeerVoiceSession:
         text = text.replace(STANDBY_MARKER, "").replace(ACTIVE_MARKER, "")
         if self._router is not None and text:
             await self._router.feed(text)
+
+    async def _on_qwen_error(self, message: str) -> None:
+        """QwenRealtimeBridge 致命错误（重连放弃等）→ 结构化 WARNING + ctrl 上报
+
+        手机端可感知"云端引擎断开"，不再静默（P0 2026-09-06：云端 180s idle
+        超时后旧实现零重连零上报，用户体感"说了不理我"）。
+        """
+        logger.warning("cloud_engine_down reason=%s device=%s", message, self.device_id)
+        await self._on_apm_error("qwen_reconnect_gave_up", message)
 
     async def _on_state(self, state: str) -> None:
         self.stats["apm_session_state"] = state
