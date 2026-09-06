@@ -27,6 +27,26 @@ import kotlin.math.sqrt
  *  D2 下调过慢 —— 原 SMOOTHING=0.05 双向对称，从 32 收敛到 14 需 ~1.2s，这 1.2s 内大声持续削波。
  *     修法：非对称收敛——上调慢（防喘息/泵音），下调快（防削波）。
  *
+ * ---------------------------------------------------------------------------
+ * v3 修订（2026-09-06 真机第二轮 240s 采样：gate=true 占 98.8%，底噪 raw 40~88 × 32 = 1280~2816
+ *    远超门限 200 → 环境声被当语音持续上行 → 千问无缘无故回答 / 用户说话被抢话）：
+ *
+ *  D3 门限固定常量 × 增益变量必然失配 —— 旧门控判定在「增益后」域（raw*gain >= 200），而增益会
+ *     跟着环境往上走。门限是常数、增益是变量，房间够吵时任何固定门限都会被增益顶穿。
+ *     这是设计缺陷，不是参数没调好。
+ *     修法：门控判定改到「原始域」——「是不是语音」用原始电平相对自适应噪声底判断，
+ *     增益只负责把确认是语音的帧放大到目标电平，不再参与「是不是语音」的判定。
+ *
+ *  D4 噪声底只在非语音帧更新，嘈杂房间学不到 —— 旧实现 `if (!isSpeech) floor更新`，而嘈杂房间
+ *     里门常开（isSpeech 恒真），永远等不到非语音帧，底噪根本学不到新环境。
+ *     修法：全帧更新，但下降快（环境变安静立刻跟下来）/ 上升慢（~7s 感知到变吵）/
+ *     上限封顶 FLOOR_CEILING（连续说话不把自己的电平学成底噪）。
+ *
+ *  权衡（诚实面对）：单麦克风、无回声参考信号下的物理限制——视频外放 raw 88 与轻声 184 只差
+ *  2 倍多，门限卡在 ~176 意味着更轻的说话声会被吃掉。我们选择「宁可漏接轻声，也不能把视频声
+ *  送进云端」，因为后者直接摧毁产品可信度。真正的解法是 AEC（需要参考信号，本机
+ *  VOICE_COMMUNICATION 源送全零，是死路）或多麦波束。
+ *
  * 纯 JVM 可测（无 Android 依赖）：契约见 CaptureGainStageTest。
  */
 class CaptureGainStage(
@@ -45,8 +65,9 @@ class CaptureGainStage(
     /**
      * 当前自适应噪声底（原始 rms 量纲，只读）。
      *
-     * 只在非语音帧更新：否则长时间说话会把说话电平「学」成底噪，反过来把自己的语音当噪声吃掉。
-     * 真机可观测性用：安静时该值应贴近环境底噪（实测 0~6），说话帧不应污染它。
+     * v3：全帧更新（不再只在非语音帧）。下降快（FLOOR_FALL，环境变安静立刻跟下来）、
+     * 上升慢（FLOOR_RISE，~7s 感知到变吵）、上限封顶 FLOOR_CEILING（连续说话不把自己的电平
+     * 学成底噪）。真机可观测性用：安静时该值应贴近环境底噪，视频外放时应爬到环境量级。
      */
     var currentNoiseFloor: Float = INITIAL_NOISE_FLOOR
         private set
@@ -83,22 +104,27 @@ class CaptureGainStage(
             return gained
         }
 
-        // 语音判定用「增益后」电平，与门限同一坐标系
-        val projected = rawRms * currentGain
-        val isSpeech = projected >= gateRms
-
-        if (!isSpeech) {
-            // 只在非语音帧更新噪声底：说话时冻结，避免把语音学成底噪（见 currentNoiseFloor 注释）
-            currentNoiseFloor = (currentNoiseFloor + (rawRms - currentNoiseFloor) * FLOOR_ADAPT)
-                .coerceIn(FLOOR_MIN, FLOOR_MAX)
+        // 语音判定（v3）：「是不是语音」用原始电平相对自适应噪声底判断，增益后电平只作绝对下界。
+        // 增益不再参与「是不是语音」的判定——门限是常数、增益是变量，两者相乘必然失配（D3）。
+        currentNoiseFloor = if (rawRms < currentNoiseFloor) {
+            // 下降快：环境变安静要立刻跟下来，否则静音期误放行
+            currentNoiseFloor + (rawRms - currentNoiseFloor) * FLOOR_FALL
+        } else {
+            // 上升慢但可感知：环境变吵要在 ~7s 内跟上去，否则门限永远学不到新环境；
+            // 上限封顶：防止连续说话把自己的电平学成底噪
+            minOf(currentNoiseFloor + (rawRms - currentNoiseFloor) * FLOOR_RISE, FLOOR_CEILING)
         }
+        currentNoiseFloor = currentNoiseFloor.coerceIn(FLOOR_MIN, FLOOR_CEILING)
 
-        // 参与增益收敛的门槛：必须明显高于当前噪声底。raw=6 的底噪即使被 28× 增益顶过门限，
-        // 也不得驱动增益——那正是 D1 的正反馈入口。
-        val adaptFloor = (currentNoiseFloor * NOISE_MARGIN).coerceIn(RAW_FLOOR_ABS, ADAPT_FLOOR_MAX)
+        // 原始域候选门槛：明显高于噪声底才算语音。视频外放 raw 40~88 在底噪学上去后被整体门掉，
+        // 语音 raw 184~459 仍通过（D3/D4 核心）。
+        val adaptFloor = (currentNoiseFloor * NOISE_MARGIN).coerceIn(RAW_GATE_ABS, ADAPT_FLOOR_MAX)
         val isCandidate = rawRms >= adaptFloor
+        val projected = rawRms * currentGain
+        // 双条件：原始域候选 + 增益后绝对下界。projected 低于门限的帧对云端 VAD 本就无意义。
+        val isSpeech = isCandidate && projected >= gateRms
 
-        if (isSpeech && isCandidate) {
+        if (isSpeech) {
             // 真实语音：向目标电平收敛。下调快（防削波）、上调慢（防泵音）。
             val desired = (targetRms / rawRms).coerceIn(minGain, maxGain)
             val rate = if (desired < currentGain) ATTACK_DOWN else ATTACK_UP
@@ -106,9 +132,10 @@ class CaptureGainStage(
             currentGain = currentGain.coerceIn(minGain, maxGain)
             holdRemaining = holdFrames
             lastAdapted = true
-        } else if (isSpeech) {
-            // 这一帧「像语音」只是因为我们自己的增益把底噪放大了。向下退增益，直到投影跌回门限以内，
-            // 切断「增益越高 → 越像语音 → 增益越高」的正反馈。不刷新保持窗，让门尽快关掉。
+        } else if (projected >= gateRms) {
+            // 伪语音：projected 过了门限但原始域不是候选——只可能是我们自己的增益把底噪放大了。
+            // 向下退增益，直到投影跌回门限以内，切断「增益越高 → 越像语音 → 增益越高」的正反馈
+            // （D1 保护保留，判定域改为原始域候选）。不刷新保持窗，让门尽快关掉。
             val ceiling = (gateRms * GATE_BACKOFF / rawRms).coerceIn(minGain, maxGain)
             if (ceiling < currentGain) {
                 currentGain += (ceiling - currentGain) * ATTACK_DOWN
@@ -180,17 +207,28 @@ class CaptureGainStage(
         /** 下调速率（快）：20ms/帧 → 时间常数约 80ms，大声时 300ms 内退出削波区 */
         const val ATTACK_DOWN = 0.25f
 
-        // ---- 自适应噪声底（治 D1 正反馈）----
+        // ---- 自适应噪声底（v3：全帧更新，治 D1 正反馈 + D3/D4 嘈杂房间门常开）----
         /** 噪声底初值：真机安静环境原始 rms 实测 0~6，给 5 留余量且不会误伤 rms≈79 的轻声 */
         const val INITIAL_NOISE_FLOOR = 5f
-        /** 噪声底跟踪速率：20ms/帧 → 时间常数约 1s（只在非语音帧更新） */
-        const val FLOOR_ADAPT = 0.02f
+        /** 噪声底下限：环境极静（底噪≈0）时兜底 */
         const val FLOOR_MIN = 0.5f
-        const val FLOOR_MAX = 2000f
-        /** 语音候选倍率：原始 rms 需达到噪声底的 3 倍才参与收敛 */
-        const val NOISE_MARGIN = 3f
-        /** 候选门槛绝对下界：环境极静（底噪≈0）时兜底，防止把 0 底噪放大成无限灵敏 */
-        const val RAW_FLOOR_ABS = 20f
+        /**
+         * 噪声底上限（v3，原 FLOOR_MAX=2000）：封顶防止连续说话把自己的电平学成底噪。
+         * 取 120：视频外放实测底噪 raw 40~88 < 120 可学上去，而连续大声说话（raw 600）
+         * 被封在 120 → 候选门槛 240 < 600 语音仍通过。
+         */
+        const val FLOOR_CEILING = 120f
+        /** 噪声底下降速率：20ms/帧 → 时间常数约 100ms，环境变安静立刻跟下来（防静音期误放行） */
+        const val FLOOR_FALL = 0.2f
+        /** 噪声底上升速率：20ms/帧 → 时间常数约 6.7s，环境变吵 ~7s 内学上去（防门限学不到新环境） */
+        const val FLOOR_RISE = 0.003f
+        /** 语音候选倍率（v3，原 3f）：原始 rms 需达到噪声底的 2 倍才算语音。底噪封顶后裕度需更紧 */
+        const val NOISE_MARGIN = 2f
+        /**
+         * 候选门槛绝对下界（v3，原 RAW_FLOOR_ABS=20f）：环境极静时兜底。
+         * 取 60：raw < 60 的帧对云端 VAD 本来就无意义，放行只会送纯噪声。
+         */
+        const val RAW_GATE_ABS = 60f
         /** 候选门槛上界：底噪极高（嘈杂环境）时兜底，避免门槛反过来吞掉正常语音 */
         const val ADAPT_FLOOR_MAX = 300f
         /**

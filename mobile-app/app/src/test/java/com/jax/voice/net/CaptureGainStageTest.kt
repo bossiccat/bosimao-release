@@ -14,7 +14,9 @@ import kotlin.math.sqrt
  *  5. 输出永不越界（软限幅）；
  *  6. 底噪不得驱动增益上冲（D1 runaway 回归）；
  *  7. 高增益后遇大声必须快速退出削波区（D2 下调过慢回归）；
- *  8. 噪声底只在非语音帧更新（说话不得把自己学成底噪）。
+ *  8. 嘈杂环境（视频外放）底噪必须被门掉、语音仍通过（D3/D4 回归，2026-09-06；
+ *     修复前 gate=true 占 98.8%，底噪 raw 40~88 × 32 = 1280~2816 持续上行 → 千问误回答/抢话）；
+ *  9. 噪声底全帧更新：门常开场景也能学上去，环境变安静能快速跟下来。
  */
 class CaptureGainStageTest {
 
@@ -167,16 +169,80 @@ class CaptureGainStageTest {
         assertTrue("噪声底应收敛到环境量级（实测 0~6），实际 $floor", floor > 1f && floor < 12f)
     }
 
+    /**
+     * v3：噪声底改为全帧更新后，原「说话帧不得污染噪声底」的契约被 FLOOR_CEILING 封顶取代——
+     * 连续说话会把底噪学上去，但封在 120，候选门槛最高 240，正常语音（raw 600）依然通过。
+     * 这里保留的是「环境变安静必须快速跟下来」这一侧：否则静音期会误放行。
+     */
     @Test
-    fun `speech frames do not pollute the noise floor`() {
+    fun `noise floor falls quickly when the room quiets down`() {
         val stage = CaptureGainStage()
-        val initial = stage.currentNoiseFloor
-        // 持续说话：全部为语音帧，噪声底必须冻结，否则会把说话电平学成底噪反过来吃掉语音
-        repeat(400) { stage.process(frameWithRms(600f)) }
+        repeat(1000) { stage.process(frameWithRms(88f)) }   // 嘈杂环境：底噪学到 ~84
+        val noisyFloor = stage.currentNoiseFloor
+        assertTrue("前置：嘈杂底噪应已学上去，实际 $noisyFloor", noisyFloor > 60f)
+
+        repeat(50) { stage.process(frameWithRms(1f)) }      // 环境突然安静 1s
+        val quietFloor = stage.currentNoiseFloor
+        assertTrue(
+            "环境变安静后噪声底必须快速跟下来（FLOOR_FALL），实际 $quietFloor",
+            quietFloor < 5f
+        )
+    }
+
+    // ---- v3 回归：嘈杂环境门控（本轮投诉核心，「看视频外放它也插话」）----
+
+    /**
+     * 核心回归：视频外放底噪 raw 40~88，×32 = 1280~2816 远超旧门限 200 → 修复前 gate=true
+     * 占 98.8%，环境声持续上行给千问 → 无缘无故回答。底噪学上去后门必须关闭。
+     */
+    @Test
+    fun `noisy ambient audio is gated once the floor has adapted`() {
+        val stage = CaptureGainStage()
+        repeat(500) { stage.process(frameWithRms(88f)) }    // 视频外放 10s
+        assertTrue(
+            "噪声底必须能在门常开期间学上去（D4，修复前学不到），实际 ${stage.currentNoiseFloor}",
+            stage.currentNoiseFloor > 60f
+        )
+        var out = ShortArray(320)
+        repeat(10) { out = stage.process(frameWithRms(88f)) }
+        assertEquals("嘈杂底噪必须被门掉", false, stage.lastGateOpen)
+        assertEquals("被门掉的帧必须静音，否则环境声持续上行给千问", 0f, rmsOf(out), 0f)
+    }
+
+    /** 底噪学满后，正常语音必须仍然通过、非静音上行（不能因治噪声把人一起门掉） */
+    @Test
+    fun `speech still passes in a noisy room once the floor has adapted`() {
+        val stage = CaptureGainStage()
+        repeat(1000) { stage.process(frameWithRms(88f)) }   // 底噪学满（~84）
+        val out = stage.process(frameWithRms(300f))
+        assertEquals("嘈杂房间里的语音帧门必须放行", true, stage.lastGateOpen)
+        assertTrue("语音必须非静音上行，实际 ${rmsOf(out)}", rmsOf(out) > 0f)
+    }
+
+    /** 连续大声说话 60s：底噪必须被 FLOOR_CEILING 封顶，语音不得被自己的电平门掉 */
+    @Test
+    fun `continuous loud speech is capped by the floor ceiling and still passes`() {
+        val stage = CaptureGainStage()
+        var out = ShortArray(320)
+        repeat(3000) { out = stage.process(frameWithRms(600f)) }  // 60s 连续说话
         val floor = stage.currentNoiseFloor
         assertTrue(
-            "持续说话不得抬高噪声底（否则会把自己的语音当噪声），initial=$initial now=$floor",
-            floor <= initial + 0.001f
+            "噪声底必须被 FLOOR_CEILING 封顶（否则会把语音学成底噪），实际 $floor",
+            floor <= CaptureGainStage.FLOOR_CEILING + 0.001f && floor > 100f
+        )
+        assertEquals("语音帧门必须保持放行", true, stage.lastGateOpen)
+        assertTrue("语音必须继续上行，实际 ${rmsOf(out)}", rmsOf(out) > 0f)
+    }
+
+    /** 门常开（底噪尚在学习、门还没关上的窗口期）底噪也必须能学上去——修复前这条路径是死的 */
+    @Test
+    fun `noise floor learns upward even while the gate is still open`() {
+        val stage = CaptureGainStage()
+        val initial = stage.currentNoiseFloor
+        repeat(200) { stage.process(frameWithRms(88f)) }
+        assertTrue(
+            "门常开期间噪声底必须持续上移（D4），initial=$initial 实际 ${stage.currentNoiseFloor}",
+            stage.currentNoiseFloor > initial * 2f
         )
     }
 }
