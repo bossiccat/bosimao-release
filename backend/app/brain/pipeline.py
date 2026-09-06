@@ -94,11 +94,20 @@ class BrainPipeline:
             raise service_unready(
                 "DEEPSEEK_API_KEY 未配置，大脑拆解/指令生成不可用（联调待 key），请配置 .env 后重启"
             )
-        extract: IntentExtract = await self._intent.extract(text, target_app)
+        # P0-3（internal-latency-budget §1.4 S2）：extract 与 summary 无数据依赖，
+        # 串行两轮本地 9B（5~8s 常态）→ gather 并行，总耗时 ≈ max 而非 sum。
+        # 异常语义保持：extract 异常照旧上抛；summary 异常走原降级路径
+        # （DeepSeek → 脱敏原文），intent 仍受理。
+        extract, summary_result = await asyncio.gather(
+            self._intent.extract(text, target_app),
+            self._intent.build_summary(text),
+            return_exceptions=True,
+        )
+        if isinstance(extract, BaseException):
+            raise extract
         degraded = False
-        try:
-            summary = await self._intent.build_summary(text)  # R3 本地 9B 摘要（隐私第一）
-        except Exception as e:  # noqa: BLE001 - 本地 9B 超时/失败 → 降级（防单点故障，spec R3 扩展）
+        if isinstance(summary_result, BaseException):
+            e = summary_result
             logger.warning("本地 9B 摘要不可用，降级生成摘要: %s", e)
             degraded = True
             summary = await self._degraded_summary(text)
@@ -107,6 +116,8 @@ class BrainPipeline:
                     EVT_BRAIN_DEGRADED,
                     {"task_id": "", "stage": "intent_summary", **degrade_event(route(R4_DECOMPOSE, self._deepseek))},
                 )
+        else:
+            summary = summary_result
         extract.sanitized_summary = summary
         now = time.time()
         task = BrainTask(
