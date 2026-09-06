@@ -59,7 +59,8 @@ class EndDetectFeeder:
         # 静音帧：若已停顿 >silence_s 且未补过 → 补静音（说完标记）
         if not self._silence_padded and (now - self._last_voice_ts) > self._silence_s:
             self._silence_padded = True
-            await self._feed(b"\x00\x00" * self._sample_rate * int(self._pad_s))
+            # P0-2：按样本数计算（旧 int(pad_s) 截断会把 0.4s pad 变成 0 字节）
+            await self._feed(b"\x00\x00" * int(self._sample_rate * self._pad_s))
         else:
             await self._feed(s16)
 

@@ -38,6 +38,13 @@ DEFAULT_UP_MAX_FRAMES = 100
 DEFAULT_UP_MAX_BYTES = 100 * 640
 DEFAULT_UP_MAX_FRAME_AGE_MS = 1000
 
+# P0-2（internal-latency-budget §1.1 U6）：说完判定补静音 pad 按引擎区分——
+# qwen smart_turn 自带说完判定，2s pad 冗余且让 pad 后开口的用户先被云端
+# 消化 2s 静音（speech_started 推迟最多 ~2s）→ 缩到 400ms；apm 无云端
+# 说完判定，保持 2s
+QWEN_END_PAD_S = 0.4
+APM_END_PAD_S = 2.0
+
 
 class PeerVoiceSession:
     """单设备语音会话（手机 ↔ sidecar ↔ rtc_bridge ↔ apm_bridge ↔ MiniCPM-o）"""
@@ -81,8 +88,11 @@ class PeerVoiceSession:
         self._qwen_system_prompt = qwen_system_prompt
         self._on_agent_tool = on_agent_tool
         self._apm_rebuilds = 0
+        # P0-2：说完判定 pad 按引擎区分（qwen=400ms / apm=2s）
+        self._pad_s = QWEN_END_PAD_S if self._voice_engine == "qwen" else APM_END_PAD_S
         self._build_apm()
-        self.feeder = EndDetectFeeder(feed=self.apm.feed_pcm, sample_rate=sample_rate)
+        self.feeder = EndDetectFeeder(feed=self.apm.feed_pcm, sample_rate=sample_rate,
+                                      pad_s=self._pad_s)
         self.shaper = DownlinkShaper(
             send_frame=self._send_frame,
             frame_ms=down_frame_ms,
@@ -417,7 +427,8 @@ class PeerVoiceSession:
                         self._apm_rebuilds, self.device_id)
             self._build_apm()
             self.feeder = EndDetectFeeder(feed=self.apm.feed_pcm,
-                                          sample_rate=self.feeder._sample_rate)
+                                          sample_rate=self.feeder._sample_rate,
+                                          pad_s=self._pad_s)
             self._up_q.flush()   # 清掉断连期间堆积的旧帧，防跨会话串音
         self.feeder.reset()
         self.shaper.reset()
