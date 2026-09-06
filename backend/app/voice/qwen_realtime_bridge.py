@@ -61,6 +61,10 @@ class QwenRealtimeBridge:
             on_give_up=self._on_reconnect_give_up,
             max_attempts=QWEN_RECONNECT_MAX_ATTEMPTS,
         )
+        # P0-4：tool_call 去同步化——同步 await 会冻结 recv 循环（下行音频冻结），
+        # tool 时长全额计入首音频延迟。单 worker 串行队列：不丢调用、天然免锁。
+        self._tool_queue: asyncio.Queue = asyncio.Queue()
+        self._tool_worker_task: asyncio.Task | None = None
 
     @property
     def dead(self) -> bool:
@@ -196,13 +200,47 @@ class QwenRealtimeBridge:
             if name == "approve_reply" and "approval_id" in args:
                 args = {key: value for key, value in args.items() if key != "approval_id"}
             if self._on_tool_call:
+                # P0-4：入队交专职 worker 串行执行，recv 循环立即返回继续处理事件
+                self._tool_queue.put_nowait((name, args, call_id))
+                self._ensure_tool_worker()
+
+    def _ensure_tool_worker(self) -> None:
+        if self._tool_worker_task is None or self._tool_worker_task.done():
+            self._tool_worker_task = asyncio.create_task(self._tool_worker())
+
+    async def _tool_worker(self) -> None:
+        """串行执行工具调用：完成回调里发二轮 conversation.item.create + response.create"""
+        while not self._closed and not self._dead:
+            try:
+                name, args, call_id = await self._tool_queue.get()
+            except asyncio.CancelledError:
+                return
+            started = time.monotonic()
+            try:
                 output = await self._on_tool_call(name, args, call_id)
-                await self._ws.send(json.dumps({"type": "conversation.item.create", "item": {"type": "function_call_output", "call_id": call_id, "output": output}}))
-                await self._ws.send(json.dumps({"type": "response.create", "response": {"modalities": ["audio", "text"]}}))
+            except Exception as exc:  # noqa: BLE001 - 工具失败也要回填，防云端挂等
+                logger.warning("tool_call failed call_id=%s: %s", call_id, exc)
+                output = json.dumps({"error": str(exc)})
+            logger.info("tool_done call_id=%s dur_ms=%d",
+                        call_id, int((time.monotonic() - started) * 1000))
+            ws = self._ws
+            if ws is None:
+                continue  # 断线窗口：新会话建立后云端会重新编排
+            try:
+                await ws.send(json.dumps({"type": "conversation.item.create", "item": {"type": "function_call_output", "call_id": call_id, "output": output}}))
+                await ws.send(json.dumps({"type": "response.create", "response": {"modalities": ["audio", "text"]}}))
+            except Exception as exc:  # noqa: BLE001
+                if not self._closed and not self._dead:
+                    logger.warning("qwen tool output send failed (%s), scheduling reconnect", exc)
+                    self._last_error = str(exc)
+                    self._ws = None
+                    self._scheduler.schedule()
 
     async def close(self) -> None:
         self._closed = True
         self._scheduler.cancel()
+        if self._tool_worker_task:
+            self._tool_worker_task.cancel()
         if self._recv_task:
             self._recv_task.cancel()
         if self._ws:
