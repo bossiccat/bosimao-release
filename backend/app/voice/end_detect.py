@@ -12,8 +12,11 @@ pad_s（默认 2s）纯静音，一次性触发模型说完判定；用户再开
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 # 16k s16 PCM 平均能量阈值（说话通常 >500；静音底噪 <200）
 SILENCE_RMS_THRESHOLD = 400.0
@@ -60,7 +63,11 @@ class EndDetectFeeder:
         if not self._silence_padded and (now - self._last_voice_ts) > self._silence_s:
             self._silence_padded = True
             # P0-2：按样本数计算（旧 int(pad_s) 截断会把 0.4s pad 变成 0 字节）
-            await self._feed(b"\x00\x00" * int(self._sample_rate * self._pad_s))
+            pad_bytes = int(self._sample_rate * self._pad_s) * 2
+            # P0-5/F5：pad 注入打点（判定上行空窗中 U6 的贡献）
+            logger.info("[lat] pad injected pad_bytes=%d silence_s=%.2f pad_s=%.2f",
+                        pad_bytes, now - self._last_voice_ts, self._pad_s)
+            await self._feed(b"\x00\x00" * (pad_bytes // 2))
         else:
             await self._feed(s16)
 

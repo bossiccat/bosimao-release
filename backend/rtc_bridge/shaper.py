@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Awaitable, Callable
 
 from .bounded_audio_queue import BoundedAudioQueue
@@ -49,6 +50,9 @@ class DownlinkShaper:
         self._task: asyncio.Task | None = None
         self._closed = False
         self._loop = asyncio.get_event_loop()  # 绝对时间表节拍用（monotonic clock）
+        # P0-5/F3：每 reply 首帧观测（push 首帧 / send 首帧）
+        self._last_push_ts = 0.0
+        self._last_send_ts = 0.0
 
     def start(self) -> None:
         if self._task is None:
@@ -58,6 +62,11 @@ class DownlinkShaper:
         """ApmBridge.on_audio_out 回调入口（非阻塞：跨块拆帧 + 有界入队）"""
         if self._closed:
             return
+        now = time.monotonic()
+        if now - self._last_push_ts > 0.5:
+            # P0-5/F3：每 reply 首帧 push 时刻（确认本地下行零延迟）
+            logger.info("[lat] down first push mono=%.3f bytes=%d", now, len(pcm))
+        self._last_push_ts = now
         for frame in self._buffer.feed(pcm):
             self._q.push(frame)
         self._wake.set()
@@ -107,6 +116,11 @@ class DownlinkShaper:
             if lag < -0.002:  # 超前 >2ms：睡到目标时刻（一次性补偿，无累积误差）
                 await asyncio.sleep(-lag)
             # lag >= 0：已落后（消费慢/网络抖动），立即发不睡，靠后续帧追赶
+            now_mono = time.monotonic()
+            if now_mono - self._last_send_ts > 0.5:
+                # P0-5/F3：每 reply 首帧 send 时刻
+                logger.info("[lat] down first send mono=%.3f", now_mono)
+            self._last_send_ts = now_mono
             try:
                 await self._send_frame(entry.payload)
             except Exception as e:  # noqa: BLE001 - sidecar 断线不阻塞整形器

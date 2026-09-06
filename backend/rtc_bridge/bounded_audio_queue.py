@@ -6,9 +6,12 @@ backpressure_events 指标。音频回调只做非阻塞入队。
 """
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,9 @@ class BoundedAudioQueue:
         self.drops = 0
         self.backpressure_events = 0
         self.enqueued = 0
+        # P0-5/F9：帧龄分布采样（量化 U4/U5 停摆导致的丢帧）
+        self._age_samples: deque[float] = deque(maxlen=1000)
+        self._pops = 0
 
     # ---- 指标 ----
 
@@ -87,8 +93,21 @@ class BoundedAudioQueue:
 
     def pop(self) -> QueueEntry | None:
         """取出最旧未过期条目；空或全过期返回 None"""
-        self._drop_expired(self._now())
-        return self._entries.popleft() if self._entries else None
+        now = self._now()
+        self._drop_expired(now)
+        if not self._entries:
+            return None
+        entry = self._entries.popleft()
+        # P0-5/F9：pop 时帧龄采样，每 500 帧打 p50/p99
+        self._age_samples.append((now - entry.created_at) * 1000.0)
+        self._pops += 1
+        if self._pops % 500 == 0 and self._age_samples:
+            samples = sorted(self._age_samples)
+            logger.info("[lat] up_audio frame age ms p50=%.0f p99=%.0f drops=%d",
+                        samples[len(samples) // 2],
+                        samples[min(len(samples) - 1, int(len(samples) * 0.99))],
+                        self.drops)
+        return entry
 
     def peek_oldest_created_at(self) -> float | None:
         return self._entries[0].created_at if self._entries else None

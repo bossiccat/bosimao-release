@@ -58,7 +58,8 @@ def _make_session(voice_engine: str = "apm") -> PeerVoiceSession:
     )
 
 
-def test_qwen_session_uses_short_pad(stub_apm):
+@pytest.mark.asyncio
+async def test_qwen_session_uses_short_pad(stub_apm):
     """qwen 引擎：pad 400ms（smart_turn 自带说完判定，2s pad 冗余）"""
     s = _make_session(voice_engine="qwen")
     assert s.feeder._pad_s == pytest.approx(0.4), (
@@ -66,18 +67,18 @@ def test_qwen_session_uses_short_pad(stub_apm):
     )
 
 
-def test_apm_session_keeps_2s_pad(stub_apm):
+@pytest.mark.asyncio
+async def test_apm_session_keeps_2s_pad(stub_apm):
     """apm 引擎（无云端说完判定）：保持 2s pad"""
     s = _make_session(voice_engine="apm")
     assert s.feeder._pad_s == pytest.approx(2.0)
 
 
-def test_peer_reenter_rebuild_keeps_engine_pad(stub_apm):
+@pytest.mark.asyncio
+async def test_peer_reenter_rebuild_keeps_engine_pad(stub_apm):
     """重进房重建桥后 pad 配置不丢（仍按引擎）"""
     s = _make_session(voice_engine="qwen")
     s.feeder = None
-    import asyncio
-    asyncio.get_event_loop_policy()
     # 手动走 rebuild 路径
     s._apm_rebuilds += 1
     s._build_apm()

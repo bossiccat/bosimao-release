@@ -98,16 +98,25 @@ class BrainPipeline:
         # 串行两轮本地 9B（5~8s 常态）→ gather 并行，总耗时 ≈ max 而非 sum。
         # 异常语义保持：extract 异常照旧上抛；summary 异常走原降级路径
         # （DeepSeek → 脱敏原文），intent 仍受理。
-        extract, summary_result = await asyncio.gather(
-            self._intent.extract(text, target_app),
-            self._intent.build_summary(text),
+        intent_t0 = time.monotonic()
+
+        async def _timed(coro):
+            t = time.monotonic()
+            result = await coro
+            return result, time.monotonic() - t
+
+        extract_pair, summary_pair = await asyncio.gather(
+            _timed(self._intent.extract(text, target_app)),
+            _timed(self._intent.build_summary(text)),
             return_exceptions=True,
         )
-        if isinstance(extract, BaseException):
-            raise extract
+        if isinstance(extract_pair, BaseException):
+            logger.warning("[lat] intent extract failed: %s", extract_pair)
+            raise extract_pair
+        extract, extract_s = extract_pair
         degraded = False
-        if isinstance(summary_result, BaseException):
-            e = summary_result
+        if isinstance(summary_pair, BaseException):
+            e = summary_pair
             logger.warning("本地 9B 摘要不可用，降级生成摘要: %s", e)
             degraded = True
             summary = await self._degraded_summary(text)
@@ -116,8 +125,13 @@ class BrainPipeline:
                     EVT_BRAIN_DEGRADED,
                     {"task_id": "", "stage": "intent_summary", **degrade_event(route(R4_DECOMPOSE, self._deepseek))},
                 )
+            summary_s = -1.0
         else:
-            summary = summary_result
+            summary, summary_s = summary_pair
+        # P0-5/F8：/intent 分段耗时（量化 S2、验证 P0-3 收益）
+        logger.info("[lat] intent extract_ms=%d summary_ms=%d total_ms=%d degraded=%s",
+                    int(extract_s * 1000), int(summary_s * 1000),
+                    int((time.monotonic() - intent_t0) * 1000), degraded)
         extract.sanitized_summary = summary
         now = time.time()
         task = BrainTask(

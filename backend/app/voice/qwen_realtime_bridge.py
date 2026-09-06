@@ -65,6 +65,9 @@ class QwenRealtimeBridge:
         # tool 时长全额计入首音频延迟。单 worker 串行队列：不丢调用、天然免锁。
         self._tool_queue: asyncio.Queue = asyncio.Queue()
         self._tool_worker_task: asyncio.Task | None = None
+        # P0-5/F1：每个 reply 的 TTFB 观测锚点
+        self._reply_t0 = 0.0
+        self._first_audio_logged = False
 
     @property
     def dead(self) -> bool:
@@ -183,10 +186,19 @@ class QwenRealtimeBridge:
 
     async def _handle_event(self, event: dict) -> None:
         kind = event.get("type", "")
-        # 关键事件日志：排查"千问无响应"时确认 VAD/提交/响应生命周期（2026-09-04）
+        # P0-5/F1：qwen 事件全打点（[lat] 前缀，mono 时间锚）——拆云端 TTFB
         if kind in {"input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped",
-                    "input_audio_buffer.committed", "response.created", "error"}:
-            logger.info("qwen event: %s %s", kind, str(event.get("error", ""))[:200])
+                    "input_audio_buffer.committed", "response.created", "response.done", "error"}:
+            logger.info("[lat] qwen event: %s %s mono=%.3f",
+                        kind, str(event.get("error", ""))[:200], time.monotonic())
+        if kind == "response.created":
+            self._reply_t0 = time.monotonic()
+            self._first_audio_logged = False
+        if kind == "response.audio.delta" and event.get("delta") and not self._first_audio_logged:
+            # P0-5/F1：首个 response.audio.delta——response.created 到首音频的云端 TTFB
+            self._first_audio_logged = True
+            ttfb_ms = int((time.monotonic() - self._reply_t0) * 1000) if self._reply_t0 else -1
+            logger.info("[lat] first_audio_delta ttfb_ms=%d mono=%.3f", ttfb_ms, time.monotonic())
         if kind == "response.audio.delta" and event.get("delta"):
             await self._invoke(self._on_audio_out, pcm24k_to_pcm16k(base64.b64decode(event["delta"])))
         elif kind in {"response.audio_transcript.delta", "response.text.delta"} and event.get("delta") and self._on_text:
@@ -201,6 +213,8 @@ class QwenRealtimeBridge:
                 args = {key: value for key, value in args.items() if key != "approval_id"}
             if self._on_tool_call:
                 # P0-4：入队交专职 worker 串行执行，recv 循环立即返回继续处理事件
+                logger.info("[lat] tool_call received name=%s call_id=%s mono=%.3f",
+                            name, call_id, time.monotonic())
                 self._tool_queue.put_nowait((name, args, call_id))
                 self._ensure_tool_worker()
 
@@ -221,7 +235,8 @@ class QwenRealtimeBridge:
             except Exception as exc:  # noqa: BLE001 - 工具失败也要回填，防云端挂等
                 logger.warning("tool_call failed call_id=%s: %s", call_id, exc)
                 output = json.dumps({"error": str(exc)})
-            logger.info("tool_done call_id=%s dur_ms=%d",
+            # P0-5/F2：tool 生命周期打点（量出 tool 执行时长）
+            logger.info("[lat] tool_done call_id=%s dur_ms=%d",
                         call_id, int((time.monotonic() - started) * 1000))
             ws = self._ws
             if ws is None:
@@ -229,6 +244,8 @@ class QwenRealtimeBridge:
             try:
                 await ws.send(json.dumps({"type": "conversation.item.create", "item": {"type": "function_call_output", "call_id": call_id, "output": output}}))
                 await ws.send(json.dumps({"type": "response.create", "response": {"modalities": ["audio", "text"]}}))
+                # P0-5/F2：二轮 response.create 发出时刻
+                logger.info("[lat] tool_output_sent call_id=%s mono=%.3f", call_id, time.monotonic())
             except Exception as exc:  # noqa: BLE001
                 if not self._closed and not self._dead:
                     logger.warning("qwen tool output send failed (%s), scheduling reconnect", exc)

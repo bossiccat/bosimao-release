@@ -206,6 +206,8 @@ class PeerVoiceSession:
             self.shaper.reset()   # 清空未推送的下行帧（正在播的 20ms 帧自然播完）
             if self._router is not None:
                 self._router.clear()   # 丢弃被中断的 AI 文本（不路由到 Brain）
+            # P0-5/F4：丢弃窗口开窗打点（判定"下行丢弃窗口误开"假设 C）
+            logger.info("[lat] barge_in open mono=%.3f", now)
             logger.info("barge-in: user speech during AI playback, downlink flushed")
         if self._barge_in:
             self._last_down_check = now
@@ -303,6 +305,12 @@ class PeerVoiceSession:
         if self._down_speaking and now - self._last_down_ts > 0.6:
             self._down_speaking = False
             self._marker_tail_drop = False  # 播报结束：关闭标记尾音丢弃窗口
+            # P0-5/F4：丢弃窗口关窗打点 + 各窗口丢帧计数（假设 C 判定）
+            logger.info("[lat] discard window closed mono=%.3f barge_drops=%d "
+                        "marker_tail_drops=%d standby_drops=%d",
+                        time.monotonic(), self._barge_drops,
+                        self.stats.get("marker_tail_drops", 0),
+                        self.stats.get("standby_drops", 0))
             if self._barge_in:
                 self._barge_in = False
                 self._standby_pending = False   # 用户打断 = 撤销 "退下" 意图
@@ -318,6 +326,8 @@ class PeerVoiceSession:
                     if self._standby_pending:
                         self._standby = True
                         self._standby_pending = False
+                        # P0-5/F4：standby 激活（下行全丢窗口开启）
+                        logger.info("[lat] standby activated mono=%.3f", time.monotonic())
                         logger.info("standby activated after AI utterance completed")
                     # P0（2026-09-06 21:06 实锤）：flush 会走 brain API /intent
                     # （超时 5~8s），同步 await 会停摆 _consume_up 上行循环 →
@@ -367,6 +377,8 @@ class PeerVoiceSession:
             # 标记文本会被模型合成成音频（"退下了 [STANDBY]" 结尾念英文）——
             # 打开尾音丢弃窗口，标记之后的 TTS 音频全部丢弃，播报结束才关窗
             self._marker_tail_drop = True
+            # P0-5/F4：marker_tail 丢弃窗口开窗打点
+            logger.info("[lat] marker_tail_drop open mono=%.3f", time.monotonic())
         if STANDBY_MARKER in text:
             self._standby_pending = True
             logger.info("STANDBY marker detected, standby pending (after current utterance)")
