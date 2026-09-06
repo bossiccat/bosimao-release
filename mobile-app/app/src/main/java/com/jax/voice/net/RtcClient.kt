@@ -31,7 +31,13 @@ class RtcClient(
     private val onPhase: (VoicePhase) -> Unit,
     private val onRms: (Float) -> Unit,
     private val onError: (code: String, msg: String) -> Unit,
-    /** 本地采集帧检测到用户开口；由服务接入 BargeInController，非播放态幂等忽略。 */
+    /**
+     * 本地采集帧检测到「用户开口」；由服务接入 BargeInController.interrupt("user_voice")。
+     *
+     * 注意语义是「**播放态才打断**」而非「非播放态幂等忽略」：BargeInController 只在
+     * SPEAKING/INTERRUPTED 下执行打断，其余状态一律忽略（点击与语音同规则）。
+     * 另外语音触发另受「播放起始保护窗 + 每播放段一次」限流，见 BargeInController。
+     */
     private val onLocalVoiceActivity: () -> Unit = {},
     /** 真实 SDK onEnterRoom(result >= 0) 后触发，不能用 enterRoom() 同步返回替代。 */
     private val onEntered: () -> Unit = {},

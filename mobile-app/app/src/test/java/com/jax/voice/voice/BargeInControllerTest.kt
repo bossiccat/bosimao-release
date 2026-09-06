@@ -12,22 +12,29 @@ import org.junit.Test
  * 重复 pause/flush 幂等（不产生 UI 事件、不改状态）；打断后旧 generation
  * 下行帧丢弃（AC-14）；打断耗时 P95 ≤ 300ms 计时与判定（注入时钟）。
  *
+ * 覆盖回声自激防护（2026-09-06）：播放起始保护窗、每播放段一次语音打断额度、
+ * 额度超时自动恢复兜底，以及 tap（用户显式点击）不受限流影响。
+ *
  * 反作弊：无 @Ignore/skip；用可伪造时钟做真实数值断言，不 mock 状态机本身。
  */
 class BargeInControllerTest {
 
     private var now = 0L
+    /** 单调时钟（播放段边界/保护窗用）：与 nowMs 分离，避免 stop 耗时污染段计时 */
+    private var elapsed = 0L
     private var stopCalls = 0
     private val experiences = mutableListOf<ExperienceState>()
 
     private fun controller(stopCostMs: Long = 150L): BargeInController {
         now = 0L
+        elapsed = 0L
         stopCalls = 0
         experiences.clear()
         return BargeInController(
             interruptPlayback = { stopCalls++; now += stopCostMs },
             onExperience = { experiences.add(it) },
-            nowMs = { now }
+            nowMs = { now },
+            elapsedMs = { elapsed }
         )
     }
 
@@ -121,5 +128,79 @@ class BargeInControllerTest {
         c.interrupt("tap")
         assertEquals(350L, c.lastInterruptDurationMs)
         assertFalse("超过 300ms 预算必须被标记（真机 P95 采集）", c.lastInterruptWithinBudget())
+    }
+
+    // ---- 回声自激防护（真机 117ms 内 5 连击、32 次打断全部 source=user_voice）----
+
+    @Test
+    fun `voice barge-in fires only once per playback segment`() {
+        val c = controller()
+        c.onExperienceChange(ExperienceState.SPEAKING)
+        elapsed = 1_000L // 越过 400ms 起始保护窗
+        // 自激实测形态：百毫秒内连打 5 次
+        repeat(5) { c.interrupt(BargeInController.SOURCE_USER_VOICE) }
+        assertEquals("一个播放段内语音打断只允许生效一次", 1, stopCalls)
+        assertEquals(1, c.interruptGeneration)
+
+        // 隔离验证「额度」本身：把体验态保持在允许打断的 INTERRUPTED（且不重投 SPEAKING，
+        // 即不触发段边界重置），此时拦住第二次的只能是额度，不是既有的状态守卫
+        c.onExperienceChange(ExperienceState.INTERRUPTED)
+        c.interrupt(BargeInController.SOURCE_USER_VOICE)
+        assertEquals("额度未恢复时语音打断必须被拦下", 1, stopCalls)
+
+        // 离开 SPEAKING 再进入 = 新播放段，额度恢复
+        c.onExperienceChange(ExperienceState.LISTENING)
+        c.onExperienceChange(ExperienceState.SPEAKING)
+        elapsed = 5_000L
+        c.interrupt(BargeInController.SOURCE_USER_VOICE)
+        assertEquals("新播放段必须恢复语音打断额度", 2, stopCalls)
+    }
+
+    @Test
+    fun `voice barge-in is ignored inside playback onset guard window`() {
+        val c = controller()
+        c.onExperienceChange(ExperienceState.SPEAKING) // speakingSinceMs = 0
+        elapsed = 10L // 自激首击实测在 SPEAKING 后 ~10ms
+        c.interrupt(BargeInController.SOURCE_USER_VOICE)
+        assertEquals("播放起始保护窗内的语音打断必须被忽略", 0, stopCalls)
+
+        elapsed = 150L // 仍在 400ms 窗内
+        c.interrupt(BargeInController.SOURCE_USER_VOICE)
+        assertEquals(0, stopCalls)
+
+        elapsed = 500L // 越过保护窗，可以打断
+        c.interrupt(BargeInController.SOURCE_USER_VOICE)
+        assertEquals("保护窗过后语音打断必须生效", 1, stopCalls)
+    }
+
+    @Test
+    fun `tap is never rate limited and voice quota rearms after idle when SPEAKING event is lost`() {
+        val c = controller()
+        c.onExperienceChange(ExperienceState.SPEAKING)
+        elapsed = 1_000L
+
+        // tap 不受任何限流：连点 3 次，每次播放态重新进入后都能打断
+        c.interrupt("tap")
+        c.onExperienceChange(ExperienceState.SPEAKING)
+        c.interrupt("tap")
+        c.onExperienceChange(ExperienceState.SPEAKING)
+        c.interrupt("tap")
+        assertEquals("用户显式点击必须永不被限流", 3, stopCalls)
+
+        // 兜底：段边界事件丢失（此后不再重投 SPEAKING）时，额度必须超时自动恢复，
+        // 否则语音打断会永久失效——那比自激更糟（用户喊也停不下来）
+        c.onExperienceChange(ExperienceState.SPEAKING)
+        elapsed = 2_000L
+        c.interrupt(BargeInController.SOURCE_USER_VOICE)
+        assertEquals(4, stopCalls)
+
+        // 保持在允许打断的体验态，使拦截面收敛到额度/兜底逻辑本身
+        c.onExperienceChange(ExperienceState.INTERRUPTED)
+        elapsed = 2_500L // 距上次仅 500ms，未过 3000ms 恢复间隔 → 仍被限额
+        c.interrupt(BargeInController.SOURCE_USER_VOICE)
+        assertEquals(4, stopCalls)
+        elapsed = 6_000L // 距上次 4000ms > 3000ms → 自动恢复（即使 SPEAKING 事件从未重投）
+        c.interrupt(BargeInController.SOURCE_USER_VOICE)
+        assertEquals("段边界事件丢失时额度必须自动恢复", 5, stopCalls)
     }
 }
