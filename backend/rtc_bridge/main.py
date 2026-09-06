@@ -178,6 +178,13 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # P0-1/F10：进程内滚动日志（10MB×5），与启动器 -RedirectStandardOutput 解耦——
+    # 重定向文件每次重启被截断（2026-09-06 实锤：21:06 会话日志被 21:40 重启覆盖）
+    try:
+        from app.utils.logger import add_rotating_file_handler
+        add_rotating_file_handler("rtc_bridge_app.log")
+    except Exception as e:  # noqa: BLE001 - 日志文件不可用绝不阻断启动
+        logging.getLogger(__name__).warning("rtc_bridge_app.log unavailable: %s", e)
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:

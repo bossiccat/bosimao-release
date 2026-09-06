@@ -256,6 +256,12 @@ def run() -> None:
     import uvicorn
 
     logging.basicConfig(level=logging.INFO)
+    # P0-1/F10：进程内滚动日志（失败降级为仅控制台）
+    try:
+        from backend.app.utils.logger import add_rotating_file_handler
+        add_rotating_file_handler("relay_server_app.log")
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning("relay_server_app.log unavailable: %s", e)
     cfg = load_relay_config()
     app = create_relay_app(cfg)
     uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="info")

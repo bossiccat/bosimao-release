@@ -358,6 +358,12 @@ async def main() -> None:
     token, e2ee_key = resolve_credentials(dict(os.environ))
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # P0-1/F10：进程内滚动日志，防启动器重定向重启即覆盖（失败降级为仅控制台）
+    try:
+        from backend.app.utils.logger import add_rotating_file_handler
+        add_rotating_file_handler("relay_client_app.log")
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning("relay_client_app.log unavailable: %s", e)
     e2ee = RelayE2EE(load_e2ee_key(e2ee_key)) if e2ee_key else None
     client = RelayClient(args.relay, token, args.device_id, args.pairing_code,
                          gateway_url=args.gateway, gateway_ca=args.gateway_ca or None, e2ee=e2ee)
