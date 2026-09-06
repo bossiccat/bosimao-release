@@ -309,7 +309,12 @@ class PeerVoiceSession:
                         self._standby = True
                         self._standby_pending = False
                         logger.info("standby activated after AI utterance completed")
-                    await self._router.flush()
+                    # P0（2026-09-06 21:06 实锤）：flush 会走 brain API /intent
+                    # （超时 5~8s），同步 await 会停摆 _consume_up 上行循环 →
+                    # 用户语音 6~8s 不上行 + 下行音频积压被整形器砍断。
+                    # 改 create_task：flush 绝不阻塞上行循环（buffer 先清后路由，
+                    # asyncio 单线程，并发安全；barge-in 的 clear 分支保持同步）。
+                    asyncio.create_task(self._router.flush())
 
     def _apply_markers_from_buffer(self, buf: str) -> None:
         """检查 router 累积文本中的标记（处理标记被跨 delta 拆分的情况），

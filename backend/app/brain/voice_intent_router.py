@@ -22,6 +22,7 @@ VoiceIntentRouter 将 delta 累积成完整回复，在 AI 说完（音频静默
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from typing import Awaitable, Callable
@@ -65,7 +66,10 @@ class VoiceIntentRouter:
                 "voice intent buffer hit max (%d), auto-flushing",
                 self._max_buffer,
             )
-            await self.flush()
+            # P0（2026-09-06 21:06 实锤）：自动 flush 会同步走 brain API
+            # （超时 5~8s）——必须 create_task，保证任何路径（recv 链路
+            # _on_text/feed）下 brain 调用都不阻塞调用方
+            asyncio.create_task(self.flush())
 
     async def flush(self) -> None:
         """将累积文本路由到 on_route 回调，然后清空 buffer。

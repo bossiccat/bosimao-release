@@ -107,6 +107,8 @@ async def test_long_buffer_auto_flush():
     router = VoiceIntentRouter(on_route=on_route, max_buffer=50)
     long_text = "A" * 50
     await router.feed(long_text)
+    # P0 修复后自动 flush 为 create_task 异步路由，让出一拍等 flush 任务执行
+    await asyncio.sleep(0.05)
     assert len(routed) == 1, "达到 max_buffer 应自动 flush"
     assert router.buffered_text == ""
 

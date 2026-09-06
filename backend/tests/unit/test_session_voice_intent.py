@@ -86,6 +86,8 @@ async def test_ai_text_routed_on_silence(stub_apm):
     # 模拟音频静默 600ms+：强制 _last_down_ts 为远古时间
     s._last_down_ts = 0.0
     await s._check_down_speaking_over()
+    # P0 修复后 flush 为 create_task 异步路由，让出一拍等 flush 任务执行
+    await asyncio.sleep(0.05)
 
     assert len(intents) == 1, f"应路由一次完整文本，实际 {intents}"
     assert "重构" in intents[0]
