@@ -265,12 +265,37 @@ class QwenRealtimeBridge:
         self._ws = None
 
 
-async def connect_qwen(api_url: str, token: str, system_prompt: str, tools: list[dict]) -> tuple[Any, str]:
+# Qwen 握手竞态（2026-09-07 真机实锤 92s 空洞）：session.created 是服务器应用
+# session.update **之前**的默认配置宣告；session.updated 才代表 smart_turn VAD
+# 已生效。旧实现收到 created 即返回，从未确认配置生效就开始灌音频。
+QWEN_CONFIG_CONFIRM_TIMEOUT_S = 10.0
+
+
+async def connect_qwen(api_url: str, token: str, system_prompt: str, tools: list[dict], config_confirm_timeout_s: float = QWEN_CONFIG_CONFIRM_TIMEOUT_S) -> tuple[Any, str]:
     ws = await connect_ws(api_url, token)
     await ws.send(json.dumps({"type": "session.update", "session": {"modalities": ["audio", "text"], "instructions": system_prompt, "input_audio_format": "pcm", "output_audio_format": "pcm", "max_history_turns": 50, "tools": tools, "turn_detection": {"type": "smart_turn"}}}))
+    deadline = time.monotonic() + config_confirm_timeout_s
     while True:
-        msg = json.loads(await ws.recv())
-        if msg.get("type") in {"session.updated", "session.created"}:
-            return ws, msg.get("session_id", msg.get("session", {}).get("id", ""))
-        if msg.get("type") == "error":
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # fail-open：保持旧可用性（不挂死握手），但必须 ERROR 露出，不再静默
+            logger.error(
+                "Qwen session config NOT confirmed within %.1fs (no session.updated); "
+                "continuing on DEFAULT server config — smart_turn VAD may be inactive, "
+                "expect speech never committed", config_confirm_timeout_s,
+            )
+            return ws, ""
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+        except asyncio.TimeoutError:
+            continue  # 回到循环顶检查 deadline → fail-open
+        msg = json.loads(raw)
+        mtype = msg.get("type")
+        if mtype == "session.updated":
+            session = msg.get("session", {})
+            sid = msg.get("session_id", session.get("id", ""))
+            logger.info("Qwen session config confirmed (session.updated) sid=%s", sid)
+            return ws, sid
+        # session.created 与其他前置事件：只消费，不作为就绪依据
+        if mtype == "error":
             raise RuntimeError(f"Qwen session failed: {msg}")
