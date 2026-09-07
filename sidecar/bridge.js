@@ -20,6 +20,20 @@ function sessionHello(session) {
   return { ...session };
 }
 
+// 下行帧元数据（rtc_bridge 侧 2026-09-07 新增的可选字段）。
+// 旧版 rtc_bridge 不含这些字段 —— 一律降级为 undefined，绝不抛错、绝不丢帧。
+// t_enq / t_send 是 rtc_bridge 进程的 monotonic 时钟，与 sidecar 时钟不同基准，
+// 只能由 rtc_bridge 自己在其进程内做差，sidecar 侧仅原样透传。
+function downAudioMeta(message) {
+  return {
+    replyId: typeof message.reply_id === 'string' ? message.reply_id : undefined,
+    frameSeq: Number.isInteger(message.frame_seq) ? message.frame_seq : undefined,
+    srcSeq: Number.isInteger(message.src_seq) ? message.src_seq : undefined,
+    tEnq: Number.isFinite(message.t_enq) ? message.t_enq : undefined,
+    tSend: Number.isFinite(message.t_send) ? message.t_send : undefined,
+  };
+}
+
 class BridgeClient {
   constructor(url, onDownAudio, onCtrl, onDisconnect = () => {}) {
     this.url = url;
@@ -101,7 +115,8 @@ class BridgeClient {
     let message;
     try { message = JSON.parse(event.data); } catch (_) { return; }
     if (message.type === 'down_audio' && message.pcm_b64) {
-      this.onDownAudio(Buffer.from(message.pcm_b64, 'base64'));
+      // meta 作为第二个参数透传（跨进程关联 ID：reply_id / frame_seq / src_seq）。
+      this.onDownAudio(Buffer.from(message.pcm_b64, 'base64'), downAudioMeta(message));
     } else if (message.type === 'ctrl') {
       this.onCtrl(message.action, message.reason || '');
     }

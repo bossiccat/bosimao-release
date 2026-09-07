@@ -36,6 +36,25 @@ const stats = { upFrames: 0, upBytes: 0, downFrames: 0, downBytes: 0 };
 let bridge = null;
 let exited = false;
 
+// ---------- 下行逐帧埋点（L2 WS 收帧 / L3 SDK 调用）----------
+// 归因缺口：以前只有孤立的字节数/帧数，无法区分
+//   「云端发了但 localhost WS 没送到 sidecar」vs「sidecar 收到了但 SDK 没送出去」。
+// 现在每帧带 rtc_bridge 侧的 reply_id / frame_seq / src_seq，两级各留证据即可分叉。
+// 边界（务必保持）：L3 的 sendCustomAudioData 返回成功只证明本地 API 调用返回，
+// 不证明 TRTC 已出网、不证明手机已收到、不证明扬声器已响。
+const DNL_LOG_EVERY = 100; // 首帧必打，之后节流
+const downProbe = { replyId: null, frames: 0, localFrames: 0 };
+
+// 统一字段前缀。meta 缺失/畸形（旧版 rtc_bridge）时 reply=-、seq 用本地帧计数、其余 -。
+// q = 队列深度：sidecar 看不到 rtc_bridge 侧队列，恒为 -1（占位，避免误读为 0）。
+function downPrefix(meta, fallbackSeq) {
+  const m = meta && typeof meta === 'object' ? meta : {};
+  const reply = typeof m.replyId === 'string' ? m.replyId : '-';
+  const seq = Number.isInteger(m.frameSeq) ? m.frameSeq : fallbackSeq;
+  const src = Number.isInteger(m.srcSeq) ? m.srcSeq : '-';
+  return `reply=${reply} seq=${seq} src=${src} q=-1`;
+}
+
 // ---------- 签发：控制面失败时关闭失败，不在 sidecar 本地签名 ----------
 
 // ---------- TRTC 进房 ----------
@@ -57,12 +76,39 @@ function runSidecar() {
 
   bridge = new BridgeClient(
     ARGS.bridgeUrl,
-    (buf) => { // 下行：rtc_bridge 推来的 16k s16（完整 640B 帧）→ 直接注入（Task 9：实际 SDK 契约支持 16k）
+    (buf, meta) => { // 下行：rtc_bridge 推来的 16k s16（完整 640B 帧）→ 直接注入（Task 9：实际 SDK 契约支持 16k）
+      // L2：sidecar 确实从 localhost WS 收到了这一帧（本进程 monotonic）
+      const tL2 = process.hrtime.bigint();
+      const replyId = meta && typeof meta.replyId === 'string' ? meta.replyId : null;
+      const newReply = replyId !== null && replyId !== downProbe.replyId;
+      if (newReply) { downProbe.replyId = replyId; downProbe.frames = 0; }
+      downProbe.frames += 1;
+      downProbe.localFrames += 1;
+      // 每轮 reply 首帧必打（人工排查最先看的一行），其余按 DNL_LOG_EVERY 节流
+      const sampled = downProbe.frames === 1 || downProbe.frames % DNL_LOG_EVERY === 0;
+      const prefix = downPrefix(meta, downProbe.localFrames);
+
+      // L3 开始：先取调用开始时刻，避免把下面的日志写盘耗时算进 dt_ws_to_sdk_ns
+      const tL3 = process.hrtime.bigint();
+      if (sampled) {
+        log('DNL2', `${prefix} bytes=${buf.length} n=${downProbe.frames} dt_ws_to_sdk_ns=${tL3 - tL2} dt_sdk_ns=- L2=WS收帧`);
+      }
+      if (sampled) {
+        log('DNL3', `${prefix} dt_ws_to_sdk_ns=${tL3 - tL2} dt_sdk_ns=- state=start L3=调用开始`);
+      }
       try {
         cloud.sendCustomAudioData(makeAudioFrame16k(buf));
+        const tEnd = process.hrtime.bigint();
         stats.downFrames += 1;
         stats.downBytes += buf.length;
+        if (sampled) {
+          log('DNL3', `${prefix} dt_ws_to_sdk_ns=${tL3 - tL2} dt_sdk_ns=${tEnd - tL3} state=ok `
+            + 'L3=本地API调用返回（不证明已出网/手机已播放）');
+        }
       } catch (e) {
+        const tEnd = process.hrtime.bigint();
+        log('DNL3', `${prefix} dt_ws_to_sdk_ns=${tL3 - tL2} dt_sdk_ns=${tEnd - tL3} state=exn `
+          + `L3=调用异常 err=${e.message}`);
         log('ERR', `sendCustomAudioData 失败: ${e.message}`);
       }
     },
