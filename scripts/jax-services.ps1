@@ -320,6 +320,9 @@ function Start-BackendService {
                     $known = @($allBackend | ForEach-Object { [int]$_.ProcessId })
                     if ($known -contains $listener) {
                         Write-Host "[backend][ok] 就绪（onefile 单实例，监听 PID=$listener，进程数=$($allBackend.Count)）"
+                        # pidfile 必须记录 :8000 监听者（onefile 子进程），不是 bootloader 父进程——
+                        # 父进程退出后 PID 即失效，后续清理会失去目标
+                        Set-PidFile "backend" $listener
                         return $true
                     }
                 }
@@ -330,7 +333,8 @@ function Start-BackendService {
             }
             if ($owner.Match -eq $false) {
                 Write-Host "[backend][x] 端口被非预期进程占用: $($owner.ProcName) PID=$($owner.Pid)；终止当前启动"
-                Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+                # onefile 树清理：只杀 bootloader 父会留下孤儿子进程（#17）
+                Stop-BackendProcesses
                 Clear-PidFile "backend"
                 return $false
             }
@@ -338,7 +342,8 @@ function Start-BackendService {
         Start-Sleep -Seconds 2
     }
     Write-Host "[backend][x] 90s 内未就绪，终止当前 PID=$($p.Id)，查看 $Log"
-    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    # onefile 树清理：只杀 bootloader 父会留下孤儿子进程（#17）
+    Stop-BackendProcesses
     Clear-PidFile "backend"
     return $false
 }
