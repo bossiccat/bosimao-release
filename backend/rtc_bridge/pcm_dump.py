@@ -9,6 +9,8 @@
   缓冲达阈值（256KB ≈ 下行 8s）经 asyncio.to_thread 异步落盘
 - I/O 异常只 warning 一次并整体停用，绝不影响下行/上行
 - close 时补写 meta.json（帧数/字节数/起止 mono/采样率/帧长）
+- 目标已存在时自动换名（<prefix>.<时间戳>）并告警：既不覆盖（毁掉上一轮证据）
+  也不追加（两轮 PCM 会拼成一段连续音频，事后极难发现）
 """
 from __future__ import annotations
 
@@ -22,14 +24,41 @@ logger = logging.getLogger(__name__)
 
 FLUSH_BYTES = 256 * 1024
 
+# 一个 prefix 对应的全部产物（判重时必须整体看，只查 .pcm 会在半截状态下漏判）
+_DUMP_SUFFIXES = (".pcm", ".up.pcm", ".meta.json")
+
+
+def _unique_prefix(prefix: str) -> str:
+    """目标文件已存在时换一个不冲突的名字，杜绝追加污染上一轮证据。
+
+    取证场景下重跑同一 prefix 是常态。原实现以 append 模式打开，二次落盘会把两轮
+    PCM 拼成一段连续音频，事后几乎无法发现，直接导致归因结论错误。这里既不覆盖
+    （会毁掉上一轮证据）也不追加（会污染），而是改用带时间戳的新名字并告警。
+    """
+    if not any(os.path.exists(prefix + s) for s in _DUMP_SUFFIXES):
+        return prefix
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    candidate = f"{prefix}.{stamp}"
+    n = 1
+    while any(os.path.exists(candidate + s) for s in _DUMP_SUFFIXES):
+        candidate = f"{prefix}.{stamp}-{n}"
+        n += 1
+    logger.warning(
+        "[lat] pcm dump 目标已存在，改用新文件名（避免覆盖/追加污染上一轮证据）: %s -> %s",
+        prefix, candidate,
+    )
+    return candidate
+
 
 class PcmDumpSink:
     """下行/上行 PCM 原样落盘（append 模式，16k mono s16le）"""
 
     def __init__(self, prefix: str, sample_rate: int = 16000, frame_ms: int = 20) -> None:
-        self._down_path = f"{prefix}.pcm"
-        self._up_path = f"{prefix}.up.pcm"
-        self._meta_path = f"{prefix}.meta.json"
+        # 冲突时自动换名（见 _unique_prefix），prefix 为实际生效的前缀
+        self.prefix = _unique_prefix(prefix)
+        self._down_path = f"{self.prefix}.pcm"
+        self._up_path = f"{self.prefix}.up.pcm"
+        self._meta_path = f"{self.prefix}.meta.json"
         self._sample_rate = sample_rate
         self._frame_ms = frame_ms
         self._down_buf = bytearray()

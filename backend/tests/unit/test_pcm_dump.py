@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -149,3 +150,54 @@ async def test_open_failure_degrades_gracefully(tmp_path):
     sink.write_up(b"\x00" * 320)
     await sink.close()               # 不得抛异常
     assert not (tmp_path / "no_such_dir").exists()
+
+
+# ---------- 证据隔离：同 prefix 重跑不得叠加污染 ----------
+
+@pytest.mark.asyncio
+async def test_same_prefix_second_run_does_not_append(tmp_path):
+    """同 prefix 二次落盘必须换名，绝不叠加到上一轮文件上。
+
+    取证场景下重跑是常态；若以 append 模式写进同一文件，两轮 PCM 会被拼成
+    一段连续音频，事后几乎无法发现，直接导致归因结论错误。
+    """
+    prefix = str(tmp_path / "cap")
+
+    first = PcmDumpSink(prefix)
+    first.write_down(b"\x01" * 640)
+    first.write_up(b"\x11" * 320)
+    await first.close()
+    first_down = (tmp_path / "cap.pcm").read_bytes()
+    first_up = (tmp_path / "cap.up.pcm").read_bytes()
+    assert first_down == b"\x01" * 640
+    assert first_up == b"\x11" * 320
+
+    second = PcmDumpSink(prefix)
+    second.write_down(b"\x02" * 640)
+    second.write_up(b"\x22" * 320)
+    await second.close()
+
+    # 首轮证据必须逐字节保持原样（既没被追加、也没被覆盖）——这是污染的直接判据，
+    # 故意放在「是否换名」之前，好让 RED 阶段暴露真实缺陷而不是属性缺失
+    assert (tmp_path / "cap.pcm").read_bytes() == first_down, "首轮下行证据被污染"
+    assert (tmp_path / "cap.up.pcm").read_bytes() == first_up, "首轮上行证据被污染"
+    # 第二轮必须换名：不得与首轮同一路径
+    assert second.prefix != prefix, "同 prefix 重跑必须换名，不能复用已存在的目标"
+    # 第二轮只含自己这一轮的字节
+    assert Path(second.prefix + ".pcm").read_bytes() == b"\x02" * 640
+    assert Path(second.prefix + ".up.pcm").read_bytes() == b"\x22" * 320
+    # 第二轮的 meta 独立，且路径记录的是换名后的文件
+    meta2 = json.loads(Path(second.prefix + ".meta.json").read_text(encoding="utf-8"))
+    assert meta2["down"]["bytes"] == 640
+    assert meta2["up"]["bytes"] == 320
+
+
+@pytest.mark.asyncio
+async def test_fresh_prefix_keeps_requested_name(tmp_path):
+    """无冲突时保持调用方指定的名字（换名只在冲突时发生，不能无谓改变路径）"""
+    prefix = str(tmp_path / "clean")
+    sink = PcmDumpSink(prefix)
+    sink.write_down(b"\x03" * 640)
+    await sink.close()
+    assert sink.prefix == prefix, "无冲突时不应改名"
+    assert (tmp_path / "clean.pcm").read_bytes() == b"\x03" * 640
