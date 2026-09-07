@@ -15,6 +15,7 @@ from typing import Awaitable, Callable
 
 from .bounded_audio_queue import BoundedAudioQueue
 from .frame_buffer import PcmFrameBuffer
+from .frame_meta import DownFrame
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +54,32 @@ class DownlinkShaper:
         # P0-5/F3：每 reply 首帧观测（push 首帧 / send 首帧）
         self._last_push_ts = 0.0
         self._last_send_ts = 0.0
+        # F6/F7：当前 reply 身份与帧序号（begin_reply 时重置）
+        self._reply_id = ""
+        self._frame_seq = 0
+
+    def begin_reply(self, reply_id: str) -> None:
+        """开始一轮新回复：切换 reply_id 并把 frame_seq 归零
+
+        由 PeerVoiceSession 在 reply 边界调用（下行静默后新音频到达）。
+        """
+        self._reply_id = reply_id
+        self._frame_seq = 0
+
+    @property
+    def current_reply_id(self) -> str:
+        return self._reply_id
 
     def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._run())
 
-    async def push(self, pcm: bytes) -> None:
-        """ApmBridge.on_audio_out 回调入口（非阻塞：跨块拆帧 + 有界入队）"""
+    async def push(self, pcm: bytes, src_seq: int = -1) -> None:
+        """ApmBridge.on_audio_out 回调入口（非阻塞：跨块拆帧 + 有界入队）
+
+        src_seq：本 chunk 的来源序号（F6/F7）；一个变长 chunk 可产出多帧，
+        产出的每一帧都继承该 src_seq，帧序号 frame_seq 在本 reply 内递增。
+        """
         if self._closed:
             return
         now = time.monotonic()
@@ -67,8 +87,12 @@ class DownlinkShaper:
             # P0-5/F3：每 reply 首帧 push 时刻（确认本地下行零延迟）
             logger.info("[lat] down first push mono=%.3f bytes=%d", now, len(pcm))
         self._last_push_ts = now
-        for frame in self._buffer.feed(pcm):
-            self._q.push(frame)
+        frames = self._buffer.feed(pcm, src_seq=src_seq)
+        srcs = self._buffer.last_src_seqs
+        for payload, src in zip(frames, srcs):
+            seq = self._frame_seq
+            self._frame_seq += 1
+            self._q.push(payload, reply_id=self._reply_id, frame_seq=seq, src_seq=src)
         self._wake.set()
 
     def flush_tail(self) -> None:
@@ -117,12 +141,25 @@ class DownlinkShaper:
                 await asyncio.sleep(-lag)
             # lag >= 0：已落后（消费慢/网络抖动），立即发不睡，靠后续帧追赶
             now_mono = time.monotonic()
+            frame = DownFrame(
+                payload=entry.payload,
+                reply_id=entry.reply_id,
+                frame_seq=entry.frame_seq,
+                src_seq=entry.src_seq,
+                enq_mono=entry.created_at,
+                generation=entry.generation,
+            )
             if now_mono - self._last_send_ts > 0.5:
                 # P0-5/F3：每 reply 首帧 send 时刻
-                logger.info("[lat] down first send mono=%.3f", now_mono)
+                logger.info(
+                    "[lat] down first send mono=%.3f reply=%s seq=%s src=%s age_ms=%.1f",
+                    now_mono, entry.reply_id or "-", entry.frame_seq, entry.src_seq,
+                    (now_mono - entry.created_at) * 1000.0,
+                )
             self._last_send_ts = now_mono
             try:
-                await self._send_frame(entry.payload)
+                frame.send_mono = time.monotonic()
+                await self._send_frame(frame)
             except Exception as e:  # noqa: BLE001 - sidecar 断线不阻塞整形器
                 logger.warning("shaper send frame failed: %s", e)
 

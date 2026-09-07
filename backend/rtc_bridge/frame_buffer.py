@@ -22,9 +22,18 @@ class PcmFrameBuffer:
         self.total_frames = 0
         self.tail_dropped_bytes = 0
         self.tail_padded_frames = 0
+        # F6/F7：与最近一次 feed() 返回帧一一对应的来源 chunk 序号。
+        # 一个变长 chunk 可能产出 0~N 帧，frame 与 chunk 不是 1:1，
+        # 因此必须逐帧记录 src_seq，不能靠调用方推断。
+        self.last_src_seqs: list[int] = []
 
-    def feed(self, chunk: bytes) -> list[bytes]:
-        """输入任意长度 PCM 块，返回本块产生的完整帧（不含不足帧）"""
+    def feed(self, chunk: bytes, src_seq: int = -1) -> list[bytes]:
+        """输入任意长度 PCM 块，返回本块产生的完整帧（不含不足帧）
+
+        src_seq：本 chunk 的来源序号（F6/F7 逐帧关联）；-1 表示未知。
+        产出帧对应的 src_seq 见 self.last_src_seqs（与返回值等长）。
+        """
+        self.last_src_seqs = []
         if not chunk:
             return []
         self._buf.extend(chunk)
@@ -33,6 +42,7 @@ class PcmFrameBuffer:
             frames.append(bytes(self._buf[: self.frame_bytes]))
             del self._buf[: self.frame_bytes]
         self.total_frames += len(frames)
+        self.last_src_seqs = [src_seq] * len(frames)
         return frames
 
     def flush(self) -> list[bytes]:

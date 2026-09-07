@@ -19,6 +19,7 @@ import os
 
 import pytest
 
+from rtc_bridge.frame_meta import DownFrame
 from rtc_bridge.pcm_dump import PcmDumpSink
 from rtc_bridge.session import PeerVoiceSession
 
@@ -72,7 +73,7 @@ async def test_dump_disabled_by_default(monkeypatch, stub_apm):
     s = _make_session()
     await s.start()
     assert s._pcm_dump is None, "默认必须关闭（零开销路径）"
-    await s._send_frame(b"\x01\x02" * 320)
+    await s._send_frame(DownFrame(payload=b"\x01\x02" * 320))
     await s.close()
 
 
@@ -118,7 +119,7 @@ async def test_session_wiring_down_and_up(tmp_path, monkeypatch, stub_apm):
     # 下行：3 帧 640B（经 shaper 节拍后实际发往 sidecar 的帧）
     down_frames = [bytes([i]) * 640 for i in range(1, 4)]
     for f in down_frames:
-        await s._send_frame(f)
+        await s._send_frame(DownFrame(payload=f))
 
     # 上行：响帧（RMS>400）经 on_up_audio → 队列 → 消费 → feeder 前捕获
     up_frames = [b"\x20\x10" * 160 for _ in range(3)]  # RMS≈4120

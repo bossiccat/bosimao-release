@@ -225,6 +225,8 @@ class BridgeServer:
                 on_apm_cancelled=lambda clean: drain_ack.report_apm_cancel(
                     closed_cleanly=clean
                 ),
+                # F6/F7：hello 的 session_id 下沉到会话，用于铸造跨进程 reply_id
+                session_id=session_id,
             )
             try:
                 await candidate.start()

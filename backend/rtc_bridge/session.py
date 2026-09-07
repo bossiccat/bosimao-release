@@ -20,6 +20,7 @@ from app.voice.qwen_realtime_bridge import QwenRealtimeBridge
 from app.voice.end_detect import EndDetectFeeder, pcm_rms
 
 from .bounded_audio_queue import BoundedAudioQueue
+from .frame_meta import DownFrame
 from .pcm_dump import PcmDumpSink
 from .shaper import DownlinkShaper
 
@@ -46,6 +47,10 @@ DEFAULT_UP_MAX_FRAME_AGE_MS = 1000
 # 说完判定，保持 2s
 QWEN_END_PAD_S = 0.4
 APM_END_PAD_S = 2.0
+
+# F6/F7：下行静默超过该时长后到来的音频判定为「新一轮回复」，分配新 reply_id。
+# 取值需大于 shaper 单帧节拍（20ms）与常规抖动，小于两轮回复的自然间隔。
+DEFAULT_NEW_REPLY_GAP_S = 0.5
 
 
 class PeerVoiceSession:
@@ -75,9 +80,14 @@ class PeerVoiceSession:
         down_max_frame_age_ms: int = 1000,
         on_voice_intent: Callable[[str], Awaitable[None]] | None = None,
         on_apm_cancelled: Callable[[bool], Awaitable[None]] | None = None,
+        session_id: str = "",
+        new_reply_gap_s: float = DEFAULT_NEW_REPLY_GAP_S,
     ) -> None:
         self.device_id = device_id
         self.room_id = room_id
+        # F6/F7：hello 里的 session_id 注入后用于铸造跨进程 reply_id
+        self._session_id = session_id
+        self._new_reply_gap_s = new_reply_gap_s
         self._send_msg = send_msg
         # APM 会话被取消关闭后的回调（apm_cancelled_closed 上报钩子；可空）
         self._on_apm_cancelled = on_apm_cancelled
@@ -123,6 +133,11 @@ class PeerVoiceSession:
         self._last_down_check = 0.0     # 上行 RMS 检查限流
         self._last_up_rms_log = 0.0     # 上行 RMS 调试日志限流（2s 一次，排查"千问无响应"）
         self._last_feed_fail_log = 0.0  # 喂帧失败日志限流（≥2s 一条，防断链时刷爆日志）
+        # F6/F7 逐帧关联状态
+        self._reply_id = ""         # 当前 reply 身份（空=尚未开始）
+        self._reply_seq = 0         # reply 计数器（会话内单调递增）
+        self._chunk_seq = 0         # 当前 reply 内的云端 chunk 序号
+        self._last_down_mono = 0.0  # 上一帧下行的 monotonic 时刻（reply 边界判定）
         # GPT-Live 式待命/唤醒状态机
         # _standby=True 时禁止模型输出（下行音频/文本均丢弃）；上行仍由当前 RTC 会话接收。
         # 注意：真正的唤醒门禁仍需手机侧 KWS/重进房；后端不能把云端模型当 KWS。
@@ -300,7 +315,30 @@ class PeerVoiceSession:
         self._down_speaking = True
         self.stats["down_frames"] += 1
         self.stats["down_bytes"] += len(pcm)
-        await self.shaper.push(pcm)
+        self._mint_reply_if_needed()
+        await self.shaper.push(pcm, src_seq=self._chunk_seq)
+        self._chunk_seq += 1
+
+    def _mint_reply_if_needed(self) -> None:
+        """F6/F7：reply 边界判定与身份铸造
+
+        reply 身份在 bridge 本地铸造，不依赖云端 response id——目的是给
+        「bridge → sidecar → SDK → 手机」这条跨进程链路一个共享身份，
+        云端侧另有 response.created 日志，可按时间 join。
+
+        判定：首次下行，或距上一帧下行超过 new_reply_gap_s（说明中间静默过，
+        属于新一轮回复）→ 分配新 reply_id，frame_seq 与 chunk 序号归零。
+        """
+        now_mono = time.monotonic()
+        if (not self._reply_id
+                or (now_mono - self._last_down_mono) > self._new_reply_gap_s):
+            self._reply_seq += 1
+            self._reply_id = f"{self._session_id or 'anon'}:{self._reply_seq}"
+            self._chunk_seq = 0
+            self.shaper.begin_reply(self._reply_id)
+            logger.info("[lat] down reply begin reply=%s session=%s mono=%.3f",
+                        self._reply_id, self._session_id or "-", now_mono)
+        self._last_down_mono = now_mono
 
     async def _check_down_speaking_over(self) -> None:
         """AI 播报结束判定：下行静默 >600ms → 退出播报态，结束打断窗口
@@ -370,12 +408,18 @@ class PeerVoiceSession:
                 # 用 create_task 避免 _on_text 链式 await 死锁
                 asyncio.create_task(self._router.feed(stripped))
 
-    async def _send_frame(self, frame: bytes) -> None:
+    async def _send_frame(self, frame: "DownFrame") -> None:
         if self._pcm_dump is not None:
             # P0 取证：下行帧在 shaper 节拍后、实际发往 sidecar 前落盘——
             # dump 里的洞 = 真实送达的洞
-            self._pcm_dump.write_down(frame)
-        await self._send_msg({"type": MSG_DOWN_AUDIO, "pcm_b64": base64.b64encode(frame).decode("ascii")})
+            self._pcm_dump.write_down(frame.payload)
+        msg = {
+            "type": MSG_DOWN_AUDIO,
+            "pcm_b64": base64.b64encode(frame.payload).decode("ascii"),
+        }
+        # F6/F7 追溯字段（附加字段，旧 sidecar 忽略未知 key 即可正常工作）
+        msg.update(frame.trace_fields())
+        await self._send_msg(msg)
 
     async def _on_text(self, text: str) -> None:
         """APM 文本 delta → 标记检测 + router 累积

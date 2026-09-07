@@ -20,6 +20,10 @@ class QueueEntry:
     generation: int
     created_at: float
     size: int
+    # F6/F7 逐帧追溯（可选；默认空表示未知，旧调用点不受影响）
+    reply_id: str = ""
+    frame_seq: int = -1
+    src_seq: int = -1
 
 
 class BoundedAudioQueue:
@@ -63,8 +67,12 @@ class BoundedAudioQueue:
 
     # ---- 入队（非阻塞） ----
 
-    def push(self, payload: bytes, generation: int | None = None) -> bool:
-        """入队；过载丢旧保新；返回是否入队成功"""
+    def push(self, payload: bytes, generation: int | None = None, *,
+             reply_id: str = "", frame_seq: int = -1, src_seq: int = -1) -> bool:
+        """入队；过载丢旧保新；返回是否入队成功
+
+        reply_id / frame_seq / src_seq 为 F6/F7 逐帧追溯元数据，可选。
+        """
         now = self._now()
         self._drop_expired(now)
         entry = QueueEntry(
@@ -72,6 +80,9 @@ class BoundedAudioQueue:
             generation=self.generation if generation is None else generation,
             created_at=now,
             size=len(payload),
+            reply_id=reply_id,
+            frame_seq=frame_seq,
+            src_seq=src_seq,
         )
         if entry.size > self.max_bytes:
             self.drops += 1

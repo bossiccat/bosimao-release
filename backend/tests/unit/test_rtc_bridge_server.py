@@ -555,10 +555,11 @@ async def test_shaper_outputs_only_full_640_frames():
     await shaper.push(b"b" * 340)          # 300+340 = 640 → 完整帧
     await asyncio.sleep(0.06)
     assert len(sent) == 1
-    assert sent[0] == b"a" * 300 + b"b" * 340
+    # F6/F7：回调收到的是带追溯元数据的 DownFrame，payload 才是 PCM
+    assert sent[0].payload == b"a" * 300 + b"b" * 340
     await shaper.push(b"c" * 100)          # 不足帧 residue
     await shaper.stop()                    # flush_tail：drop 模式
-    assert all(len(frame) == 640 for frame in sent)
+    assert all(len(frame.payload) == 640 for frame in sent)
     assert shaper.metrics()["down_tail_dropped_bytes"] == 100
 
 
@@ -581,4 +582,4 @@ async def test_shaper_backpressure_drops_oldest():
     assert metrics["queue_drops"] >= 2
     assert metrics["backpressure_events"] >= 2
     assert metrics["queue_high_watermark"] <= 2
-    assert all(len(frame) == 640 for frame in sent)
+    assert all(len(frame.payload) == 640 for frame in sent)
