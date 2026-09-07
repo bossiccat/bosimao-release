@@ -119,8 +119,12 @@ async def test_recv_loop_exit_triggers_reconnect_and_feed_recovers(monkeypatch):
     assert connects[1][2] == "be a cat"
     assert connects[1][3] == QWEN_COORDINATION_TOOLS
 
-    # feed 恢复：上行帧到达新链路
+    # feed 恢复：上行帧到达新链路（2026-09-07 解耦后发送走 sender task，等其消化）
     await bridge.feed_pcm(b"\x01\x02" * 100)
+    for _ in range(100):
+        if any(m["type"] == "input_audio_buffer.append" for m in ws2.sent):
+            break
+        await asyncio.sleep(0.01)
     assert any(m["type"] == "input_audio_buffer.append" for m in ws2.sent)
     await bridge.close()
 

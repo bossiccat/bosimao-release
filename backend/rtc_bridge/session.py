@@ -178,6 +178,7 @@ class PeerVoiceSession:
             "standby": False,           # GPT-Live 待命态（True=AI 静默）
             "standby_drops": 0,         # standby 期间丢弃的下行帧计数
             "marker_tail_drops": 0,     # 标记尾音丢弃计数（[STANDBY]/[ACTIVE] 尾音）
+            "up_gated_playback": 0,     # 播放期上行门控丢弃计数（回声不喂云端）
         }
         self.last_activity_ts = time.time()
         # P0 取证（2026-09-06）：JAX_DOWN_PCM_DUMP=<prefix> 开启时把下行/上行
@@ -281,6 +282,13 @@ class PeerVoiceSession:
                     pass  # 周期唤醒：维持 barge-in 窗口超时判定
                 continue
             self._sync_queue_metrics()
+            # 播放期上行门控（2026-09-07）：AI 播报中不喂云端——扬声器回声会
+            # 被 smart_turn commit 成用户输入，产生 ttfb=0-16ms 垃圾 response。
+            # 真实打断由本地能量 barge-in 检测（宽限期+持续确认），开窗后本门
+            # 立即放开，用户语音即刻可达云端。
+            if self._down_speaking and not self._barge_in:
+                self.stats["up_gated_playback"] = self.stats.get("up_gated_playback", 0) + 1
+                continue
             if self._pcm_dump is not None:
                 # P0 取证：上行原始帧（实际送上云端；队列丢弃另有计数）落盘
                 self._pcm_dump.write_up(entry.payload)

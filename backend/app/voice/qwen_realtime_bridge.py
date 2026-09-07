@@ -35,7 +35,7 @@ QWEN_RECONNECT_MAX_ATTEMPTS = 5
 
 
 class QwenRealtimeBridge:
-    def __init__(self, on_audio_out: Callable[[bytes], Awaitable[None]], on_text: Callable[[str], Awaitable[None]] | None = None, on_tool_call: Callable[[str, dict, str], Awaitable[str]] | None = None, api_url: str = "", token: str = "", system_prompt: str = "", on_error: Callable[[str], Awaitable[None]] | None = None) -> None:
+    def __init__(self, on_audio_out: Callable[[bytes], Awaitable[None]], on_text: Callable[[str], Awaitable[None]] | None = None, on_tool_call: Callable[[str, dict, str], Awaitable[str]] | None = None, api_url: str = "", token: str = "", system_prompt: str = "", on_error: Callable[[str], Awaitable[None]] | None = None, send_queue_frames: int = 25) -> None:
         self._on_audio_out = on_audio_out
         self._on_text = on_text
         self._on_tool_call = on_tool_call
@@ -68,6 +68,12 @@ class QwenRealtimeBridge:
         # P0-5/F1：每个 reply 的 TTFB 观测锚点
         self._reply_t0 = 0.0
         self._first_audio_logged = False
+        # 上行解耦（2026-09-07）：feed_pcm 不再逐帧 await 云端 send——慢网会把
+        # 20ms 上行消费循环整体拖死 → 队列积压 → 超 1000ms 帧龄整批判过期 = 吞话。
+        # 改为有界队列 + 独立 sender task：feed 入队即返回；满则丢旧保新；
+        # 25 帧 ≈ 500ms 缓冲，与上行帧龄上限同量级。
+        self._send_q: asyncio.Queue = asyncio.Queue(maxsize=max(1, send_queue_frames))
+        self._sender_task: asyncio.Task | None = None
 
     @property
     def dead(self) -> bool:
@@ -80,6 +86,7 @@ class QwenRealtimeBridge:
         self._ws, self.session_id = await connect_qwen(self._api_url, self._token, self._system_prompt, QWEN_COORDINATION_TOOLS)
         self._started = True
         self._recv_task = asyncio.create_task(self._recv_loop())
+        self._sender_task = asyncio.create_task(self._sender_loop())
 
     async def feed_pcm(self, pcm: bytes) -> None:
         if self._closed or self._dead:
@@ -87,24 +94,44 @@ class QwenRealtimeBridge:
         if not self._started:
             await self.start()
         if self._ws is None:
-            # 断线窗口（退避重连中）：丢弃并计数，节流日志（≥2s 一条），不向 20ms 高频调用方抛异常
+            # 断线窗口（退避重连中）：入口即丢——入队只会占槽位，重连后帧已过时。
+            # 丢弃并计数，节流日志（≥2s 一条），不向 20ms 高频调用方抛异常。
             self.dropped_frames += 1
             now = time.time()
             if now - self._last_drop_log >= 2.0:
                 self._last_drop_log = now
                 logger.warning("qwen link down, drop uplink frame #%d", self.dropped_frames)
             return
+        # 有界入队即返回：慢网时 sender 消化慢，在此丢旧保新（绝不阻塞调用方）
         try:
-            await self._ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()}))
-        except Exception as exc:  # noqa: BLE001
-            if self._closed or self._dead:
-                return
-            # 发送失败 = 链路断：标记断链并交退避调度器（recv 循环也会感知退出）
-            logger.warning("qwen uplink send failed (%s), scheduling reconnect", exc)
-            self._last_error = str(exc)
-            self._ws = None
-            self.dropped_frames += 1
-            self._scheduler.schedule()
+            self._send_q.put_nowait(pcm)
+        except asyncio.QueueFull:
+            try:
+                self._send_q.get_nowait()   # 丢最旧
+                self.dropped_frames += 1
+            except asyncio.QueueEmpty:
+                pass
+            self._send_q.put_nowait(pcm)
+
+    async def _sender_loop(self) -> None:
+        while not self._closed and not self._dead:
+            pcm = await self._send_q.get()
+            ws = self._ws
+            if ws is None:
+                # 断线窗口：积压帧已过时（重连后会话上下文已变），丢弃不补发
+                self.dropped_frames += 1
+                continue
+            try:
+                await ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()}))
+            except Exception as exc:  # noqa: BLE001
+                if self._closed or self._dead:
+                    return
+                # 发送失败 = 链路断：标记断链并交退避调度器（recv 循环也会感知退出）
+                logger.warning("qwen uplink send failed (%s), scheduling reconnect", exc)
+                self._last_error = str(exc)
+                self._ws = None
+                self.dropped_frames += 1
+                self._scheduler.schedule()
 
     async def _recv_loop(self) -> None:
         # ws 作快照：循环期间 _ws 可能被发送路径置 None（同一断链事件）
@@ -260,6 +287,8 @@ class QwenRealtimeBridge:
             self._tool_worker_task.cancel()
         if self._recv_task:
             self._recv_task.cancel()
+        if self._sender_task:
+            self._sender_task.cancel()
         if self._ws:
             await self._ws.close()
         self._ws = None
