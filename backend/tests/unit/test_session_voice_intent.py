@@ -114,10 +114,13 @@ async def test_barge_in_clears_router(stub_apm):
     # AI 文本 delta（部分回复）
     await s._on_text("正在生成的旧回复文本")
 
-    # 用户高能量帧打断（RMS > 800）
+    # 用户高能量帧打断（RMS > 800）——2026-09-07 防误杀加固后的新契约：
+    # 需越过宽限期（老化 _down_speaking_since）+ 连续 3 帧高能量（持续语音确认）
     # 0x4000 = 16384，RMS ≈ 16384，远超 800
     loud_pcm = b"\x00\x40" * 320
-    await s.on_up_audio(loud_pcm)
+    s._down_speaking_since -= 1.0   # 模拟起播已超过宽限期
+    for _ in range(3):
+        await s.on_up_audio(loud_pcm)
     await asyncio.sleep(0.05)
 
     assert s._barge_in is True, "应触发 barge-in"

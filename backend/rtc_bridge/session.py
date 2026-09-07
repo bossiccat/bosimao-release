@@ -82,6 +82,8 @@ class PeerVoiceSession:
         on_apm_cancelled: Callable[[bool], Awaitable[None]] | None = None,
         session_id: str = "",
         new_reply_gap_s: float = DEFAULT_NEW_REPLY_GAP_S,
+        barge_grace_s: float = 0.5,
+        barge_sustain_frames: int = 3,
     ) -> None:
         self.device_id = device_id
         self.room_id = room_id
@@ -126,9 +128,15 @@ class PeerVoiceSession:
         self._closed = False
         self._started = False
         # 服务端 barge-in（v0.6.7 P0）：用户开口打断 AI 播报
+        # 2026-09-07 防误杀加固：真机实锤起播 21ms 即被回声瞬态开窗掐死回复
+        # （logs/rtc_bridge_app.log 15:00:41.931→41.952），加宽限期 + 持续语音确认
         self._barge_in = False          # 打断窗口标志（用户说话中）
         self._last_down_ts = 0.0        # 最近一次下行音频时间（AI 说话中判定）
         self._down_speaking = False     # AI 播报中（down 持续流动）
+        self._down_speaking_since = 0.0  # 本轮播报起始时刻（宽限期判定基准）
+        self._barge_run = 0             # 连续高能量帧计数（持续语音确认）
+        self._barge_grace_s = barge_grace_s
+        self._barge_sustain_frames = max(1, barge_sustain_frames)
         self._barge_drops = 0           # 打断丢弃的下行帧计数
         self._last_down_check = 0.0     # 上行 RMS 检查限流
         self._last_up_rms_log = 0.0     # 上行 RMS 调试日志限流（2s 一次，排查"千问无响应"）
@@ -220,18 +228,31 @@ class PeerVoiceSession:
         self.last_activity_ts = time.time()
         self.stats["up_frames"] += 1
         self.stats["up_bytes"] += len(pcm)
-        # 服务端 barge-in：AI 播报中用户开口（高能量帧）→ 立即清空下行队列 + 打断窗口
+        # 服务端 barge-in：AI 播报中用户开口（高能量帧）→ 清空下行队列 + 打断窗口
+        # 2026-09-07 加固（真机实锤 21ms 误杀）：
+        # ① 宽限期：起播后 _barge_grace_s 内不开窗——AEC 残差回声瞬态集中在起播瞬间；
+        # ② 持续语音：连续 _barge_sustain_frames 帧高能量才开窗——单帧尖峰（咔哒/截断
+        #    噪声）不触发；安静帧打断序列即归零。
+        # 真实打断代价：反应延迟增加 (sustain-1)×20ms ≈ 40ms，远小于行业 300ms 标准。
         now = time.time()
         if (self._down_speaking and not self._barge_in
-                and now - self._last_down_check >= 0.02 and pcm_rms(pcm) > 800.0):
-            self._barge_in = True
-            self._apm_barge_drops_reset()
-            self.shaper.reset()   # 清空未推送的下行帧（正在播的 20ms 帧自然播完）
-            if self._router is not None:
-                self._router.clear()   # 丢弃被中断的 AI 文本（不路由到 Brain）
-            # P0-5/F4：丢弃窗口开窗打点（判定"下行丢弃窗口误开"假设 C）
-            logger.info("[lat] barge_in open mono=%.3f", now)
-            logger.info("barge-in: user speech during AI playback, downlink flushed")
+                and pcm_rms(pcm) > 800.0):
+            if now - self._down_speaking_since >= self._barge_grace_s:
+                self._barge_run += 1
+                if self._barge_run >= self._barge_sustain_frames:
+                    self._barge_in = True
+                    self._barge_run = 0
+                    self._apm_barge_drops_reset()
+                    self.shaper.reset()   # 清空未推送的下行帧（正在播的 20ms 帧自然播完）
+                    if self._router is not None:
+                        self._router.clear()   # 丢弃被中断的 AI 文本（不路由到 Brain）
+                    # P0-5/F4：丢弃窗口开窗打点（判定"下行丢弃窗口误开"假设 C）
+                    logger.info("[lat] barge_in open mono=%.3f", now)
+                    logger.info("barge-in: user speech during AI playback, downlink flushed")
+            else:
+                self._barge_run = 0   # 宽限期内高能量=回声瞬态，不计入持续序列
+        else:
+            self._barge_run = 0
         if self._barge_in:
             self._last_down_check = now
         if now - self._last_up_rms_log >= 2.0:
@@ -303,6 +324,9 @@ class PeerVoiceSession:
             self.stats["marker_tail_drops"] += 1
             now = time.time()
             self._last_down_ts = now
+            if not self._down_speaking:
+                self._down_speaking_since = now
+                self._barge_run = 0
             self._down_speaking = True
             return
         now = time.time()
@@ -312,6 +336,9 @@ class PeerVoiceSession:
             self.stats["down_dropped_barge"] = self._barge_drops
             return
         self._last_down_ts = now
+        if not self._down_speaking:
+            self._down_speaking_since = now
+            self._barge_run = 0
         self._down_speaking = True
         self.stats["down_frames"] += 1
         self.stats["down_bytes"] += len(pcm)
