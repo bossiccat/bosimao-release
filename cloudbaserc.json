@@ -1,0 +1,11 @@
+{
+  "envId": "jinhong-d2g55ycl591208475",
+  "cloudrun": {
+    "name": "jax-voice-api",
+    "dockerfilePath": "cloudapi/Dockerfile",
+    "buildDir": "./",
+    "containerPort": 9000,
+    "minNum": 0,
+    "maxNum": 2
+  }
+}

@@ -1,0 +1,9 @@
+# jax-voice-api 构建上下文白名单。
+# 构建上下文 = 仓库根（cloudapi/Dockerfile 需要 COPY backend/app），但仓库里有
+# target/node_modules/.worktrees/outputs 等数 GB 产物，全量上传会拖垮构建。
+# 因此默认排除一切，只放行运行镜像真正需要的三棵受跟踪目录。
+# 注意：新增任何运行时依赖目录都必须在此显式放行，否则构建会 COPY 失败（fail-closed）。
+*
+!backend/app/**
+!cloudapi/**
+!cloudbase/**
