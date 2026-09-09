@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,10 @@ from app.voice.control_plane import (
     SessionLedger,
 )
 from app.voice.storage import VoiceStore
+from app.voice.user_sig_cipher import UserSigCipher
+
+
+TEST_KEY = hashlib.sha256(b"task-b-user-sig-cipher-test-key").digest()
 
 
 ACK_NAMES = (
@@ -42,7 +47,8 @@ ACK_REPORTERS_BY_NAME = {
 def _ledger_factory(tmp_path: Path) -> SessionLedger:
     store = VoiceStore(tmp_path / "voice.db")
     store.initialize()
-    return SessionLedger(store)
+    # wake 路径要求显式注入 userSig 加密器（缺注入即 fail-closed）
+    return SessionLedger(store, user_sig_cipher=UserSigCipher(TEST_KEY))
 
 
 def _session(ledger: Any, *, generation: int = 7) -> dict[str, Any]:

@@ -75,6 +75,7 @@ def _build_secured_session_router():
     from .voice.rate_limit import RateLimitConfig, RateLimiter
     from .voice.rtc_session import RtcSessionConfig, RtcSessionService
     from .voice.storage import VoiceStore
+    from .voice.user_sig_cipher import build_user_sig_cipher
     from .brain.agent_thread_registry import AgentThreadRegistry
     from .api.routes_agent_threads import create_agent_thread_router
 
@@ -119,6 +120,11 @@ def _build_secured_session_router():
     )
     store = VoiceStore(Path(settings.voice_db_path))
     store.initialize()
+    # wake userSig 静态加密：密钥只从注入配置来（VOICE_USER_SIG_CIPHER_KEY，base64 32B）。
+    # 未配置 → None → wake 签发 fail-closed（不退化成明文落库）。
+    user_sig_cipher = build_user_sig_cipher(
+        settings.voice_user_sig_cipher_key, logger=logging.getLogger(__name__)
+    )
     service = RtcSessionService(
         RtcSessionConfig(
             sdk_app_id=settings.trtc_sdkappid,
@@ -161,6 +167,7 @@ def _build_secured_session_router():
         hello_service=hello_runtime.service,
         hello_certificate_binding=hello_runtime.certificate_binding,
         hello_gateway_assertion_hash=hello_runtime.gateway_assertion_hash,
+        user_sig_cipher=user_sig_cipher,
     )
     secured_router.include_router(create_agent_thread_router(
         registry=AgentThreadRegistry(), validator=validator,

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 class SecuredVoiceDeps:
     def __init__(self, store, service, validator, nonces, limiter, security, devices,
-                 privacy: PrivacyService, hello_service) -> None:
+                 privacy: PrivacyService, hello_service, user_sig_cipher=None) -> None:
         self.store = store
         self.service = service
         self.validator = validator
@@ -32,7 +32,8 @@ class SecuredVoiceDeps:
             if hello_service is not None else None
         )
         from ..voice.control_plane import SessionLedger
-        self.ledger = SessionLedger(store)
+        # user_sig_cipher 由上层注入（密钥来自 env/Secret）；None 时 wake 签发 fail-closed。
+        self.ledger = SessionLedger(store, user_sig_cipher=user_sig_cipher)
 
     def runtime_missing(self) -> list[str]:
         return runtime_missing(self.security)

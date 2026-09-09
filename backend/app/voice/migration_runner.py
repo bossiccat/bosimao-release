@@ -15,6 +15,7 @@ MIGRATIONS = (
     "005_control_plane_ledger.sql",
     "006_wake_events.sql",
     "007_hello_proofs.sql",
+    "008_wake_events_user_sig_cipher.sql",
 )
 
 

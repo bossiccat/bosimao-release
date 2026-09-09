@@ -1,6 +1,7 @@
 """Shared real FastAPI/SQLite fixture for secured voice route tests."""
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,12 @@ from app.voice.nonce import NonceService
 from app.voice.rate_limit import RateLimitConfig, RateLimiter
 from app.voice.rtc_session import RtcSessionConfig, RtcSessionService
 from app.voice.storage import VoiceStore
+from app.voice.user_sig_cipher import UserSigCipher
+
+# wake 路径要求注入 userSig 加密器（未注入 → consume_wake fail-closed）
+TEST_USER_SIG_CIPHER = UserSigCipher(
+    hashlib.sha256(b"task-b-user-sig-cipher-test-key").digest()
+)
 
 DEVICE_A = "dev-a-000000000000000000000001"
 DEVICE_B = "dev-b-000000000000000000000002"
@@ -111,6 +118,7 @@ class VoiceSecurityFixture:
                 security=security,
                 hello_service=self.hello_service,
                 hello_certificate_binding="sha256:test-gateway-binding",
+                user_sig_cipher=TEST_USER_SIG_CIPHER,
             )
         )
         self.client = TestClient(self.app)

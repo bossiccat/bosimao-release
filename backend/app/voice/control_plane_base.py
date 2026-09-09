@@ -38,10 +38,13 @@ class InvalidTerminationState(Exception):
 
 
 class LedgerBase:
-    def __init__(self, store: VoiceStore) -> None:
+    def __init__(self, store: VoiceStore, *, user_sig_cipher: Any = None) -> None:
         if not isinstance(store, VoiceStore):
             raise TypeError("SessionLedger requires an existing VoiceStore")
         self.store = store
+        # userSig 静态加密器必须显式注入（密钥来自 KMS/Secret/env）。None 时
+        # consume_wake() 一律 fail-closed，绝不退化成明文落库。
+        self.user_sig_cipher = user_sig_cipher
 
     def initialize(self) -> None:
         self.store.initialize()

@@ -21,6 +21,7 @@ def create_secured_voice_router(
     nonces: NonceService, limiter: RateLimiter, security: VoiceSecurityConfig,
     devices=None, privacy: PrivacyService | None = None, hello_service=None,
     hello_certificate_binding: str = "", hello_gateway_assertion_hash: str = "",
+    user_sig_cipher=None,
 ) -> APIRouter:
     production_gate(security)
     if privacy is None:
@@ -28,6 +29,7 @@ def create_secured_voice_router(
     deps = SecuredVoiceDeps(
         store, service, validator, nonces, limiter, security,
         devices, privacy, hello_service,
+        user_sig_cipher=user_sig_cipher,
     )
     router = APIRouter(tags=["voice"])
 

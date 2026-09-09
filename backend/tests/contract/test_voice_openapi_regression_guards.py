@@ -27,6 +27,7 @@ from jsonschema import RefResolver
 from openapi_schema_validator import OAS30Validator, oas30_format_checker
 
 from app.voice.control_plane import SessionLedger, VoiceStore
+from app.voice.user_sig_cipher import UserSigCipher
 
 ROOT = Path(__file__).resolve().parents[3]
 OPENAPI_PATH = ROOT / "docs" / "api" / "commercial-voice-openapi.yaml"
@@ -73,7 +74,12 @@ def _make_client(tmp_path: Path) -> tuple[TestClient, SessionLedger]:
 
     store = VoiceStore(tmp_path / "voice.db")
     store.initialize()
-    ledger = SessionLedger(store)
+    ledger = SessionLedger(
+        store,
+        user_sig_cipher=UserSigCipher(
+            hashlib.sha256(b"task-b-user-sig-cipher-test-key").digest()
+        ),
+    )
     service = RtcSessionService(
         RtcSessionConfig(sdk_app_id=1600155678,
                          secret_key="fake-secret-key-for-test-only-0123456789",

@@ -10,6 +10,7 @@ date-time 序列化（terminal_at / expires_at）与 OpenAPI 声明的 format �
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,12 @@ from jsonschema import RefResolver
 from openapi_schema_validator import OAS30Validator, oas30_format_checker
 
 from app.voice.control_plane import SessionLedger, VoiceStore
+from app.voice.user_sig_cipher import UserSigCipher
+
+# wake 路径要求注入 userSig 加密器（未注入 → fail-closed 拒绝签发）
+_TEST_USER_SIG_CIPHER = UserSigCipher(
+    hashlib.sha256(b"task-b-user-sig-cipher-test-key").digest()
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 OPENAPI_PATH = ROOT / "docs" / "api" / "commercial-voice-openapi.yaml"
@@ -58,7 +65,7 @@ def _make_client(tmp_path: Path) -> tuple[TestClient, SessionLedger]:
 
     store = VoiceStore(tmp_path / "voice.db")
     store.initialize()
-    ledger = SessionLedger(store)
+    ledger = SessionLedger(store, user_sig_cipher=_TEST_USER_SIG_CIPHER)
     service = RtcSessionService(
         RtcSessionConfig(sdk_app_id=1600155678,
                          secret_key="fake-secret-key-for-test-only-0123456789",

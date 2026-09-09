@@ -201,6 +201,9 @@ class Settings(BaseSettings):
     voice_token: str = ""
     # LAN 直连 E2EE 密钥（32B base64 或明文 passphrase，SHA-256 派生；App VoiceCipher 对齐）
     voice_e2ee_key: str = ""
+    # wake userSig 静态加密密钥（base64，解码后必须正好 32 字节 / AES-256）。
+    # 由 KMS 或部署 Secret 注入；留空时 wake 签发 fail-closed 拒绝（不退化明文落库）。
+    voice_user_sig_cipher_key: str = ""
 
     trtc_sdkappid: int = 0
     trtc_secretkey: str = ""

@@ -8,6 +8,7 @@ Bearer/nonce/限流（这些由 secured 路由既有测试覆盖），本文件�
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,12 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.voice.control_plane import SessionLedger, VoiceStore
+from app.voice.user_sig_cipher import UserSigCipher
+
+# wake 路径要求注入 userSig 加密器（未注入 → fail-closed 拒绝签发）
+_TEST_USER_SIG_CIPHER = UserSigCipher(
+    hashlib.sha256(b"task-b-user-sig-cipher-test-key").digest()
+)
 
 ACK_NAMES = (
     "android_trtc_left",
@@ -34,7 +41,7 @@ def _make_client(tmp_path: Path) -> tuple[TestClient, SessionLedger]:
 
     store = VoiceStore(tmp_path / "voice.db")
     store.initialize()
-    ledger = SessionLedger(store)
+    ledger = SessionLedger(store, user_sig_cipher=_TEST_USER_SIG_CIPHER)
     service = RtcSessionService(
         RtcSessionConfig(sdk_app_id=1600155678,
                          secret_key="fake-secret-key-for-test-only-0123456789",
@@ -426,7 +433,7 @@ def _make_ack_client(tmp_path: Path, reporter: str) -> tuple[TestClient, Session
 
     store = VoiceStore(tmp_path / "voice.db")
     store.initialize()
-    ledger = SessionLedger(store)
+    ledger = SessionLedger(store, user_sig_cipher=_TEST_USER_SIG_CIPHER)
     app = FastAPI()
     app.include_router(
         build_termination_router(ledger=ledger, reporter_resolver=lambda request: reporter)
@@ -899,7 +906,7 @@ def _make_guarded_client(tmp_path: Path) -> tuple[TestClient, SessionLedger]:
 
     store = VoiceStore(tmp_path / "voice.db")
     store.initialize()
-    ledger = SessionLedger(store)
+    ledger = SessionLedger(store, user_sig_cipher=_TEST_USER_SIG_CIPHER)
     service = RtcSessionService(
         RtcSessionConfig(sdk_app_id=1600155678,
                          secret_key="fake-secret-key-for-test-only-0123456789",
