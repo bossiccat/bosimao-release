@@ -196,6 +196,14 @@ class PostgresVoiceStore:
             self._pool = self._open_default_pool()
         return self._pool
 
+    def open_pool(self) -> Any:
+        """装配期就把池建出来（psycopg 缺失在此 fail-closed，而非首次请求才炸）。
+
+        psycopg_pool 以 `open=False` 构造，不会在装配期真正建连；注入了
+        `pool=` / `pool_factory=` 时直接返回既有池，无副作用。
+        """
+        return self._ensure_pool()
+
     def _open_default_pool(self) -> Any:
         try:
             from psycopg_pool import ConnectionPool

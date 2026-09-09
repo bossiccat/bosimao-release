@@ -37,6 +37,10 @@ from app.voice.devices import DeviceService  # noqa: E402
 from app.voice.nonce import NonceService  # noqa: E402
 from app.voice.rate_limit import RateLimitConfig, RateLimiter  # noqa: E402
 from app.voice.rtc_session import RtcSessionConfig, RtcSessionService  # noqa: E402
+from app.voice.store_factory import (  # noqa: E402
+    build_voice_store,
+    shutdown_voice_store,
+)
 from app.api.routes_voice_secured import create_secured_voice_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
@@ -86,15 +90,13 @@ validate_voice_storage(
     storage_backend=settings.voice_storage_backend,
     database_url=settings.voice_database_url,
 )
-if settings.voice_production:
-    # PostgreSQL adapter 尚未接入该入口：宁可拒绝启动，也不 silently 回退本地存储。
-    raise ProductionGateError(
-        "production PostgreSQL adapter is not wired into the voice entrypoint"
-    )
+# production PostgreSQL adapter：已由 app.voice.store_factory 装配进本入口——
+# DSN 必须是 postgresql://，psycopg 缺失抛 PsycopgNotAvailableError，
+# 绝不 silently 回退本地存储；非生产才走下面的 SQLite 夹具。
 
 
 def _build_store():
-    """development-only store fixture（生产路径在上面已 fail-closed 拒绝启动）。"""
+    """development-only store fixture（仅非生产路径使用）。"""
     from app.voice.storage import VoiceStore
 
     fixture = VoiceStore(Path(settings.voice_db_path))
@@ -102,7 +104,7 @@ def _build_store():
     return fixture
 
 
-store = _build_store()
+store = build_voice_store(settings, sqlite_factory=_build_store)
 
 service = RtcSessionService(
     RtcSessionConfig(
@@ -124,7 +126,22 @@ secured_router = create_secured_voice_router(
     # hello_service=None：hello（PC 桥 mTLS 绑定）不上云；privacy 用容器内默认（no-op actions）
 )
 
-app = FastAPI(title="jax-voice-api", version="1.0.0", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """优雅关闭：生产路径的 PG 连接池必须释放（SQLite 夹具无 close，no-op）。"""
+    try:
+        yield
+    finally:
+        await shutdown_voice_store(store)
+
+
+app = FastAPI(
+    title="jax-voice-api",
+    version="1.0.0",
+    docs_url=None,
+    redoc_url=None,
+    lifespan=lifespan,
+)
 app.include_router(secured_router)
 
 

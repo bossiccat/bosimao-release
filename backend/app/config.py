@@ -214,6 +214,12 @@ class Settings(BaseSettings):
     voice_storage_backend: str = "sqlite"
     voice_database_url: str = ""
     voice_db_path: str = str(PROJECT_ROOT / "backend" / "data" / "voice.db")
+    # PostgreSQL 连接池（生产装配路径）。默认值必须非 0/非空；
+    # app/voice/pg_storage.py 的 PostgresPoolConfig 会再校验一遍（含 max>=min）。
+    voice_pg_pool_min_size: int = 1
+    voice_pg_pool_max_size: int = 10
+    voice_pg_connect_timeout_s: float = 5.0
+    voice_pg_max_idle_s: float = 300.0
     voice_owner_credential: str = ""      # 本机 owner 凭证（配对码生成用）
     voice_sidecar_credential: str = ""    # 独立 sidecar 当前凭证（不得与 device 复用）
     voice_sidecar_credential_next: str = ""

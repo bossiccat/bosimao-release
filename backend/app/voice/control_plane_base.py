@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Any
 
-from .storage import VoiceStore
+from .pg_storage import VoiceStoreProtocol
 
 ACKNOWLEDGEMENTS = (
     "android_trtc_left", "sidecar_trtc_left", "bridge_drained_closed",
@@ -38,8 +38,10 @@ class InvalidTerminationState(Exception):
 
 
 class LedgerBase:
-    def __init__(self, store: VoiceStore, *, user_sig_cipher: Any = None) -> None:
-        if not isinstance(store, VoiceStore):
+    def __init__(self, store: VoiceStoreProtocol, *, user_sig_cipher: Any = None) -> None:
+        # 结构性校验（runtime_checkable Protocol）：SQLite VoiceStore 与
+        # PostgresVoiceStore 都满足，靠继承造假的无关对象仍然被拒。
+        if not isinstance(store, VoiceStoreProtocol):
             raise TypeError("SessionLedger requires an existing VoiceStore")
         self.store = store
         # userSig 静态加密器必须显式注入（密钥来自 KMS/Secret/env）。None 时

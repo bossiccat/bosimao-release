@@ -41,6 +41,7 @@ from .utils.crash_reporter import (
 from .utils.logger import setup_logging
 from .voice.config import load_voice
 from .voice.auth import CredentialValidator
+from .voice.store_factory import build_voice_store, shutdown_voice_store
 from .voice.privacy import privacy_runtime
 from .voice.trusted_gateway import TrustedGatewayIdentityMiddleware
 
@@ -51,14 +52,12 @@ logger = logging.getLogger(__name__)
 install_crash_hooks(app_config.settings.app_version)
 
 
-def _build_secured_session_router():
+def _build_secured_session_router(store=None):
     """商业语音安全签发路由（ADR-014 fail-closed）
 
     production=True 且缺 TLS/owner/sidecar/nonce/限流/TRTC 任一 → 拒绝启动；
     非生产也绝不装配匿名签发（缺凭据时端点运行时返回 50300）。
     """
-    from pathlib import Path
-
     from .voice.auth import CredentialValidator
     from .voice.config import (
         ProductionGateError,
@@ -74,7 +73,6 @@ def _build_secured_session_router():
     from .voice.privacy import PrivacyRuntimeActions, PrivacyService
     from .voice.rate_limit import RateLimitConfig, RateLimiter
     from .voice.rtc_session import RtcSessionConfig, RtcSessionService
-    from .voice.storage import VoiceStore
     from .voice.user_sig_cipher import build_user_sig_cipher
     from .brain.agent_thread_registry import AgentThreadRegistry
     from .api.routes_agent_threads import create_agent_thread_router
@@ -118,8 +116,8 @@ def _build_secured_session_router():
         trtc_sdk_app_id=settings.trtc_sdkappid,
         trtc_secret_key=settings.trtc_secretkey,
     )
-    store = VoiceStore(Path(settings.voice_db_path))
-    store.initialize()
+    if store is None:
+        store = build_voice_store(settings)
     # wake userSig 静态加密：密钥只从注入配置来（VOICE_USER_SIG_CIPHER_KEY，base64 32B）。
     # 未配置 → None → wake 签发 fail-closed（不退化成明文落库）。
     user_sig_cipher = build_user_sig_cipher(
@@ -263,6 +261,8 @@ async def lifespan(app: FastAPI):
         await orch.stop()
         await client.close()
         await deepseek.close()
+        # 生产路径的 PG 连接池必须随应用关闭释放（SQLite 夹具无 close，no-op）
+        await shutdown_voice_store(getattr(app.state, "voice_store", None))
 
 
 app = FastAPI(
@@ -311,8 +311,12 @@ app.include_router(routes_capture.router)
 app.include_router(routes_brain.router)
 
 # 商业语音安全签发（ADR-012/014 + SPEC §5）：Bearer/nonce/限流/fail-closed，
-# 不装配匿名 /session 与 /session/sign；production 缺必需能力时拒绝启动
-app.include_router(_build_secured_session_router())
+# 不装配匿名 /session 与 /session/sign；production 缺必需能力时拒绝启动。
+# store 在此处装配（生产=PostgreSQL，非生产=SQLite 夹具），并挂到 app.state
+# 供 lifespan 优雅释放连接池。
+voice_store = build_voice_store(app_config.settings)
+app.state.voice_store = voice_store
+app.include_router(_build_secured_session_router(store=voice_store))
 
 
 # A10（2026-08-21 numpy 事故）：/health 带进程身份签名。
