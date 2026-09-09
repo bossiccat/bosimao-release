@@ -7,3 +7,6 @@
 !backend/app/**
 !cloudapi/**
 !cloudbase/**
+# 运行时配置：app/_frozen_paths.project_root() 在容器内推导为 /，CONFIG_DIR 即 /config，
+# cloudapi/Dockerfile 会 COPY config /config。不放行则构建直接失败（实测 build_failed）。
+!config/**
