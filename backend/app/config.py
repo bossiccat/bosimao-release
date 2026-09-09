@@ -206,6 +206,10 @@ class Settings(BaseSettings):
     trtc_secretkey: str = ""
     trtc_room_prefix: str = "jax-"
 
+    # SQLite is a development/test fixture only. Production must provide a
+    # PostgreSQL URL and a wired PostgresVoiceStore adapter before startup.
+    voice_storage_backend: str = "sqlite"
+    voice_database_url: str = ""
     voice_db_path: str = str(PROJECT_ROOT / "backend" / "data" / "voice.db")
     voice_owner_credential: str = ""      # 本机 owner 凭证（配对码生成用）
     voice_sidecar_credential: str = ""    # 独立 sidecar 当前凭证（不得与 device 复用）
@@ -222,6 +226,7 @@ class Settings(BaseSettings):
     voice_hello_public_key_pem: str = ""        # rtc_bridge redemption verifier PEM
     voice_rtc_bridge_cert_binding: str = ""     # trusted gateway derived certificate binding
     voice_gateway_shared_assertion: str = ""    # internal gateway assertion, never client-derived
+    voice_trusted_gateway_hosts: str = "127.0.0.1,::1"  # 受信反向代理来源（云端边缘网关需显式声明）
 
     log_level: str = "INFO"
 

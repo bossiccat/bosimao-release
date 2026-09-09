@@ -187,6 +187,36 @@ class ProductionGateError(RuntimeError):
     """生产 fail-closed：缺少任一项必需能力时拒绝启动"""
 
 
+def validate_voice_storage(
+    *,
+    production: bool,
+    storage_backend: str,
+    database_url: str,
+) -> list[str]:
+    """Validate the durable voice storage boundary before application startup.
+
+    SQLite remains available only as an explicit development/test fixture. A
+    production process must name PostgreSQL and provide a private connection
+    URL; callers must still wire a real PostgreSQL adapter before serving
+    requests.
+    """
+    backend = (storage_backend or "").strip().lower()
+    if backend not in {"sqlite", "postgresql"}:
+        raise ProductionGateError("unsupported voice storage backend")
+    if not production:
+        return []
+    if backend != "postgresql":
+        raise ProductionGateError(
+            "production voice storage must use postgresql; refusing sqlite"
+        )
+    dsn = (database_url or "").strip().lower()
+    if not dsn or not dsn.startswith(("postgresql://", "postgres://")):
+        raise ProductionGateError(
+            "production PostgreSQL database URL is missing or invalid"
+        )
+    return []
+
+
 def validate_production(security: VoiceSecurityConfig) -> list[str]:
     """返回缺失项清单；空列表 = 生产安全能力完备"""
     missing: list[str] = []

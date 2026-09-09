@@ -1,0 +1,18 @@
+{
+  "service": "jax-voice-api",
+  "build_context": ".",
+  "dockerfile": "cloudapi/Dockerfile",
+  "entrypoint": "cloudapi/main.py",
+  "source_policy": "tracked_git_only",
+  "required_paths": [
+    "cloudapi/CANONICAL_SOURCE.json",
+    "cloudapi/Dockerfile",
+    "cloudapi/main.py",
+    "cloudapi/requirements.txt",
+    "cloudbase/migrations"
+  ],
+  "forbidden_paths": [
+    "deploy/backend",
+    "deploy/backend/Dockerfile"
+  ]
+}

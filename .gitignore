@@ -9,7 +9,12 @@ venv/
 .mypy_cache/
 
 # 环境变量与密钥
+# 审计 2026-09-08 P0：.env.backup-* 曾未被覆盖（git status 以 ?? 暴露，含 TRTC
+# 密钥与全部 VOICE_* 凭证/hello 密钥对）。任何 .env 变体一律忽略，杜绝一次
+# `git add -A` 把生产凭证写进历史。
 .env
+.env.*
+!.env.example
 
 # 模型与临时文件
 models/
@@ -70,6 +75,8 @@ pet-ui/src-tauri/gen/
 certs/*.key
 certs/*.csr
 certs/*.srl
+# 审计 2026-09-08：换证备份（server.key.backup-*，含私钥）同样不得入库
+certs/*.backup*
 
 # 2026-09-01（安全修复）：上面三条带斜杠，锚定在仓库根，覆盖不到子目录里的
 # certs/（如 _red_check/certs/ 曾含 ca.key/client.key/server.key 三把私钥且
@@ -133,3 +140,9 @@ artifacts/release-evidence/
 
 # 根目录空 lockfile（误生成，非项目依赖）
 /package-lock.json
+
+# CloudRun canonical source 边界（cloudapi/CANONICAL_SOURCE.json 的 forbidden_paths）：
+# deploy/backend 是未被跟踪的旧 SQLite 构建树，会绕过 PostgreSQL fail-closed 门禁。
+# 永久忽略，杜绝误提交进入 jax-voice-api 候选包。见 .github/workflows/release-governance.yml
+# 的 "Verify CloudRun canonical source is tracked" 步骤。
+/deploy/backend/

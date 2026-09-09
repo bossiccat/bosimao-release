@@ -1,0 +1,10 @@
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+pydantic>=2.7,<3
+pydantic-settings>=2.2,<3
+PyYAML>=6,<7
+
+# 正式持久化：CloudBase PostgreSQL（同步 psycopg 3 + 连接池）。
+# binary extra 提供 manylinux wheel，容器内无需编译工具链；pool extra 提供 ConnectionPool。
+# 版本固定到补丁级，镜像构建流水线必须校验 import psycopg / psycopg_pool 成功。
+psycopg[binary,pool]==3.2.13

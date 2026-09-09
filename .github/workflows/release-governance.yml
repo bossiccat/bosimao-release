@@ -17,6 +17,20 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Verify CloudRun canonical source is tracked
+        # jax-voice-api 只允许由 tracked canonical source 构建；未跟踪的旧树不得进入候选包
+        run: |
+          set -euo pipefail
+          git ls-files --error-unmatch cloudapi/CANONICAL_SOURCE.json
+          git ls-files --error-unmatch cloudapi/Dockerfile
+          git ls-files --error-unmatch cloudapi/main.py
+          git ls-files --error-unmatch cloudapi/requirements.txt
+          git ls-files --error-unmatch cloudbase/migrations
+          # deploy/backend 是 forbidden legacy source tree（绕过 PostgreSQL 门禁），永不允许被跟踪
+          if git ls-files --error-unmatch deploy/backend >/dev/null 2>&1; then
+            echo "forbidden CloudRun source tree is tracked: deploy/backend" >&2
+            exit 1
+          fi
       - name: Build immutable release candidate
         run: >-
           git archive --format=tar.gz

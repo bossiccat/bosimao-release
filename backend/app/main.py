@@ -66,6 +66,7 @@ def _build_secured_session_router():
         SidecarCredentialHashSet,
         VoiceSecurityConfig,
         build_sidecar_credential_hashes,
+        validate_voice_storage,
     )
     from .voice.devices import DeviceService
     from .voice.hello_runtime import build_hello_runtime
@@ -78,6 +79,17 @@ def _build_secured_session_router():
     from .api.routes_agent_threads import create_agent_thread_router
 
     settings = app_config.settings
+    validate_voice_storage(
+        production=settings.voice_production,
+        storage_backend=settings.voice_storage_backend,
+        database_url=settings.voice_database_url,
+    )
+    if settings.voice_production:
+        # The PostgreSQL adapter is intentionally fail-closed until the
+        # connection pool and repository contract are wired into this entrypoint.
+        raise ProductionGateError(
+            "production PostgreSQL adapter is not wired into the voice entrypoint"
+        )
     sidecar_credentials: SidecarCredentialHashSet | None = None
     sidecar_hash = ""
     try:
@@ -279,6 +291,11 @@ app.add_middleware(
         ) if app_config.settings.voice_gateway_shared_assertion else ""
     ),
     certificate_binding=app_config.settings.voice_rtc_bridge_cert_binding,
+    allowed_hosts=[
+        host.strip()
+        for host in app_config.settings.voice_trusted_gateway_hosts.split(",")
+        if host.strip()
+    ],
 )
 
 app.include_router(routes_status.router)
