@@ -20,6 +20,17 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Protocol, runtime_checkable
 
+from .repositories import audit as _audit
+from .repositories import device_credentials as _dc
+from .repositories import hello_proofs as _hello_proofs
+from .repositories import nonces as _nonces
+from .repositories import pairing_codes as _pc
+from .repositories import pending_sessions as _pending
+from .repositories import rate_limit as _rl
+from .repositories import settings as _settings
+from .sql_dialect import POSTGRES_DIALECT
+from .store_facade import VoiceStoreFacade
+
 __all__ = [
     "VoiceStoreProtocol",
     "PostgresPoolConfig",
@@ -73,12 +84,16 @@ class PsycopgNotAvailableError(PostgresVoiceStoreError):
 
 @runtime_checkable
 class VoiceStoreProtocol(Protocol):
-    """存储门面的公共最小集。
+    """存储门面的**完整**契约。
 
-    只放 `connect()` 与 `initialize()`：这是 SQLite `VoiceStore` 与
-    `PostgresVoiceStore` 真正共有的部分。`close()` / `aclose()` 是 PG 连接池
-    独有的释放语义，SQLite 侧不存在，因此不进 Protocol（否则 SQLite 侧
-    结构子类型断言会自相矛盾，只能靠继承造假通过）。
+    之所以把 8 个仓库属性与全部直接方法都钉进 Protocol：装配接线
+    （`control_plane_base.py`）用 `isinstance(store, VoiceStoreProtocol)` 做结构
+    校验，若 Protocol 只留 `connect()`/`initialize()`，PG 侧漏掉
+    `hello_proofs`、`pending_sessions` 这类属性也能"通过"，第一个请求才
+    `AttributeError`。钉全了，漏加即启动期拒绝。
+
+    `close()` / `aclose()` 是 PG 连接池独有的释放语义，SQLite 侧不存在，因此不进
+    Protocol（否则 SQLite 侧结构子类型断言会自相矛盾，只能靠继承造假通过）。
     """
 
     def connect(self) -> Any:
@@ -87,6 +102,93 @@ class VoiceStoreProtocol(Protocol):
 
     def initialize(self) -> None:
         """把 schema 推进到可用状态。"""
+        ...
+
+    # ---- 8 个仓库（与 SQLite VoiceStore 同名） ----
+
+    pairing_codes: Any
+    pending_sessions: Any
+    hello_proofs: Any
+    device_credentials: Any
+    nonces: Any
+    rate_limit: Any
+    audit: Any
+    settings: Any
+
+    # ---- 直接方法（与 SQLite VoiceStore 同名同签名） ----
+
+    def save_device(self, device_id: str, secret: str, device_name: str = "phone",
+                    platform: str = "android", expires_at: float | None = None,
+                    now: float | None = None, credential_id: str | None = None) -> None:
+        ...
+
+    def get_device(self, device_id: str) -> Any:
+        ...
+
+    def verify_device_secret(self, device_id: str, secret: str) -> Any | None:
+        ...
+
+    def revoke_device(self, device_id: str, reason: str, now: float | None = None) -> bool:
+        ...
+
+    def list_devices(self) -> list[Any]:
+        ...
+
+    def create_pairing_code(self, owner_id: str, platform: str, ttl_seconds: int,
+                            now: float | None = None) -> tuple[str, dict]:
+        ...
+
+    def consume_pairing_code(self, code: str, device_id: str,
+                             now: float | None = None) -> bool:
+        ...
+
+    def register_device_from_pairing(self, pairing_code: str, device_id: str,
+                                     credential_id: str, device_name: str, platform: str,
+                                     secret: str, expires_at: float,
+                                     now: float | None = None) -> bool:
+        ...
+
+    def record_revoke_confirmation(self, device_id: str, reason: str,
+                                   sessions: list[dict],
+                                   now: float | None = None) -> dict | None:
+        ...
+
+    def consume_nonce(self, subject_id: str, nonce: str, ttl_seconds: int = 300,
+                      now: float | None = None) -> bool:
+        ...
+
+    def purge_expired_nonces(self, now: float | None = None) -> int:
+        ...
+
+    def write_audit(self, action: str, subject_type: str, subject_id: str, result: str,
+                    metadata_redacted_json: dict, now: float | None = None) -> None:
+        ...
+
+    def get_setting(self, key: str) -> str | None:
+        ...
+
+    def set_setting(self, key: str, value: str, now: float | None = None) -> None:
+        ...
+
+    def write_session_event(self, session_id: str, device_id: str, event_type: str,
+                            state: str | None = None, error_code: str | None = None,
+                            metadata: dict | None = None, now: float | None = None) -> None:
+        ...
+
+    def list_session_events(self, device_id: str, limit: int = 50) -> list[dict]:
+        ...
+
+    def enqueue_pending_session(self, session_id: str, device_id: str, room_id: str,
+                                generation: int, expires_at: float,
+                                now: float | None = None) -> None:
+        ...
+
+    def claim_pending_session(self, now: float | None = None) -> dict | None:
+        ...
+
+    def consume_pending_sign_claim(self, session_id: str, device_id: str,
+                                   claim_token: str,
+                                   now: float | None = None) -> dict | None:
         ...
 
 
@@ -158,8 +260,14 @@ def _resolve_row_factory() -> Any:
 # ---------------------------------------------------------------------------
 
 
-class PostgresVoiceStore:
-    """PostgreSQL 存储门面（stage 1：形状 + 连接/事务/释放语义）。"""
+class PostgresVoiceStore(VoiceStoreFacade):
+    """PostgreSQL 存储门面。
+
+    与 SQLite `VoiceStore` 共享同一批 repository 与同一份门面逻辑
+    （`VoiceStoreFacade`），差异只在 `POSTGRES_DIALECT`（`%s` 占位符、
+    `timestamptz` 值、`Connection.transaction()`、jsonb）。**刻意不继承 VoiceStore**：
+    继承会让结构性校验意外通过，掩盖真实迁移工作量。
+    """
 
     def __init__(
         self,
@@ -185,6 +293,21 @@ class PostgresVoiceStore:
         self._pool = pool
         self._row_factory: Any = _UNSET
         self._closed = False
+        # 门面：与 SQLite VoiceStore 同名的 8 个仓库，走 PG 方言（同一份实现）。
+        self.dialect = POSTGRES_DIALECT
+        connect = self.connect
+        self.pairing_codes = _pc.PairingCodeRepository(connect, POSTGRES_DIALECT)
+        self.pending_sessions = _pending.PendingSessionRepository(
+            connect, POSTGRES_DIALECT
+        )
+        self.hello_proofs = _hello_proofs.HelloProofRepository(connect, POSTGRES_DIALECT)
+        self.device_credentials = _dc.DeviceCredentialRepository(
+            connect, POSTGRES_DIALECT
+        )
+        self.nonces = _nonces.NonceRepository(connect, POSTGRES_DIALECT)
+        self.rate_limit = _rl.RateLimitRepository(connect, POSTGRES_DIALECT)
+        self.audit = _audit.AuditRepository(connect, POSTGRES_DIALECT)
+        self.settings = _settings.SettingsRepository(connect, POSTGRES_DIALECT)
         # 注入了工厂就立即建池：调用方需要能在构造后立刻拿到配置与池引用。
         if self._pool is None and pool_factory is not None:
             self._pool = pool_factory(self.config)
