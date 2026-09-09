@@ -1,8 +1,19 @@
+# jax-voice-api 运行依赖。
+# 清单必须与 backend/app 的真实 import 闭包一致 —— 手写最小清单会漂移
+# （实测事故：漏 PyJWT → 容器启动即崩 ModuleNotFoundError: No module named 'jwt'）。
+# 闭包来源：从 cloudapi/main.py 入口出发（含相对导入）静态解析出的第三方依赖：
+#   cryptography fastapi jwt psycopg psycopg_pool pydantic pydantic_settings starlette yaml
+# 版本与仓库 requirements.txt 保持一致，避免两套锁。
 fastapi>=0.115,<1
 uvicorn>=0.30,<1
 pydantic>=2.7,<3
 pydantic-settings>=2.2,<3
 PyYAML>=6,<7
+
+# hello proof 签发/校验（app/voice/hello_proof.py）
+PyJWT==2.10.1
+# wake userSig 静态加密（app/voice/user_sig_cipher.py，AES-256-GCM）
+cryptography==50.0.0
 
 # 正式持久化：CloudBase PostgreSQL（同步 psycopg 3 + 连接池）。
 # binary extra 提供 manylinux wheel，容器内无需编译工具链；pool extra 提供 ConnectionPool。
