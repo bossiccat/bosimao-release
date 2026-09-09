@@ -14,6 +14,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/app ./app
 COPY cloudapi/main.py ./main.py
 
+# 运行时配置（monitors/detection/voice/brain 等 YAML）。
+# app/_frozen_paths.project_root() 源码态取 __file__.parents[2]，容器内
+# /srv/app/... 上溯两级即 /，因此 CONFIG_DIR 落在 /config —— 必须与推导一致，
+# 否则启动即崩（实测：FileNotFoundError: 配置文件缺失: /config/monitors.yaml）。
+# config/ 只含非敏感配置（token 字段为空/注释），可安全进镜像；密钥一律走环境变量。
+COPY config /config
+
 # 正式持久化 = CloudBase PostgreSQL（cloudbase/migrations 版本化迁移）。
 # 容器内不挂任何本地数据卷：容器文件系统视为易失，无状态可水平扩容。
 ENV VOICE_STORAGE_BACKEND=postgresql
