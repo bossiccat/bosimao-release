@@ -168,9 +168,8 @@ def storage_probe() -> str:
     存在的理由：`/health` 只证明进程活着，不代表存储可用。线上曾出现服务部署成功、
     `/health` 200，但任何用到存储的端点都 500；而且读能过、写会挂——只探一种路径
     会把问题看漏。逐步骤探测能把「哪一步、哪种异常」直接钉出来，不必靠猜。
-
-    ⚠️ 临时状态：当前版本在失败时带上截断后的异常消息，仅用于排障定位；
-    定位结束后应恢复为「只回异常类型名」，避免把内部细节长期暴露在响应里。
+    只返回**异常类型名**：足够区分池状态 / 网络 / 类型 / 权限 / 方言问题，
+    又不把内部细节（表名、SQL 片段）长期暴露在响应里。
     """
     import time as _time
     import uuid as _uuid
@@ -182,7 +181,7 @@ def storage_probe() -> str:
             fn()
             steps.append(f"{label}=ok")
         except Exception as exc:
-            steps.append(f"{label}={type(exc).__name__}: {str(exc)[:150]}")
+            steps.append(f"{label}={type(exc).__name__}")
 
     run("read", lambda: store.get_setting("__storage_probe__"))
     run("write", lambda: store.set_setting("__storage_probe__", "1"))

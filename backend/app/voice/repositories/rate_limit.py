@@ -20,7 +20,12 @@ class RateLimitRepository(RepositoryBase):
                 " (subject_id, route_key, window_start, count, created_at, updated_at)"
                 f" VALUES ({self.ph}, {self.ph}, {self.ph}, 1, {self.ph}, {self.ph})"
                 " ON CONFLICT(subject_id, route_key, window_start)"
-                " DO UPDATE SET count = count + 1, updated_at = excluded.updated_at",
+                # PG 里裸写 `count = count + 1` 会报
+                # AmbiguousColumn: column reference "count" is ambiguous
+                # （分不清目标表列还是 excluded 列）。必须限定为表名.列名；
+                # 该写法 SQLite 也接受，因此两个方言共用同一句 SQL。
+                " DO UPDATE SET count = rate_limit_buckets.count + 1,"
+                " updated_at = excluded.updated_at",
                 (subject_id, route_key, self.dialect.timestamp_to_storage(window_start),
                  ts, ts),
             )
