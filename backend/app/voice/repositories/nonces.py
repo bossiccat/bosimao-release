@@ -31,9 +31,14 @@ class NonceRepository(RepositoryBase):
                  self.dialect.timestamp_to_storage(ts),
                  self.dialect.timestamp_to_storage(ts)),
             )
-        except Exception:
-            # 唯一约束冲突 = 已被消费；方言层的回滚由 _txn 负责
-            return False
+        except Exception as exc:
+            # 只有真正的唯一约束冲突才等于「已被消费」。其余异常（连接失败、
+            # 类型不匹配、权限问题）必须抛出——曾经这里 catch Exception 后一律
+            # 返回 False，把存储故障伪装成 nonce 重放（错误码 40102），
+            # 真因被完全掩盖。
+            if self.dialect.is_unique_violation(exc):
+                return False
+            raise
         return True
 
     def purge_expired(self, now: float | None = None) -> int:

@@ -126,6 +126,16 @@ class SqlDialect(Protocol):
         """取回刚插入的自增主键（SQLite `lastrowid`；PG 读 RETURNING 行）。"""
         ...
 
+    def is_unique_violation(self, exc: BaseException) -> bool:
+        """该异常是否为唯一约束冲突。
+
+        用于「插入即占位」这类语义（如 nonce 一次性消费）：只有真正的唯一冲突
+        才能解释为「已被占用」。其余异常必须向上抛——曾有代码 catch Exception
+        后一律返回 False，把连接失败/类型错误全部伪装成「nonce 重复」，
+        既掩盖真因又给出错误业务码。
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # 实现
@@ -181,6 +191,11 @@ class SqliteDialect:
         rowid = getattr(cursor, "lastrowid", None)
         return None if rowid is None else int(rowid)
 
+    def is_unique_violation(self, exc: BaseException) -> bool:
+        import sqlite3
+
+        return isinstance(exc, sqlite3.IntegrityError) and "UNIQUE" in str(exc).upper()
+
 
 class PostgresDialect:
     """PostgreSQL 方言：`%s` 占位符、timestamptz、jsonb、协议层事务。"""
@@ -231,6 +246,13 @@ class PostgresDialect:
             return None
         value = row[0] if not isinstance(row, dict) else next(iter(row.values()))
         return None if value is None else int(value)
+
+    def is_unique_violation(self, exc: BaseException) -> bool:
+        try:
+            from psycopg import errors as pg_errors
+        except Exception:  # pragma: no cover - psycopg 缺失时无法判定
+            return False
+        return isinstance(exc, pg_errors.UniqueViolation)
 
 
 SQLITE_DIALECT = SqliteDialect()
