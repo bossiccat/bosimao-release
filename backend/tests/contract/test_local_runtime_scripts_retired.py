@@ -58,6 +58,9 @@ RETIRED_TESTS = (
 ALLOWED_REFERENCES = {
     "backend/tests/contract/test_cloudbridge_service_contract.py",
     "backend/tests/contract/test_o018_installer_contract.py",
+    # 部署流水线与其契约：把这些名字列为**禁止出现在流水线里**的 token（语义相反，是防线）
+    ".github/workflows/deploy-cloudrun.yml",
+    "backend/tests/contract/test_deploy_pipeline_contract.py",
     # 本文件本身：必须写出这些名字才能守它们（自指豁免）
     "backend/tests/contract/test_local_runtime_scripts_retired.py",
 }

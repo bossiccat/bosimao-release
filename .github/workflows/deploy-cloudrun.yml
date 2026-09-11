@@ -1,0 +1,223 @@
+# =============================================================================
+# 云端部署流水线（CloudBase CloudRun）—— 覆盖控制面与音频桥两个服务
+#
+# 目的：部署这件事不依赖任何本机 shell。
+#   - 构建在 CI runner 上完成，镜像 tag = commit SHA（不可变、可回滚、可审计）；
+#   - 运行时凭据（DSN / TRTC / cipher key 等）保存在 **CloudRun 服务配置本身**，
+#     按镜像部署会保留，因此仓库与 CI 都不持有任何明文凭据；
+#   - 部署是否成功由**产品自身的探针**判定：
+#       jax-voice-api    → /api/v1/voice/cloud/status（生产位 + 存储分步探针）+ /cloud/selfcheck
+#       jax-voice-bridge → /api/v1/voice/bridge/status（两个子进程存活 + rtc_bridge 健康）
+#     不看日志、不靠人解读。
+#
+# 必须在 GitHub 侧配置（缺任一项 preflight 直接失败，绝不带病部署）：
+#   Secrets: TENCENTCLOUD_SECRETID / TENCENTCLOUD_SECRETKEY   tcb 登录
+#            TCR_REGISTRY / TCR_NAMESPACE / TCR_USERNAME / TCR_PASSWORD  镜像推送
+#            VOICE_OWNER_CREDENTIAL  自检端点鉴权（与 CloudRun 上同一值）
+#   Vars:    VPC_ID / VPC_CIDR / SUBNET_ID / SUBNET_CIDR  CloudRun 出网接入 PG 内网
+# =============================================================================
+name: deploy-cloudrun
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "要部署的 ref（留空 = 触发时的 commit）"
+        required: false
+        default: ""
+      confirm:
+        description: "输入 deploy 才会真正执行（防误触）"
+        required: true
+        default: ""
+  push:
+    tags:
+      - "voice-api-v*"
+      - "voice-bridge-v*"
+
+permissions:
+  contents: read
+
+env:
+  ENV_ID: ${{ vars.CLOUDBASE_ENV_ID }}
+
+jobs:
+  deploy:
+    name: deploy-${{ matrix.service }}
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.confirm == 'deploy')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: jax-voice-api
+            dockerfile: cloudapi/Dockerfile
+            port: 9000
+            base_url: https://jax-voice-api-283963-7-1436773060.sh.run.tcloudbase.com
+            gate: api
+          - service: jax-voice-bridge
+            dockerfile: cloudbridge/Dockerfile
+            port: 9200
+            base_url: https://jax-voice-bridge-283963-7-1436773060.sh.run.tcloudbase.com
+            gate: bridge
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.inputs.ref != '' && github.event.inputs.ref || github.sha }}
+
+      - name: Preflight - required configuration
+        env:
+          TENCENTCLOUD_SECRETID: ${{ secrets.TENCENTCLOUD_SECRETID }}
+          TENCENTCLOUD_SECRETKEY: ${{ secrets.TENCENTCLOUD_SECRETKEY }}
+          TCR_REGISTRY: ${{ secrets.TCR_REGISTRY }}
+          TCR_NAMESPACE: ${{ secrets.TCR_NAMESPACE }}
+          TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
+          VOICE_OWNER_CREDENTIAL: ${{ secrets.VOICE_OWNER_CREDENTIAL }}
+          VPC_ID: ${{ vars.VPC_ID }}
+          VPC_CIDR: ${{ vars.VPC_CIDR }}
+          SUBNET_ID: ${{ vars.SUBNET_ID }}
+          SUBNET_CIDR: ${{ vars.SUBNET_CIDR }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in TENCENTCLOUD_SECRETID TENCENTCLOUD_SECRETKEY TCR_REGISTRY \
+                      TCR_NAMESPACE TCR_USERNAME TCR_PASSWORD VOICE_OWNER_CREDENTIAL \
+                      VPC_ID VPC_CIDR SUBNET_ID SUBNET_CIDR; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is not configured"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::部署所需的配置不完整，拒绝继续（fail-closed）"
+            exit 1
+          fi
+
+      - name: Build canonical image (context = repo root)
+        env:
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+          docker build \
+            -f "${DOCKERFILE}" \
+            -t "${TCR_REGISTRY}/${TCR_NAMESPACE}/${SERVICE}:${GITHUB_SHA}" \
+            .
+
+      - name: Push image to TCR
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+          echo "$TCR_PASSWORD" | docker login "$TCR_REGISTRY" -u "$TCR_USERNAME" --password-stdin
+          docker push "${TCR_REGISTRY}/${TCR_NAMESPACE}/${SERVICE}:${GITHUB_SHA}"
+
+      - name: Install and authenticate CloudBase CLI
+        env:
+          TENCENTCLOUD_SECRETID: ${{ secrets.TENCENTCLOUD_SECRETID }}
+          TENCENTCLOUD_SECRETKEY: ${{ secrets.TENCENTCLOUD_SECRETKEY }}
+        run: |
+          set -euo pipefail
+          npm install -g @cloudbase/cli
+          tcb login --apiKeyId "$TENCENTCLOUD_SECRETID" --apiKey "$TENCENTCLOUD_SECRETKEY"
+
+      - name: Deploy image with VPC attachment
+        env:
+          SERVICE: ${{ matrix.service }}
+          PORT: ${{ matrix.port }}
+        run: |
+          set -euo pipefail
+          # VpcConf 只有 CLI 的 --vpcConfig 会真正落盘（MCP 的 deploy/updateConfig
+          # 回报 applied 但实测不生效），且该命令会保留服务上既有的环境变量。
+          printf '\n' | tcb cloudrun deploy \
+            -s "$SERVICE" \
+            --port "$PORT" \
+            --imageUrl "${TCR_REGISTRY}/${TCR_NAMESPACE}/${SERVICE}:${GITHUB_SHA}" \
+            --vpcConfig "{\"vpcId\":\"${VPC_ID}\",\"vpcCIDR\":\"${VPC_CIDR}\",\"subnetId\":\"${SUBNET_ID}\",\"subnetCIDR\":\"${SUBNET_CIDR}\"}" \
+            --force
+
+      - name: Verify deployment through the product itself
+        env:
+          GATE: ${{ matrix.gate }}
+          BASE_URL: ${{ matrix.base_url }}
+          VOICE_OWNER_CREDENTIAL: ${{ secrets.VOICE_OWNER_CREDENTIAL }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, ssl, sys, time, urllib.request
+
+          gate = os.environ["GATE"]
+          base = os.environ["BASE_URL"]
+          owner = os.environ["VOICE_OWNER_CREDENTIAL"]
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False
+          ctx.verify_mode = ssl.CERT_NONE
+
+          def call(path, method="GET", headers=None):
+              req = urllib.request.Request(
+                  base + path, method=method,
+                  headers=headers or {"User-Agent": "ci-gate"},
+              )
+              return urllib.request.urlopen(req, timeout=60, context=ctx)
+
+          def wait_json(path, predicate, seconds=300):
+              deadline = time.time() + seconds
+              last = None
+              while time.time() < deadline:
+                  try:
+                      last = json.loads(call(path).read())
+                      if predicate(last):
+                          return last
+                  except Exception as exc:
+                      last = {"error": type(exc).__name__}
+                  time.sleep(10)
+              return last
+
+          if gate == "api":
+              # 存储分步探针能全绿，本身就证明 VPC 接入与 PostgreSQL 连通都成立。
+              status = wait_json(
+                  "/api/v1/voice/cloud/status",
+                  lambda d: d.get("data", {}).get("production") is True,
+              )
+              print("status:", json.dumps(status, ensure_ascii=False))
+              data = (status or {}).get("data") or {}
+              if not data.get("production"):
+                  sys.exit("服务未以生产模式运行")
+              if data.get("security_missing"):
+                  sys.exit(f"生产安全能力缺失: {data['security_missing']}")
+              storage = data.get("storage", "")
+              if "=" not in storage or any(
+                  not part.strip().endswith("ok") for part in storage.split("|")
+              ):
+                  sys.exit(f"存储探针未全绿: {storage!r}")
+              payload = json.loads(call(
+                  "/api/v1/voice/cloud/selfcheck", method="POST",
+                  headers={"Authorization": f"Bearer {owner}", "User-Agent": "ci-gate"},
+              ).read())
+              print("selfcheck:", json.dumps(payload, ensure_ascii=False))
+              if not payload["data"]["ok"]:
+                  sys.exit(f"控制面自检未通过: {payload['data']['steps']}")
+              print("部署验证通过：存储探针全绿 + 控制面自检全绿")
+
+          elif gate == "bridge":
+              # 音频桥的自证：两个子进程存活 + rtc_bridge 健康 + TRTC SDK 已装载。
+              payload = wait_json("/api/v1/voice/bridge/status", lambda d: d.get("ok") is True)
+              print("bridge status:", json.dumps(payload, ensure_ascii=False))
+              data = payload or {}
+              if not data.get("ok"):
+                  sys.exit(f"音频桥未就绪: {json.dumps(payload, ensure_ascii=False)[:600]}")
+              for child in ("rtc_bridge", "sidecar"):
+                  if not data.get(child, {}).get("alive"):
+                      sys.exit(f"{child} 未存活: {json.dumps(data.get(child), ensure_ascii=False)}")
+              if data.get("rtc_bridge_health") != "ok":
+                  sys.exit(f"rtc_bridge 健康探测异常: {data.get('rtc_bridge_health')!r}")
+              if not data.get("trtc_sdk_version"):
+                  sys.exit("未能确认 TRTC SDK 版本")
+              print("部署验证通过：音频桥两个子进程存活 + rtc_bridge 健康 + SDK 已装载")
+
+          else:
+              sys.exit(f"未知的 gate: {gate}")
+          PY
