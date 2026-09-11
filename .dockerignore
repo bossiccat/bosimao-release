@@ -13,6 +13,9 @@
 !cloudbase/**
 # 运行时配置：app/_frozen_paths.project_root() 在容器内推导为 /，CONFIG_DIR 即 /config。
 !config/**
+# jax-voice-bridge 的 TLS 信任锚：只放行这一张签发云端控制面 leaf 的中间 CA。
+# certs/ 里还有私钥等敏感文件，绝不整体放行。
+!certs/cloud-control-plane-issuer.pem
 # ---- jax-voice-bridge（cloudbridge/Dockerfile）----
 # rtc_bridge 保持零改动地进镜像。
 !backend/rtc_bridge/**

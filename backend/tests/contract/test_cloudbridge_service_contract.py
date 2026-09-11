@@ -100,6 +100,24 @@ def test_sidecar_launches_with_the_container_required_chromium_switches() -> Non
         assert flag in text, f"sidecar 启动参数缺少 {flag}"
 
 
+def test_tls_trust_anchor_is_pinned_and_shipped_in_the_image() -> None:
+    """sidecar 以 NODE_EXTRA_CA_CERTS 做密码学级 pinning，缺失即 fail-closed 退出。
+
+    锚必须是签发云端控制面 leaf 的那张中间 CA（不是系统 CA 包），并且要进镜像。
+    """
+    dockerfile = (CLOUDBRIDGE / "Dockerfile").read_text(encoding="utf-8")
+    assert "NODE_EXTRA_CA_CERTS=/srv/certs/cloud-control-plane-issuer.pem" in dockerfile
+    assert "COPY certs/cloud-control-plane-issuer.pem" in dockerfile
+
+    anchor = ROOT / "certs" / "cloud-control-plane-issuer.pem"
+    assert anchor.is_file(), "缺少固定的 TLS 信任锚"
+    pem = anchor.read_text(encoding="utf-8")
+    assert pem.count("-----BEGIN CERTIFICATE-----") == 1, "锚文件必须是单张证书"
+
+    ignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+    assert "!certs/cloud-control-plane-issuer.pem" in ignore, "锚必须在构建上下文白名单内"
+
+
 def test_requirements_cover_the_rtc_bridge_closure_including_numpy() -> None:
     """实测：rtc_bridge/session.py → app.voice.apm_bridge 在模块级 import numpy，
     漏装会让容器启动即 ModuleNotFoundError 并整体退出。"""

@@ -54,6 +54,15 @@ COPY sidecar ./sidecar
 # 运行时配置：app/_frozen_paths.project_root() 在容器内推导为 /，即 /config
 COPY config /config
 
+# TLS 信任锚（ADR-020 A1）：sidecar 在 app.whenReady() 前必须读到 NODE_EXTRA_CA_CERTS，
+# 否则 fail-closed 直接退出（实测：[main] fatal NODE_EXTRA_CA_CERTS is not set）。
+# 固定的是**签发云端控制面 leaf 的那张中间 CA**（DigiCert Secure Site OV G2 TLS ... CA1），
+# 由 openssl s_client 从线上真实链路抽取，比信任整个系统 CA 包严格得多。
+# ⚠️ 该中间证书 notAfter=2032-12-14；若 CloudBase 更换签发 CA，此文件必须同步更新，
+#    否则 sidecar 会 fail-closed 拒绝连接（这是设计意图，不是缺陷）。
+COPY certs/cloud-control-plane-issuer.pem /srv/certs/cloud-control-plane-issuer.pem
+ENV NODE_EXTRA_CA_CERTS=/srv/certs/cloud-control-plane-issuer.pem
+
 # sidecar 依赖：trtc-electron-sdk 的 postinstall 会拉取 Linux 原生 addon，
 # electron 会下载 Linux 运行时。**不把本机 node_modules 带进镜像**（Windows 二进制）。
 RUN cd sidecar && npm install --no-audit --no-fund
