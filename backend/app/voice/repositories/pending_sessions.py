@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 
+from ..sql_dialect import POSTGRES
 from .base import RepositoryBase
 from .common import now_unix
 
@@ -31,6 +32,20 @@ class PendingSessionRepository(RepositoryBase):
              self.dialect.timestamp_to_storage(expires_at), ts, ts),
         )
 
+    def _claim_select_sql(self) -> str:
+        """领取候选行的 SELECT；并发保护只在这里体现方言差异。
+
+        PG：``FOR UPDATE SKIP LOCKED`` 让并发实例跳过已被他人锁定的行——这是
+        多实例下「同一时刻只有一方领到同一条」的保证。
+        SQLite：无此语法，靠 ``_txn()`` 的 ``BEGIN IMMEDIATE`` 写锁串行化写入。
+        """
+        lock = " FOR UPDATE SKIP LOCKED" if self.dialect.name == POSTGRES else ""
+        return (
+            f"SELECT {_COLUMNS} FROM pending_session_claims"
+            f" WHERE claimed_at IS NULL AND expires_at > {self.ph}"
+            f" ORDER BY created_at ASC, id ASC LIMIT 1{lock}"
+        )
+
     def claim_one(self, now: float | None = None) -> dict | None:
         """Discover one intent and mint a bearer claim exactly once."""
         ts = self.dialect.timestamp_to_storage(now_unix(now))
@@ -39,12 +54,7 @@ class PendingSessionRepository(RepositoryBase):
         claimed: dict | None = None
         try:
             with self._txn() as conn:
-                row = conn.execute(
-                    f"SELECT {_COLUMNS} FROM pending_session_claims"
-                    f" WHERE claimed_at IS NULL AND expires_at > {self.ph}"
-                    f" ORDER BY created_at ASC, id ASC LIMIT 1",
-                    (ts,),
-                ).fetchone()
+                row = conn.execute(self._claim_select_sql(), (ts,)).fetchone()
                 if row is None:
                     return None
                 updated = conn.execute(

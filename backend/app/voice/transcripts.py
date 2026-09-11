@@ -67,6 +67,9 @@ class TranscriptService:
                  persistence_checker=None) -> None:
         self._store = store
         self._cipher = cipher
+        # 方言由 store 提供（SQLite VoiceStore / PostgresVoiceStore 都是），
+        # 本服务据此只写一份 SQL。
+        self._dialect = store.dialect
         self._persistence_checker = persistence_checker or self._default_persistence
 
     def _default_persistence(self) -> bool:
@@ -80,17 +83,27 @@ class TranscriptService:
         if not self._persistence_checker():
             return None
         ciphertext = self._cipher.encrypt(text.encode("utf-8"))
-        ts = time.time() if now is None else now
+        dialect = self._dialect
+        ph = dialect.placeholder
+        ts = dialect.timestamp_to_storage(time.time() if now is None else now)
+        sql = dialect.insert_returning(
+            "INSERT INTO transcripts"
+            " (session_id, ciphertext, encryption_version, started_at,"
+            "  created_at, updated_at)"
+            f" VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph})",
+            "id",
+        )
         with self._store.connect() as conn:
-            with conn:
+            with dialect.transaction(conn):
                 cursor = conn.execute(
-                    "INSERT INTO transcripts"
-                    " (session_id, ciphertext, encryption_version, started_at,"
-                    "  created_at, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    sql,
                     (session_id, ciphertext, self._cipher.encryption_version, ts, ts, ts),
                 )
-                transcript_id = int(cursor.lastrowid)
+                # PG 走 INSERT ... RETURNING id；SQLite 走 cursor.lastrowid，
+                # 差异收敛在方言层。
+                transcript_id = dialect.last_insert_id(cursor)
+        if transcript_id is None:
+            raise RuntimeError("transcripts INSERT did not return a new id")
         self._store.write_audit(
             "transcript.save", "transcript", str(transcript_id), "ok",
             {"session_id": session_id, "cipher_bytes": len(ciphertext)}, now=ts,
@@ -101,10 +114,11 @@ class TranscriptService:
 
     def list(self, limit: int = 50) -> list[dict]:
         """元数据列表（不含正文）"""
+        ph = self._dialect.placeholder
         with self._store.connect() as conn:
             rows = conn.execute(
                 "SELECT id, session_id, encryption_version, started_at, created_at"
-                " FROM transcripts ORDER BY created_at DESC LIMIT ?", (limit,)
+                f" FROM transcripts ORDER BY created_at DESC LIMIT {ph}", (limit,)
             ).fetchall()
         return [
             {
@@ -119,18 +133,20 @@ class TranscriptService:
 
     def get(self, transcript_id: int) -> str | None:
         """解密返回正文；不存在返回 None"""
+        ph = self._dialect.placeholder
         with self._store.connect() as conn:
             row = conn.execute(
-                "SELECT ciphertext FROM transcripts WHERE id = ?", (transcript_id,)
+                f"SELECT ciphertext FROM transcripts WHERE id = {ph}", (transcript_id,)
             ).fetchone()
         if row is None:
             return None
         return self._cipher.decrypt(row[0]).decode("utf-8")
 
     def get_any_by_session(self, session_id: str) -> str | None:
+        ph = self._dialect.placeholder
         with self._store.connect() as conn:
             row = conn.execute(
-                "SELECT id, ciphertext FROM transcripts WHERE session_id = ?"
+                f"SELECT id, ciphertext FROM transcripts WHERE session_id = {ph}"
                 " ORDER BY created_at DESC LIMIT 1", (session_id,)
             ).fetchone()
         if row is None:
@@ -142,6 +158,7 @@ class TranscriptService:
     def delete(self, transcript_id: int | None = None, now: float | None = None) -> int:
         """删除单条或全部密文；审计记录不含正文"""
         ts = time.time() if now is None else now
+        ph = self._dialect.placeholder
         with self._store.connect() as conn:
             with conn:
                 if transcript_id is None:
@@ -149,7 +166,9 @@ class TranscriptService:
                     deleted = cursor.rowcount
                     subject = "*"
                 else:
-                    cursor = conn.execute("DELETE FROM transcripts WHERE id = ?", (transcript_id,))
+                    cursor = conn.execute(
+                        f"DELETE FROM transcripts WHERE id = {ph}", (transcript_id,)
+                    )
                     deleted = cursor.rowcount
                     subject = str(transcript_id)
         self._store.write_audit(
@@ -170,6 +189,7 @@ class TranscriptService:
         destination = Path(destination)
         if not create_parents and not destination.parent.exists():
             raise ValueError(f"导出目标目录不存在: {destination.parent}")
+        ph = self._dialect.placeholder
         with self._store.connect() as conn:
             if transcript_id is None:
                 rows = conn.execute(
@@ -177,7 +197,8 @@ class TranscriptService:
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT ciphertext FROM transcripts WHERE id = ?", (transcript_id,)
+                    f"SELECT ciphertext FROM transcripts WHERE id = {ph}",
+                    (transcript_id,),
                 ).fetchall()
         # 解密失败发生在任何文件创建之前
         texts = [self._cipher.decrypt(row[0]).decode("utf-8") for row in rows]
