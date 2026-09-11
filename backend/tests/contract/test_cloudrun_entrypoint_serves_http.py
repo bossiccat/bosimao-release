@@ -74,3 +74,6 @@ def test_cloud_status_returns_serialisable_json(client: TestClient) -> None:
     assert payload["data"]["service"] == "jax-voice-api"
     assert isinstance(payload["data"]["trtc_configured"], bool)
     assert isinstance(payload["data"]["security_missing"], list)
+    # 存储探针：进程活着 ≠ 存储可用。线上曾出现部署成功、/health 200，
+    # 但任何用到存储的端点都 500 —— 这条字段让那种情况一眼可见。
+    assert isinstance(payload["data"]["storage"], str)

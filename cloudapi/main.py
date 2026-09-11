@@ -162,6 +162,20 @@ def security_missing() -> list[str]:
     return runtime_missing(security)
 
 
+def storage_probe() -> str:
+    """存储可用性探针：只回状态或**异常类型名**（不回异常消息，避免泄露内部细节）。
+
+    存在的理由：`/health` 只证明进程活着，不代表存储可用。线上曾出现服务
+    部署成功、`/health` 200，但任何用到存储的端点都 500 的情况——没有这条探针
+    就只能靠猜。返回类型名足以区分「池未打开 / 网络不可达 / 类型或权限错误」。
+    """
+    try:
+        store.get_setting("__storage_probe__")
+        return "ok"
+    except Exception as exc:
+        return type(exc).__name__
+
+
 @app.get("/api/v1/voice/cloud/status")
 async def cloud_status() -> dict:
     """部署核验用：只报能力位与版本，无敏感信息"""
@@ -172,6 +186,7 @@ async def cloud_status() -> dict:
             "production": settings.voice_production,
             "trtc_configured": service.is_configured(),
             "security_missing": security_missing(),
+            "storage": storage_probe(),
         },
         "message": "",
     }
