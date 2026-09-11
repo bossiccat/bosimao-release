@@ -19,7 +19,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 # 容器内 /srv 布局：main.py 与 app/ 包同级
@@ -210,3 +210,74 @@ async def cloud_status() -> dict:
 @app.exception_handler(ProductionGateError)
 async def gate_error_handler(_req, exc: ProductionGateError):
     return JSONResponse(status_code=503, content={"code": 50300, "data": None, "message": str(exc)})
+
+
+# 自检写入统一使用该命名空间与短 TTL，绝不触碰真实业务数据。
+_SELFCHECK_NAMESPACE = "__selfcheck__"
+
+
+@app.post("/api/v1/voice/cloud/selfcheck")
+async def cloud_selfcheck(request: Request) -> dict:
+    """应用自检：由**服务自己**在云端把控制面写入链路真跑一遍，逐步报告结果。
+
+    为什么放在产品里而不是外部脚本：验证「云端是否真能用」必须由服务自身对真实
+    数据库执行，而不是靠本地脚本打接口再自行解读——后者等于用脚本解题，也测不到
+    服务内的装配、事务与方言行为。发布门禁与运维巡检可直接消费本端点的 `ok`。
+
+    步骤：nonce 消费 → 限流自增 → 配对码签发 → 配对码消费 → 审计写入。
+    全部使用 `__selfcheck__` 命名空间 + 短 TTL；失败只回异常类型名，不回消息。
+    """
+    import time as _time
+    import uuid as _uuid
+
+    auth = request.headers.get("authorization", "")
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return JSONResponse(
+            status_code=401,
+            content={"code": 40101, "data": None, "message": "owner credential required"},
+        )
+    try:
+        validator.verify_owner(token.strip())
+    except Exception as exc:
+        return JSONResponse(
+            status_code=401,
+            content={
+                "code": getattr(exc, "code", 40101),
+                "data": None,
+                "message": "invalid owner credential",
+            },
+        )
+
+    steps: dict[str, str] = {}
+    issued: dict[str, str] = {}
+
+    def step(name: str, fn) -> None:
+        try:
+            fn()
+            steps[name] = "ok"
+        except Exception as exc:
+            steps[name] = type(exc).__name__
+
+    def create_pairing_code() -> None:
+        code, _meta = store.create_pairing_code(_SELFCHECK_NAMESPACE, "selfcheck", 60)
+        issued["code"] = code
+
+    step("nonce", lambda: store.consume_nonce(
+        _SELFCHECK_NAMESPACE, _uuid.uuid4().hex, ttl_seconds=60))
+    step("rate_limit", lambda: store.rate_limit.increment(
+        _SELFCHECK_NAMESPACE, _SELFCHECK_NAMESPACE, _time.time()))
+    step("pairing_create", create_pairing_code)
+    if steps["pairing_create"] == "ok":
+        step("pairing_consume", lambda: store.consume_pairing_code(
+            issued["code"], _SELFCHECK_NAMESPACE))
+    else:
+        steps["pairing_consume"] = "skipped"
+    step("audit", lambda: store.write_audit(
+        "selfcheck", "system", _SELFCHECK_NAMESPACE, "ok", {}))
+
+    return {
+        "code": 0,
+        "data": {"ok": all(v == "ok" for v in steps.values()), "steps": steps},
+        "message": "",
+    }
