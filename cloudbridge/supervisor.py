@@ -121,11 +121,18 @@ class BridgeSupervisor:
             {"PYTHONPATH": str(BACKEND_DIR), "PYTHONUNBUFFERED": "1"},
         )
         # Electron 需要 X display：容器内用 xvfb 提供虚拟显示，无头运行。
+        # Chromium 开关是必须的（实测缺 --no-sandbox 时直接 SIGTRAP 退出）：
+        #   --no-sandbox            容器内以 root 运行时 Chromium 拒绝启动
+        #   --disable-gpu           容器无 GPU，避免 GL 初始化失败
+        #   --disable-dev-shm-usage CloudRun 的 /dev/shm 很小，避免渲染进程崩溃
         self.sidecar = Child(
             "sidecar",
             [
                 "xvfb-run", "-a",
                 str(SIDECAR_DIR / "node_modules" / ".bin" / "electron"),
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
                 ".",
                 "--role=sidecar",
                 f"--bridge-url={self.bridge_ws}",

@@ -89,6 +89,17 @@ def test_dockerfile_installs_xauth_needed_by_xvfb_run() -> None:
     assert "xauth" in text
 
 
+def test_sidecar_launches_with_the_container_required_chromium_switches() -> None:
+    """实测：缺 --no-sandbox 时 Electron 直接 FATAL/SIGTRAP（容器内以 root 运行）。
+
+    --disable-gpu 与 --disable-dev-shm-usage 同理：容器无 GPU、/dev/shm 很小。
+    这三项是无头容器里跑 Electron 的必需开关，不是可选项。
+    """
+    text = (CLOUDBRIDGE / "supervisor.py").read_text(encoding="utf-8")
+    for flag in ("--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"):
+        assert flag in text, f"sidecar 启动参数缺少 {flag}"
+
+
 def test_requirements_cover_the_rtc_bridge_closure_including_numpy() -> None:
     """实测：rtc_bridge/session.py → app.voice.apm_bridge 在模块级 import numpy，
     漏装会让容器启动即 ModuleNotFoundError 并整体退出。"""
