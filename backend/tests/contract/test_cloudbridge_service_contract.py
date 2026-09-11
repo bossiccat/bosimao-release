@@ -284,3 +284,18 @@ def test_watch_holds_the_status_endpoint_before_exiting() -> None:
         sup.watch()
     elapsed = time.monotonic() - started
     assert elapsed >= 0.25, "宽限期内不得立刻退出，否则死因来不及被读到"
+
+
+def test_sidecar_is_not_given_the_phone_only_device_argument() -> None:
+    """实测事故：role=sidecar 带 --device 会被 sidecar 自身判 SIDECAR_UNEXPECTED_DEVICE_ARG
+    并 fail-closed 退出（config.js:64 / rtc.js:364），导致容器崩溃重启。
+    --device 只属于 role=phone，云端对端不得传。"""
+    text = (CLOUDBRIDGE / "supervisor.py").read_text(encoding="utf-8")
+    assert "--device=" not in text, "sidecar 启动参数里不得出现 --device="
+
+
+def test_bridge_health_port_stays_loopback_only() -> None:
+    """rtc_bridge 的 19092/19093 只在容器内可达，不对外暴露。"""
+    text = (CLOUDBRIDGE / "supervisor.py").read_text(encoding="utf-8")
+    assert "ws://127.0.0.1:19092" in text
+    assert "127.0.0.1:19093" in text

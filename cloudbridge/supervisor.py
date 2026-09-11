@@ -158,6 +158,11 @@ class BridgeSupervisor:
         #   --no-sandbox            容器内以 root 运行时 Chromium 拒绝启动
         #   --disable-gpu           容器无 GPU，避免 GL 初始化失败
         #   --disable-dev-shm-usage CloudRun 的 /dev/shm 很小，避免渲染进程崩溃
+        #
+        # ⚠️ 不要传 --device：sidecar 的启动校验按角色 fail-closed，
+        #    `role=sidecar` 带 --device 会被判 SIDECAR_UNEXPECTED_DEVICE_ARG 并退出
+        #    （config.js:64 / rtc.js:364；--device 只属于 role=phone）。
+        #    实测：容器因此崩溃重启，且该错误只能靠产品自报才看到。
         self.sidecar = Child(
             "sidecar",
             [
@@ -170,7 +175,6 @@ class BridgeSupervisor:
                 "--role=sidecar",
                 f"--bridge-url={self.bridge_ws}",
                 f"--sign-url={self.sign_url}",
-                f"--device={self.device_id}",
             ],
             SIDECAR_DIR,
             {},
