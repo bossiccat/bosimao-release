@@ -163,17 +163,27 @@ def security_missing() -> list[str]:
 
 
 def storage_probe() -> str:
-    """存储可用性探针：只回状态或**异常类型名**（不回异常消息，避免泄露内部细节）。
+    """存储可用性探针：分别探测读路径与写路径，返回 `read=<状态> write=<状态>`。
 
-    存在的理由：`/health` 只证明进程活着，不代表存储可用。线上曾出现服务
-    部署成功、`/health` 200，但任何用到存储的端点都 500 的情况——没有这条探针
-    就只能靠猜。返回类型名足以区分「池未打开 / 网络不可达 / 类型或权限错误」。
+    存在的理由：`/health` 只证明进程活着，不代表存储可用。线上曾出现服务部署成功、
+    `/health` 200，但任何用到存储的端点都 500；而且读能过、写会挂——只探一种路径
+    会把问题看漏。状态默认只给**异常类型名**（不回消息，避免泄露内部细节）；
+    显式设置 `VOICE_STORAGE_PROBE_DETAIL=1` 时追加截断后的消息，仅用于排障。
     """
-    try:
-        store.get_setting("__storage_probe__")
-        return "ok"
-    except Exception as exc:
-        return type(exc).__name__
+    detail = os.environ.get("VOICE_STORAGE_PROBE_DETAIL") == "1"
+
+    def run(fn) -> str:
+        try:
+            fn()
+            return "ok"
+        except Exception as exc:
+            if not detail:
+                return type(exc).__name__
+            return f"{type(exc).__name__}: {str(exc)[:160]}"
+
+    read_state = run(lambda: store.get_setting("__storage_probe__"))
+    write_state = run(lambda: store.set_setting("__storage_probe__", "1"))
+    return f"read={read_state} write={write_state}"
 
 
 @app.get("/api/v1/voice/cloud/status")
