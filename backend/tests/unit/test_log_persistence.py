@@ -1,6 +1,6 @@
 """P0-1/F10：进程内日志持久化（RotatingFileHandler）
 
-根因：rtc_bridge 由 jax-services.ps1 以 -RedirectStandardOutput/-RedirectStandardError
+根因：rtc_bridge 由启动器以 -RedirectStandardOutput/-RedirectStandardError
 启动，每次重启截断 rtc_bridge.log(.err) → 21:06 会话日志被 21:40 重启覆盖，归因无证据。
 修复：进程内自带 RotatingFileHandler（10MB×5）直写 logs/，与启动器重定向解耦
 （文件名加 _app 后缀，避免与重定向目标同文件双写互踩）。

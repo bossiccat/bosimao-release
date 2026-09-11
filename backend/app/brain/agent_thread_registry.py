@@ -24,7 +24,7 @@ def resolve_db_path(value: str) -> Path:
     为什么必须锚定：2026-08-27 把默认路径改为模块锚定，是为了让 FastAPI 后台
     与 rtc_bridge 落在同一个库上；但只要 `AGENT_THREAD_DB` 给的是相对路径，
     它就会退化成 cwd 相对 —— 而这两个服务的启动 cwd 不同
-    （`scripts/jax-services.ps1`：backend 用 $Root，rtc_bridge 用 $Root/backend），
+    （PC 端启动器约定：backend 用 $Root，rtc_bridge 用 $Root/backend），
     于是又被拆成两个库（实测 .env:65 让 rtc_bridge 落到 backend/backend/data/）。
     锚定到仓库根后，相对值的语义与启动位置无关。
     """

@@ -58,7 +58,7 @@ def add_rotating_file_handler(
 ) -> logging.Handler | None:
     """P0-1/F10：进程内日志持久化——RotatingFileHandler 直写 logs/<name>
 
-    背景：jax-services.ps1 用 -RedirectStandardOutput/Error 启动 rtc_bridge/relay，
+    背景：PC 端启动器用 -RedirectStandardOutput/Error 启动 rtc_bridge/relay，
     每次重启截断重定向文件（2026-09-06 实锤：21:06 会话日志被 21:40 重启覆盖）。
     进程内自带滚动文件与重定向解耦（文件名用 *_app.log，避免与重定向目标同路径双写）。
     目录不可写等异常一律降级为 None（只留控制台），绝不阻断进程启动。
