@@ -12,21 +12,26 @@
 只有真正把 SQL 拼成方言占位符、真正把时间过一遍 `timestamp_to_storage`，
 断言才会通过。
 
-范围限定在本次迁移的两个文件（`control_plane_base.py` /
-`control_plane_sessions.py`）。`get_termination`（`control_plane_retry.py`）等
-尚未迁移的读回路径落在提交哨兵之后，由 `txn_sql()` 显式切掉——避免本契约
-为别人的未迁移代码背锅，也避免它们被顺手改坏时这里假绿。
+本契约现已覆盖整个控制面账本：`control_plane_base.py` / `control_plane_sessions.py`
+（第一批）以及 `control_plane_ack.py` / `control_plane_kws.py` /
+`control_plane_retry.py` / `control_plane_wake.py`（第二批）。四个次级账本
+（ack 上报 / kws readiness / retry get_termination / wake 消费）接入同一方言层：
+`self.ph` 占位符、`self._txn()` 方言化事务、`timestamp_to_storage` 时间归一、
+`json_to_storage`/`json_from_storage` 处理 jsonb。`txn_sql()` 切到首个提交哨兵，
+只断言事务内语句。
 """
+import hashlib
 import sys
 from collections import deque
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.insert(0, "backend")
 
 from app.voice.control_plane import SessionLedger  # noqa: E402
 from app.voice.pg_storage import VoiceStoreProtocol  # noqa: E402
 from app.voice.sql_dialect import POSTGRES_DIALECT, SQLITE_DIALECT  # noqa: E402
+from app.voice.user_sig_cipher import UserSigCipher  # noqa: E402
 
 COMMIT = "-- commit --"
 ROLLBACK = "-- rollback --"
@@ -71,6 +76,8 @@ class _Result:
 
     def __init__(self, conn: "FakeConn") -> None:
         self._conn = conn
+        # `mark_kws_ready` 依赖 UPDATE 的 rowcount（命中单行即为 1）。
+        self.rowcount = 1
 
     def fetchone(self):
         return self._conn.pop_row()
@@ -336,3 +343,232 @@ def test_sqlite_begin_termination_rolls_back_on_error() -> None:
 
     assert ROLLBACK in conn.sql, f"异常路径没有回滚：{conn.sql}"
     assert COMMIT not in conn.sql, f"异常路径不该提交：{conn.sql}"
+
+
+# ---------------------------------------------------------------------------
+# 第二批：ack / kws / retry / wake 四个次级账本接入方言层
+# ---------------------------------------------------------------------------
+
+TEST_KEY = hashlib.sha256(b"control-plane-dialect-contract-key").digest()
+
+PRIOR_ROW = {
+    "session_id": "prior-1",
+    "device_id": "dev-1",
+    "room_id": "room-0",
+    "generation": 7,
+    "state": "KWS_READY",
+}
+
+WAKE_EXPIRES_AT = 4102444800.0
+
+
+@contextmanager
+def _fake_psycopg_json(monkeypatch):
+    """离线环境没有 psycopg：注入最小 `psycopg.types.json.Json`。
+
+    被测生产代码仍是"惰性导入 psycopg、不做静默降级"，这里只替契约测试提供
+    驱动适配器，断言的是绑定值的形态（jsonb 包装 vs TEXT 字符串）。
+    """
+    import types as _types
+
+    class Json:
+        def __init__(self, obj) -> None:
+            self.obj = obj
+
+    json_mod = _types.ModuleType("psycopg.types.json")
+    json_mod.Json = Json
+    types_mod = _types.ModuleType("psycopg.types")
+    types_mod.json = json_mod
+    pkg = _types.ModuleType("psycopg")
+    pkg.types = types_mod
+    monkeypatch.setitem(sys.modules, "psycopg", pkg)
+    monkeypatch.setitem(sys.modules, "psycopg.types", types_mod)
+    monkeypatch.setitem(sys.modules, "psycopg.types.json", json_mod)
+    yield Json
+
+
+def _cipher_ledger(dialect, rows=(), rowsets=()):
+    conn = FakeConn(rows=rows, rowsets=rowsets)
+    return SessionLedger(
+        FakeStore(dialect, conn), user_sig_cipher=UserSigCipher(TEST_KEY)
+    ), conn
+
+
+def _wake_call(ledger) -> dict:
+    return ledger.consume_wake(
+        session_id="sess-new",
+        device_id="dev-1",
+        prior_session_id="prior-1",
+        prior_generation=7,
+        wake_event_id="wake-1",
+        user_sig="sig-plaintext",
+        expires_at=WAKE_EXPIRES_AT,
+    )
+
+
+def _assert_aware_datetimes(values, label: str) -> None:
+    for value in values:
+        assert isinstance(value, datetime), (
+            f"{label} 写入 {type(value).__name__}={value!r}，timestamptz 只接受 datetime"
+        )
+        assert value.tzinfo is not None, f"{label} 必须是 aware datetime，拿到 {value!r}"
+
+
+def test_pg_record_ack_transaction_sql_is_dialect_clean() -> None:
+    ledger, conn = _ledger(
+        POSTGRES_DIALECT,
+        rows=[dict(TERMINATION_ROW), None, (1,), dict(TERMINATION_ROW)],
+        rowsets=[
+            [{"reporter": "android", "result": "confirmed"}],
+            [{"acknowledgement": "android_trtc_left", "result": "confirmed"}],
+        ],
+    )
+
+    ledger.record_ack(
+        termination_id="term-1", session_id="sess-1", device_id="dev-1",
+        room_id="room-1", generation=7, acknowledgement="android_trtc_left",
+        reporter="android", result="confirmed",
+    )
+
+    txn = " | ".join(conn.txn_sql())
+    assert "BEGIN IMMEDIATE" not in txn, f"PG 路径仍发裸 BEGIN IMMEDIATE：{conn.txn_sql()}"
+    assert "?" not in txn, f"PG 路径仍用 ? 占位符：{conn.txn_sql()}"
+    assert "%s" in txn, f"PG 路径没有用 %s 占位符：{conn.txn_sql()}"
+
+
+def test_pg_record_ack_writes_aware_datetime_for_timestamptz() -> None:
+    ledger, conn = _ledger(
+        POSTGRES_DIALECT,
+        rows=[dict(TERMINATION_ROW), None, (1,), dict(TERMINATION_ROW)],
+        rowsets=[
+            [{"reporter": "android", "result": "confirmed"}],
+            [{"acknowledgement": "android_trtc_left", "result": "confirmed"}],
+        ],
+    )
+
+    ledger.record_ack(
+        termination_id="term-1", session_id="sess-1", device_id="dev-1",
+        room_id="room-1", generation=7, acknowledgement="android_trtc_left",
+        reporter="android", result="confirmed",
+    )
+
+    _assert_aware_datetimes(
+        conn.params_for("INSERT INTO control_plane_ack_reports")[-3:],
+        "ack_reports 时间列",
+    )
+
+
+def test_pg_mark_kws_ready_transaction_sql_is_dialect_clean(monkeypatch) -> None:
+    ledger, conn = _ledger(POSTGRES_DIALECT, rows=[(1,)])
+
+    with _fake_psycopg_json(monkeypatch):
+        assert ledger.mark_kws_ready("sess-1", 7) is True
+
+    txn = " | ".join(conn.txn_sql())
+    assert "BEGIN IMMEDIATE" not in txn, f"PG 路径仍发裸 BEGIN IMMEDIATE：{conn.txn_sql()}"
+    assert "?" not in txn, f"PG 路径仍用 ? 占位符：{conn.txn_sql()}"
+    assert "%s" in txn, f"PG 路径没有用 %s 占位符：{conn.txn_sql()}"
+
+
+def test_pg_mark_kws_ready_writes_datetime_and_jsonb(monkeypatch) -> None:
+    ledger, conn = _ledger(POSTGRES_DIALECT, rows=[(1,)])
+
+    with _fake_psycopg_json(monkeypatch) as json_adapter:
+        ledger.mark_kws_ready("sess-1", 7, evidence={"rms": 0.5})
+
+    params = conn.params_for("INSERT INTO control_plane_kws_readiness")
+    assert isinstance(params[3], json_adapter), (
+        f"evidence_json 在 PG 侧必须是 jsonb 包装，拿到 {type(params[3]).__name__}"
+    )
+    _assert_aware_datetimes(params[-3:], "kws_readiness 时间列")
+
+
+def test_pg_get_termination_uses_dialect_placeholder_and_normalises_time() -> None:
+    row = dict(TERMINATION_ROW)
+    row["terminal_at"] = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    ledger, conn = _ledger(POSTGRES_DIALECT, rows=[row], rowsets=[[]])
+
+    result = ledger.get_termination("term-1")
+
+    sql = conn.sql[0]
+    assert "?" not in sql, f"get_termination 仍用 ? 占位符：{sql}"
+    assert "%s" in sql, f"get_termination 没有用 %s 占位符：{sql}"
+    assert isinstance(result["terminal_at"], float), (
+        f"terminal_at 应归一成 float，拿到 {type(result['terminal_at']).__name__}"
+    )
+
+
+def test_pg_consume_wake_transaction_sql_is_dialect_clean(monkeypatch) -> None:
+    ledger, conn = _cipher_ledger(
+        POSTGRES_DIALECT, rows=[None, dict(PRIOR_ROW), (0,)]
+    )
+
+    with _fake_psycopg_json(monkeypatch):
+        record = _wake_call(ledger)
+
+    txn = " | ".join(conn.txn_sql())
+    assert "BEGIN IMMEDIATE" not in txn, f"PG 路径仍发裸 BEGIN IMMEDIATE：{conn.txn_sql()}"
+    assert "?" not in txn, f"PG 路径仍用 ? 占位符：{conn.txn_sql()}"
+    assert "%s" in txn, f"PG 路径没有用 %s 占位符：{conn.txn_sql()}"
+    assert record["user_sig"] == "sig-plaintext"
+
+
+def test_pg_consume_wake_writes_datetime_and_jsonb(monkeypatch) -> None:
+    ledger, conn = _cipher_ledger(
+        POSTGRES_DIALECT, rows=[None, dict(PRIOR_ROW), (0,)]
+    )
+
+    with _fake_psycopg_json(monkeypatch) as json_adapter:
+        _wake_call(ledger)
+
+    claim = conn.params_for("INSERT INTO pending_session_claims")
+    _assert_aware_datetimes(claim[-3:], "pending_session_claims 时间列")
+
+    wake = conn.params_for("INSERT INTO control_plane_wake_events")
+    assert isinstance(wake[7], json_adapter), (
+        f"record_json 在 PG 侧必须是 jsonb 包装，拿到 {type(wake[7]).__name__}"
+    )
+    _assert_aware_datetimes(wake[-3:], "wake_events 时间列")
+    assert isinstance(wake[8], (bytes, bytearray)) and bytes(wake[8]), (
+        "user_sig_ciphertext 必须是非空 bytes"
+    )
+    assert isinstance(wake[9], str) and wake[9].strip(), (
+        "user_sig_encryption_version 必须非空"
+    )
+
+
+def test_sqlite_mark_kws_ready_still_uses_qmark_and_float() -> None:
+    ledger, conn = _ledger(SQLITE_DIALECT, rows=[(1,)])
+
+    assert ledger.mark_kws_ready("sess-1", 7) is True
+
+    assert "BEGIN IMMEDIATE" in conn.sql, f"SQLite 写事务丢了 BEGIN IMMEDIATE：{conn.sql}"
+    params = conn.params_for("INSERT INTO control_plane_kws_readiness")
+    assert isinstance(params[3], str), "SQLite 侧 evidence_json 仍是 TEXT 字符串"
+    for value in params[-3:]:
+        assert isinstance(value, float), (
+            f"SQLite 侧时间列应为 Unix float，拿到 {type(value).__name__}"
+        )
+    joined = " | ".join(conn.sql)
+    assert "%s" not in joined, f"SQLite 路径混进了 PG 占位符：{conn.sql}"
+    assert "?" in joined, f"SQLite 路径丢了 ? 占位符：{conn.sql}"
+
+
+def test_sqlite_consume_wake_still_uses_qmark_and_float() -> None:
+    ledger, conn = _cipher_ledger(SQLITE_DIALECT, rows=[None, dict(PRIOR_ROW), (0,)])
+
+    record = _wake_call(ledger)
+
+    assert "BEGIN IMMEDIATE" in conn.sql, f"SQLite 写事务丢了 BEGIN IMMEDIATE：{conn.sql}"
+    claim = conn.params_for("INSERT INTO pending_session_claims")
+    for value in claim[-3:]:
+        assert isinstance(value, float), (
+            f"SQLite 侧时间列应为 Unix float，拿到 {type(value).__name__}"
+        )
+    wake = conn.params_for("INSERT INTO control_plane_wake_events")
+    assert isinstance(wake[7], str), "SQLite 侧 record_json 仍是 TEXT 字符串"
+    assert isinstance(wake[8], (bytes, bytearray))
+    joined = " | ".join(conn.sql)
+    assert "%s" not in joined, f"SQLite 路径混进了 PG 占位符：{conn.sql}"
+    assert "?" in joined, f"SQLite 路径丢了 ? 占位符：{conn.sql}"
+    assert record["user_sig"] == "sig-plaintext"
