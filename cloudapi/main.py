@@ -163,27 +163,33 @@ def security_missing() -> list[str]:
 
 
 def storage_probe() -> str:
-    """存储可用性探针：分别探测读路径与写路径，返回 `read=<状态> write=<状态>`。
+    """存储可用性探针：按步骤逐一探测控制面写入路径，返回 `label=状态` 列表。
 
     存在的理由：`/health` 只证明进程活着，不代表存储可用。线上曾出现服务部署成功、
     `/health` 200，但任何用到存储的端点都 500；而且读能过、写会挂——只探一种路径
-    会把问题看漏。状态默认只给**异常类型名**（不回消息，避免泄露内部细节）；
-    显式设置 `VOICE_STORAGE_PROBE_DETAIL=1` 时追加截断后的消息，仅用于排障。
-    """
-    detail = os.environ.get("VOICE_STORAGE_PROBE_DETAIL") == "1"
+    会把问题看漏。逐步骤探测能把「哪一步、哪种异常」直接钉出来，不必靠猜。
 
-    def run(fn) -> str:
+    ⚠️ 临时状态：当前版本在失败时带上截断后的异常消息，仅用于排障定位；
+    定位结束后应恢复为「只回异常类型名」，避免把内部细节长期暴露在响应里。
+    """
+    import time as _time
+    import uuid as _uuid
+
+    steps: list[str] = []
+
+    def run(label: str, fn) -> None:
         try:
             fn()
-            return "ok"
+            steps.append(f"{label}=ok")
         except Exception as exc:
-            if not detail:
-                return type(exc).__name__
-            return f"{type(exc).__name__}: {str(exc)[:160]}"
+            steps.append(f"{label}={type(exc).__name__}: {str(exc)[:150]}")
 
-    read_state = run(lambda: store.get_setting("__storage_probe__"))
-    write_state = run(lambda: store.set_setting("__storage_probe__", "1"))
-    return f"read={read_state} write={write_state}"
+    run("read", lambda: store.get_setting("__storage_probe__"))
+    run("write", lambda: store.set_setting("__storage_probe__", "1"))
+    run("nonce", lambda: store.consume_nonce("__probe__", _uuid.uuid4().hex, ttl_seconds=60))
+    run("limit", lambda: store.rate_limit.increment("__probe__", "__probe__", _time.time()))
+    run("pairing", lambda: store.create_pairing_code("__probe__", "android", 60))
+    return " | ".join(steps)
 
 
 @app.get("/api/v1/voice/cloud/status")
