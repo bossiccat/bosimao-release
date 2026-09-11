@@ -1,0 +1,23 @@
+{
+  "service": "jax-voice-bridge",
+  "build_context": ".",
+  "dockerfile": "cloudbridge/Dockerfile",
+  "entrypoint": "cloudbridge/supervisor.py",
+  "source_policy": "tracked_git_only",
+  "required_paths": [
+    "cloudbridge/CANONICAL_SOURCE.json",
+    "cloudbridge/Dockerfile",
+    "cloudbridge/supervisor.py",
+    "cloudbridge/requirements.txt",
+    "backend/rtc_bridge",
+    "sidecar/package.json"
+  ],
+  "forbidden_paths": [
+    "deploy/backend",
+    "sidecar/node_modules"
+  ],
+  "notes": [
+    "sidecar 依赖在镜像内 npm install 获取 Linux 原生 addon；本机 node_modules 是 Windows 二进制，禁止入镜像。",
+    "容器内不落任何明文凭据：所有密钥由 CloudRun 服务配置以环境变量注入。"
+  ]
+}

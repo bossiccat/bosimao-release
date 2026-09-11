@@ -1,12 +1,28 @@
-# jax-voice-api 构建上下文白名单。
-# 构建上下文 = 仓库根（cloudapi/Dockerfile 需要 COPY backend/app），但仓库里有
-# target/node_modules/.worktrees/outputs 等数 GB 产物，全量上传会拖垮构建。
-# 因此默认排除一切，只放行运行镜像真正需要的三棵受跟踪目录。
-# 注意：新增任何运行时依赖目录都必须在此显式放行，否则构建会 COPY 失败（fail-closed）。
+# 构建上下文白名单（适用于仓库根作为 build context 的所有镜像）。
+#
+# 背景：仓库里有 target/node_modules/.worktrees/outputs 等数 GB 产物，全量上传会让
+# 构建器内存爆掉（实测：CLI 打包整仓 → 59 分钟后 V8 heap OOM）。因此默认排除一切，
+# 只放行运行镜像真正需要的受跟踪目录。
+#
+# 约定：新增任何运行时依赖目录都必须在此显式放行，否则构建会 COPY 失败（fail-closed，
+# 这是刻意的——宁可构建失败，也不让意外目录悄悄进镜像）。
 *
+# ---- jax-voice-api（cloudapi/Dockerfile）----
 !backend/app/**
 !cloudapi/**
 !cloudbase/**
-# 运行时配置：app/_frozen_paths.project_root() 在容器内推导为 /，CONFIG_DIR 即 /config，
-# cloudapi/Dockerfile 会 COPY config /config。不放行则构建直接失败（实测 build_failed）。
+# 运行时配置：app/_frozen_paths.project_root() 在容器内推导为 /，CONFIG_DIR 即 /config。
 !config/**
+# ---- jax-voice-bridge（cloudbridge/Dockerfile）----
+# rtc_bridge 保持零改动地进镜像。
+!backend/rtc_bridge/**
+!cloudbridge/**
+# sidecar 只放行运行必需的文件（*.js / *.html / *.json）：
+# 其目录里还堆着 _trash-*/node_modules.failed-*/logs/NVIDIA Corporation 等历史产物，
+# 白名单精确到文件模式，避免它们把上下文撑大。
+!sidecar/*.js
+!sidecar/*.html
+!sidecar/*.json
+# 绝不把本机 node_modules 带进镜像：那是 Windows 二进制（electron.exe + win32 addon），
+# Linux 容器内由 Dockerfile 里的 npm install 拉取对应平台产物。
+sidecar/node_modules

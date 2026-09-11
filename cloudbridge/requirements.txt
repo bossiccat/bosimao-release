@@ -1,0 +1,18 @@
+# jax-voice-bridge 运行依赖。
+# 与 cloudapi/requirements.txt 同源：rtc_bridge 会 import app.*（共享协议、配置、
+# qwen_realtime_bridge、brain 注册表等），所以闭包一致，只是额外要 websockets
+# （rtc_bridge 自身的 WS 服务端）与 httpx（控制面/hello 兑换的 HTTP 客户端）。
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+pydantic>=2.7,<3
+pydantic-settings>=2.2,<3
+PyYAML>=6,<7
+PyJWT==2.10.1
+cryptography==50.0.0
+
+# rtc_bridge 自有依赖
+websockets>=12,<15
+httpx>=0.27,<1
+
+# 与控制面共享持久化栈（app.* 的存储装配会用到）
+psycopg[binary,pool]==3.2.13
