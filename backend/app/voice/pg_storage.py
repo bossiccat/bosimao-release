@@ -319,13 +319,30 @@ class PostgresVoiceStore(VoiceStoreFacade):
             self._pool = self._open_default_pool()
         return self._pool
 
-    def open_pool(self) -> Any:
-        """装配期就把池建出来（psycopg 缺失在此 fail-closed，而非首次请求才炸）。
+    def open_pool(self, *, wait: bool = True, timeout: float | None = None) -> Any:
+        """装配期真正打开连接池（而不只是构造它）。
 
-        psycopg_pool 以 `open=False` 构造，不会在装配期真正建连；注入了
-        `pool=` / `pool_factory=` 时直接返回既有池，无副作用。
+        修复的真实事故：本方法原先只做 `_ensure_pool()`，而池是以 `open=False`
+        构造的，于是池永远处于 closed 状态；任何用到存储的请求都会在
+        `pool.connection()` 处立即抛 `PoolClosed`（实测响应耗时 0.22s，
+        非网络超时），云端表现为全端点 500。
+
+        `wait=True` + 有界 timeout：数据库不可达时**启动即失败**（fail-closed），
+        而不是等第一个用户请求才炸。注入的池替身若 `open()` 不接受关键字参数，
+        退回无参调用，保证离线契约测试不受影响。
         """
-        return self._ensure_pool()
+        pool = self._ensure_pool()
+        if getattr(pool, "closed", False) is False:
+            return pool
+        opener = getattr(pool, "open", None)
+        if not callable(opener):
+            return pool
+        limit = self.config.connect_timeout_s if timeout is None else timeout
+        try:
+            opener(wait=wait, timeout=limit)
+        except TypeError:
+            opener()
+        return pool
 
     def _open_default_pool(self) -> Any:
         try:

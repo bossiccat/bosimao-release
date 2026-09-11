@@ -374,3 +374,76 @@ def test_non_postgres_dsn_fails_closed(bad_dsn):
 def test_postgres_dsn_prefixes_accepted(ok_dsn):
     store, _ = make_store(dsn=ok_dsn)
     assert store is not None
+
+
+# --------------------------------------------------------------------------
+# H. 池生命周期：open_pool 必须真正打开池
+# --------------------------------------------------------------------------
+
+
+class _OpenablePool:
+    """可观察 open/closed 的池替身（模拟 psycopg_pool.ConnectionPool 的语义）。"""
+
+    def __init__(self, *, closed: bool = True, accept_kwargs: bool = True) -> None:
+        self.closed = closed
+        self.accept_kwargs = accept_kwargs
+        self.open_calls: list[dict] = []
+        self.no_arg_calls = 0
+
+    def open(self, *args, **kwargs) -> None:
+        if kwargs and not self.accept_kwargs:
+            raise TypeError("open() takes no keyword arguments")
+        if kwargs:
+            self.open_calls.append(kwargs)
+        else:
+            self.no_arg_calls += 1
+        self.closed = False
+
+    @contextmanager
+    def connection(self):
+        yield FakeConnection(self)
+
+
+def test_open_pool_actually_opens_a_closed_pool():
+    """生产事故回归：池以 open=False 构造后从未 open，首个请求即 PoolClosed。
+
+    云端实测表现：任何用到存储的端点都在 0.22s 内 500（不是网络超时——池本身
+    从未打开，`pool.connection()` 立即抛错）。
+    """
+    mod = load_pg_storage()
+    pool = _OpenablePool(closed=True)
+    store = mod.PostgresVoiceStore(dsn=VALID_DSN, pool=pool)
+
+    store.open_pool()
+
+    assert pool.open_calls, "open_pool() 必须真正调用 pool.open()，不能只构造池"
+    assert pool.open_calls[0]["wait"] is True, "必须等待建连，数据库不可达时启动即失败"
+    assert pool.open_calls[0]["timeout"] == store.config.connect_timeout_s
+    assert pool.closed is False
+
+
+def test_open_pool_is_idempotent_for_an_already_open_pool():
+    mod = load_pg_storage()
+    pool = _OpenablePool(closed=False)
+    store = mod.PostgresVoiceStore(dsn=VALID_DSN, pool=pool)
+
+    store.open_pool()
+
+    assert pool.open_calls == [] and pool.no_arg_calls == 0
+
+
+def test_open_pool_tolerates_pools_without_open_or_closed():
+    """注入的替身没有 open/closed 属性时不得报错（离线契约测试依赖此行为）。"""
+    store, fake = make_store()
+    store.open_pool()
+    assert fake.opened == 0
+
+
+def test_open_pool_falls_back_to_no_argument_open():
+    mod = load_pg_storage()
+    pool = _OpenablePool(closed=True, accept_kwargs=False)
+    store = mod.PostgresVoiceStore(dsn=VALID_DSN, pool=pool)
+
+    store.open_pool()
+
+    assert pool.no_arg_calls == 1
