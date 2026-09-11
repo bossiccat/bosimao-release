@@ -114,7 +114,8 @@ class TranscriptService:
 
     def list(self, limit: int = 50) -> list[dict]:
         """元数据列表（不含正文）"""
-        ph = self._dialect.placeholder
+        dialect = self._dialect
+        ph = dialect.placeholder
         with self._store.connect() as conn:
             rows = conn.execute(
                 "SELECT id, session_id, encryption_version, started_at, created_at"
@@ -125,8 +126,11 @@ class TranscriptService:
                 "transcript_id": row["id"],
                 "session_id": row["session_id"],
                 "encryption_version": row["encryption_version"],
-                "started_at": row["started_at"],
-                "created_at": row["created_at"],
+                # started_at / created_at 在云端是 timestamptz（读回 datetime），
+                # SQLite 侧是 Unix float。统一过方言归一成 float，保证同一 API
+                # 在两种方言下类型与数值一致。
+                "started_at": dialect.timestamp_from_storage(row["started_at"]),
+                "created_at": dialect.timestamp_from_storage(row["created_at"]),
             }
             for row in rows
         ]
@@ -158,9 +162,10 @@ class TranscriptService:
     def delete(self, transcript_id: int | None = None, now: float | None = None) -> int:
         """删除单条或全部密文；审计记录不含正文"""
         ts = time.time() if now is None else now
-        ph = self._dialect.placeholder
+        dialect = self._dialect
+        ph = dialect.placeholder
         with self._store.connect() as conn:
-            with conn:
+            with dialect.transaction(conn):
                 if transcript_id is None:
                     cursor = conn.execute("DELETE FROM transcripts")
                     deleted = cursor.rowcount

@@ -101,6 +101,9 @@ class PendingSessionRepository(RepositoryBase):
         if row is None:
             return None
         result = dict(row)
+        # expires_at 是 timestamptz：PG 回来是 datetime、SQLite 是 float。
+        # 必须归一，否则同一 API 在两种后端返回不同类型（与 transcripts.list 同类问题）。
+        result["expires_at"] = self.dialect.timestamp_from_storage(result["expires_at"])
         result["claim_token_hash"] = token_hash
         return result
 
