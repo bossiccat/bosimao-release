@@ -53,7 +53,14 @@ def _env(name: str, default: str = "") -> str:
 
 
 class Child:
-    """被监督的子进程：记录启动参数、退出码与重启次数。"""
+    """被监督的子进程：记录启动参数、退出码、重启次数，并保留输出尾部。
+
+    为什么要保留输出尾部：容器崩溃后由平台重启，**上一次的 stdout 会随容器消失**
+    且该服务的输出不进入可检索日志（实测 CLS 只有网关访问日志）。若不在进程内留住
+    证据，就只能靠猜。状态端点会把这些尾部回报出来——崩溃自我解释，不依赖平台日志。
+    """
+
+    TAIL_LINES = 40
 
     def __init__(self, name: str, argv: list[str], cwd: Path, extra_env: dict[str, str]) -> None:
         self.name = name
@@ -61,18 +68,35 @@ class Child:
         self.cwd = cwd
         self.exit_code: int | None = None
         self.starts = 0
+        self.tail: list[str] = []
+        self._lock = threading.Lock()
         env = dict(os.environ)
         env.update(extra_env)
         self._env = env
         self.proc: subprocess.Popen | None = None
 
+    def _pump(self, stream) -> None:
+        try:
+            for raw in iter(stream.readline, b""):
+                line = raw.decode("utf-8", "replace").rstrip()
+                if not line:
+                    continue
+                with self._lock:
+                    self.tail.append(line)
+                    if len(self.tail) > self.TAIL_LINES:
+                        del self.tail[: len(self.tail) - self.TAIL_LINES]
+                logger.info("[%s] %s", self.name, line)
+        except Exception:  # 读管道失败不应影响监督逻辑
+            return
+
     def start(self) -> None:
         logger.info("starting %s: %s (cwd=%s)", self.name, " ".join(self.argv), self.cwd)
         self.proc = subprocess.Popen(  # noqa: S603 - argv 由本文件构造，非外部输入
             self.argv, cwd=str(self.cwd), env=self._env,
-            stdout=sys.stdout, stderr=sys.stderr,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
         self.starts += 1
+        threading.Thread(target=self._pump, args=(self.proc.stdout,), daemon=True).start()
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -95,11 +119,14 @@ class Child:
                 pass
 
     def describe(self) -> dict:
+        with self._lock:
+            tail = list(self.tail)
         return {
             "alive": self.alive(),
             "pid": None if self.proc is None else self.proc.pid,
             "starts": self.starts,
             "exit_code": self.exit_code,
+            "output_tail": tail,
         }
 
 
@@ -112,6 +139,12 @@ class BridgeSupervisor:
         self.sign_url = _env("CONTROL_PLANE_BASE_URL", "")
         self.device_id = _env("BRIDGE_DEVICE_ID", "jax-cloud-bridge")
         self.sidecar_enabled = _env("BRIDGE_SIDECAR_ENABLED", "true").lower() not in {"0", "false", "no"}
+        # 子进程死亡后保持状态端点存活的秒数（0 = 立即退出）。
+        # 平台不收集容器 stdout，宽限期是唯一能让死因被外部读到的窗口。
+        try:
+            self.crash_grace_s = float(_env("BRIDGE_CRASH_GRACE_S", "120"))
+        except ValueError:
+            self.crash_grace_s = 120.0
         self.shutting_down = False
 
         self.bridge = Child(
@@ -163,13 +196,34 @@ class BridgeSupervisor:
             child.signal(signal.SIGKILL)
 
     def watch(self) -> None:
-        """任一子进程退出即整体退出（非零），由平台负责重启——不写自愈脚本。"""
+        """任一子进程退出即进入宽限期，然后以非零码退出（由平台重启）。
+
+        为什么要宽限期：平台只把网关访问日志收进可检索日志，**容器 stdout 查不到**，
+        而崩溃后容器立刻重启会让死因彻底消失。用一段宽限期保持状态端点存活，运维与
+        部署门禁就能从 /api/v1/voice/bridge/status 读到 exit_code 与 output_tail。
+        宽限期结束后仍然退出，绝不做本地自愈。
+        """
         while not self.shutting_down:
-            if self.bridge.reap() is not None:
-                raise SystemExit(1)
-            if self.sidecar_enabled and self.sidecar.reap() is not None:
-                raise SystemExit(1)
-            time.sleep(1.0)
+            dead = self._first_dead()
+            if dead is None:
+                time.sleep(1.0)
+                continue
+            grace = self.crash_grace_s
+            logger.error(
+                "%s died (exit=%s); holding the status endpoint for %ss before exiting",
+                dead.name, dead.exit_code, grace,
+            )
+            deadline = time.monotonic() + grace
+            while time.monotonic() < deadline and not self.shutting_down:
+                time.sleep(1.0)
+            raise SystemExit(1)
+
+    def _first_dead(self) -> Child | None:
+        if self.bridge.reap() is not None:
+            return self.bridge
+        if self.sidecar_enabled and self.sidecar.reap() is not None:
+            return self.sidecar
+        return None
 
     # ---- 自证状态 ----
 

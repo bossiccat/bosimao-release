@@ -151,9 +151,12 @@ def test_service_reads_credentials_only_from_environment() -> None:
 
 
 class _StubChild:
-    def __init__(self, *, alive: bool = True, exit_code: int | None = None) -> None:
+    def __init__(self, *, alive: bool = True, exit_code: int | None = None,
+                 name: str = "child") -> None:
+        self.name = name
         self._alive = alive
         self._exit_code = exit_code
+        self.exit_code = exit_code
         self.starts = 1
         self.pid = 4242
         self.kwargs = {"extra": "stub"}
@@ -178,6 +181,7 @@ def test_watch_exits_nonzero_when_rtc_bridge_dies() -> None:
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
     sup.shutting_down = False
     sup.sidecar_enabled = True
+    sup.crash_grace_s = 0
     sup.bridge = _StubChild(alive=False, exit_code=1)
     sup.sidecar = _StubChild(alive=True)
 
@@ -191,6 +195,7 @@ def test_watch_exits_nonzero_when_sidecar_dies() -> None:
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
     sup.shutting_down = False
     sup.sidecar_enabled = True
+    sup.crash_grace_s = 0
     sup.bridge = _StubChild(alive=True)
     sup.sidecar = _StubChild(alive=False, exit_code=137)
 
@@ -241,3 +246,41 @@ def test_sdk_version_comes_from_the_sidecar_manifest() -> None:
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
     version = sup.sdk_version()
     assert version, "必须能从 sidecar/package.json 读到 TRTC SDK 版本"
+
+
+# --- 5. 崩溃必须自我解释（平台不收集容器 stdout）--------------------------
+
+
+def test_child_describe_exposes_output_tail() -> None:
+    """死因必须留在产品自己能报出来的地方：容器 stdout 不在可检索日志里。"""
+    module = _load_supervisor()
+    child = module.Child.__new__(module.Child)
+    child.name = "sidecar"
+    child.starts = 1
+    child.exit_code = 2
+    child.proc = None
+    child._lock = __import__("threading").Lock()
+    child.tail = ["[main] fatal NODE_EXTRA_CA_CERTS is not set"]
+
+    described = child.describe()
+    assert described["output_tail"] == ["[main] fatal NODE_EXTRA_CA_CERTS is not set"]
+    assert described["exit_code"] == 2
+
+
+def test_watch_holds_the_status_endpoint_before_exiting() -> None:
+    """子进程死亡后必须先留出可观测窗口，再退出交给平台重启。"""
+    import time
+
+    module = _load_supervisor()
+    sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
+    sup.shutting_down = False
+    sup.sidecar_enabled = False
+    sup.crash_grace_s = 0.3
+    sup.bridge = _StubChild(alive=False, exit_code=1)
+    sup.sidecar = _StubChild(alive=True)
+
+    started = time.monotonic()
+    with pytest.raises(SystemExit):
+        sup.watch()
+    elapsed = time.monotonic() - started
+    assert elapsed >= 0.25, "宽限期内不得立刻退出，否则死因来不及被读到"
