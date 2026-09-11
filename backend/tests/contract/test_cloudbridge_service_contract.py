@@ -83,6 +83,20 @@ def test_entrypoint_exposes_one_platform_port() -> None:
     assert 'CMD ["python", "cloudbridge/supervisor.py"]' in text
 
 
+def test_dockerfile_installs_xauth_needed_by_xvfb_run() -> None:
+    """实测：缺 xauth 时 `xvfb-run` 报 "xauth command not found"，sidecar 起不来。"""
+    text = (CLOUDBRIDGE / "Dockerfile").read_text(encoding="utf-8")
+    assert "xauth" in text
+
+
+def test_requirements_cover_the_rtc_bridge_closure_including_numpy() -> None:
+    """实测：rtc_bridge/session.py → app.voice.apm_bridge 在模块级 import numpy，
+    漏装会让容器启动即 ModuleNotFoundError 并整体退出。"""
+    text = (CLOUDBRIDGE / "requirements.txt").read_text(encoding="utf-8")
+    for requirement in ("websockets", "httpx", "numpy", "psycopg"):
+        assert requirement in text, f"bridge 依赖缺少 {requirement}"
+
+
 # --- 2. 不得出现本地绕行手段 ----------------------------------------------
 
 

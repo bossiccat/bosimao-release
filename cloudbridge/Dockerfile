@@ -17,11 +17,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /srv
 
-# Electron 在 Linux 无头运行所需的共享库 + xvfb（虚拟 X）+ node/npm（装 sidecar 依赖）。
+# Electron 在 Linux 无头运行所需的共享库 + xvfb（虚拟 X）+ xauth（xvfb-run 必需）+ node/npm。
 # 这些不是"本地绕行"，而是让同一份 sidecar 代码能在容器里原样运行的运行期依赖。
+# 实测教训：缺 xauth 时 `xvfb-run` 直接报 "xauth command not found"，sidecar 起不来。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         xvfb \
+        xauth \
         nodejs \
         npm \
         libnss3 \
@@ -35,6 +37,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxcomposite1 \
         libxdamage1 \
         libxrandr2 \
+        libxkbcommon0 \
+        libxfixes3 \
+        libdrm2 \
         fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 

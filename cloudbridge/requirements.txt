@@ -1,7 +1,9 @@
 # jax-voice-bridge 运行依赖。
-# 与 cloudapi/requirements.txt 同源：rtc_bridge 会 import app.*（共享协议、配置、
-# qwen_realtime_bridge、brain 注册表等），所以闭包一致，只是额外要 websockets
-# （rtc_bridge 自身的 WS 服务端）与 httpx（控制面/hello 兑换的 HTTP 客户端）。
+#
+# 闭包比 cloudapi 大：rtc_bridge 不只用 websockets，它的 session.py 会 import
+# app.voice.apm_bridge → **numpy**（实测容器内 ModuleNotFoundError: No module named
+# 'numpy'，rtc_bridge 直接退出）。这里取 cloudapi 闭包 + rtc_bridge 闭包的超集，
+# 宁可多装几个包，也不要在容器启动时才因缺依赖失败（每轮部署验证成本很高）。
 fastapi>=0.115,<1
 uvicorn>=0.30,<1
 pydantic>=2.7,<3
@@ -13,6 +15,8 @@ cryptography==50.0.0
 # rtc_bridge 自有依赖
 websockets>=12,<15
 httpx>=0.27,<1
+# app.voice.apm_bridge 在模块级 import numpy（apm_bridge.py:30）
+numpy>=1.26,<3
 
 # 与控制面共享持久化栈（app.* 的存储装配会用到）
 psycopg[binary,pool]==3.2.13
