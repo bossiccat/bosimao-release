@@ -152,7 +152,7 @@ async def health() -> dict:
     return {
         "status": "ok",
         "service": "jax-voice-api",
-        "trtc_configured": service.is_configured,
+        "trtc_configured": service.is_configured(),
         "security_ready": not security_missing(),
     }
 
@@ -170,7 +170,7 @@ async def cloud_status() -> dict:
         "data": {
             "service": "jax-voice-api",
             "production": settings.voice_production,
-            "trtc_configured": service.is_configured,
+            "trtc_configured": service.is_configured(),
             "security_missing": security_missing(),
         },
         "message": "",
