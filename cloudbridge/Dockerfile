@@ -56,7 +56,7 @@ RUN cd sidecar && npm install --no-audit --no-fund
 COPY cloudbridge ./cloudbridge
 
 # 平台只暴露一个端口；rtc_bridge 的 19092/19093 保持容器内 localhost，不对外。
-EXPOSE 9100
+EXPOSE 9200
 
 # 监督进程：子进程退出即整体退出（由平台重启），替代本地 watchdog。
 CMD ["python", "cloudbridge/supervisor.py"]

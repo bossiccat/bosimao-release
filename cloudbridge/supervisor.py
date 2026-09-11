@@ -229,7 +229,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    port = int(_env("PORT", "9100"))
+    port = int(_env("PORT", "9200"))
     supervisor = BridgeSupervisor()
     _Handler.supervisor = supervisor
     supervisor.start()

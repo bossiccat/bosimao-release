@@ -79,7 +79,7 @@ def test_dockerignore_allows_bridge_sources_and_excludes_windows_node_modules() 
 
 def test_entrypoint_exposes_one_platform_port() -> None:
     text = (CLOUDBRIDGE / "Dockerfile").read_text(encoding="utf-8")
-    assert "EXPOSE 9100" in text
+    assert "EXPOSE 9200" in text
     assert 'CMD ["python", "cloudbridge/supervisor.py"]' in text
 
 
