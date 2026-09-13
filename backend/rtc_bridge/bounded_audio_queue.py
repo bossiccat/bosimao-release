@@ -28,12 +28,17 @@ class QueueEntry:
 
 class BoundedAudioQueue:
     def __init__(self, max_frames: int, max_bytes: int,
-                 max_frame_age_ms: int, now_fn=time.monotonic) -> None:
+                 max_frame_age_ms: int, now_fn=time.monotonic,
+                 name: str = "") -> None:
         if max_frames <= 0 or max_bytes <= 0 or max_frame_age_ms <= 0:
             raise ValueError("队列预算必须为正")
         self.max_frames = max_frames
         self.max_bytes = max_bytes
         self.max_frame_age_ms = max_frame_age_ms
+        # 队列身份（"up"/"down"）。丢帧归因：此前 age-drop WARNING 不带方向，
+        # 一个 58 的 queue_drops 无法判断是上行还是下行丢的（2026-09-13 实测）。
+        # 只加归因，不改任何丢弃行为/预算数值。
+        self.name = name
         self._now = now_fn
         self._entries: deque[QueueEntry] = deque()
         self.generation = 0
@@ -62,6 +67,7 @@ class BoundedAudioQueue:
 
     def metrics(self) -> dict:
         return {
+            "queue_name": self.name,
             "queue_depth": self.depth,
             "queue_high_watermark": self.high_watermark,
             "queue_drops": self.drops,
@@ -119,7 +125,10 @@ class BoundedAudioQueue:
         self._pops += 1
         if self._pops % 500 == 0 and self._age_samples:
             samples = sorted(self._age_samples)
-            logger.info("[lat] up_audio frame age ms p50=%.0f p99=%.0f drops=%d",
+            # 队列身份：旧实现硬编码 "up_audio"，下行队列也打 up_audio，无法归因。
+            tag = f"{self.name}_audio" if self.name else "audio"
+            logger.info("[lat] %s frame age ms p50=%.0f p99=%.0f drops=%d",
+                        tag,
                         samples[len(samples) // 2],
                         samples[min(len(samples) - 1, int(len(samples) * 0.99))],
                         self.drops)
@@ -180,8 +189,8 @@ class BoundedAudioQueue:
         if dropped_in_call and now - self._last_age_drop_log >= 1.0:
             self._last_age_drop_log = now
             logger.warning(
-                "[lat] audio age-drop: 丢弃 %d 帧 / 队首帧龄 %.0fms / 上限 %dms"
+                "[lat] audio age-drop[%s]: 丢弃 %d 帧 / 队首帧龄 %.0fms / 上限 %dms"
                 "（age_dropped=%d，累计丢帧=%d）",
-                dropped_in_call, head_age_ms, self.max_frame_age_ms,
+                self.name or "-", dropped_in_call, head_age_ms, self.max_frame_age_ms,
                 self.age_dropped, self.drops,
             )

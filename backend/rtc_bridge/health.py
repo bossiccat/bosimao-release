@@ -89,6 +89,8 @@ class HealthServer:
             m["down_queue_depth"] = session.stats.get("down_queue_depth", 0)
             m["queue_high_watermark"] = session.stats.get("queue_high_watermark", 0)
             m["queue_drops"] = session.stats.get("queue_drops", 0)
+            m["queue_drops_up"] = session.stats.get("queue_drops_up", 0)
+            m["queue_drops_down"] = session.stats.get("queue_drops_down", 0)
             m["backpressure_events"] = session.stats.get("backpressure_events", 0)
         else:
             m.setdefault("up_frames", 0)
@@ -99,6 +101,8 @@ class HealthServer:
             m.setdefault("down_queue_depth", 0)
             m.setdefault("queue_high_watermark", 0)
             m.setdefault("queue_drops", 0)
+            m.setdefault("queue_drops_up", 0)
+            m.setdefault("queue_drops_down", 0)
             m.setdefault("backpressure_events", 0)
         m["rooms"] = 1 if m.get("room_id") else 0
         return m

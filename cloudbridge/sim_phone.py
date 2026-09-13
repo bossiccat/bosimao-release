@@ -72,6 +72,11 @@ class PhoneSimMetrics:
     speech_reply_frames: int = 0
     speech_reply_bytes: int = 0
     # 打断质量：插话 → 模型不再出声的延迟（三项体验里此前 0 数据的一项）
+    # ⚠️ 交叉校验口径，**非权威**。权威口径在桥侧：rtc_bridge 日志
+    #    `[lat] barge_in stop old_reply=<id> frames=<n> stop_ms=<int>`（同一进程
+    #    time.monotonic() 相减 + reply_id 锚定旧回复末帧）。本字段来自手机模拟器
+    #    onPlayAudioFrame 的能量静音判定：拿不到 reply_id，会把新回复算成「还在说」
+    #    （高估），也会被句间停顿误判（可能 None）。
     barge_in_attempted: bool = False
     barge_in_stop_ms: int | None = None
     reply_path: str = ""

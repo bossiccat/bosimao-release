@@ -39,6 +39,7 @@ class DownlinkShaper:
         max_frames: int = DEFAULT_DOWN_MAX_FRAMES,
         max_bytes: int = DEFAULT_DOWN_MAX_BYTES,
         max_frame_age_ms: int = DEFAULT_DOWN_MAX_FRAME_AGE_MS,
+        queue_name: str = "down",
     ) -> None:
         self._send_frame = send_frame
         self._frame_bytes = int(sample_rate * 2 * (frame_ms / 1000))  # 20ms @16k mono s16 = 640B
@@ -48,6 +49,7 @@ class DownlinkShaper:
             max_frames=max_frames,
             max_bytes=max_bytes,
             max_frame_age_ms=max_frame_age_ms,
+            name=queue_name,
         )
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -71,6 +73,11 @@ class DownlinkShaper:
     @property
     def current_reply_id(self) -> str:
         return self._reply_id
+
+    @property
+    def queued_frames(self) -> int:
+        """当前仍在队列、尚未推送的帧数（打断测量的 residual：打断瞬间将被丢弃的旧回复余量）"""
+        return self._q.depth
 
     def start(self) -> None:
         if self._task is None:

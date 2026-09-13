@@ -133,6 +133,7 @@ class PeerVoiceSession:
             max_frames=up_max_frames,
             max_bytes=up_max_bytes,
             max_frame_age_ms=up_max_frame_age_ms,
+            name="up",
         )
         self._up_wake = asyncio.Event()
         self._consumer: asyncio.Task | None = None
@@ -148,6 +149,9 @@ class PeerVoiceSession:
         self._down_speaking = False     # AI 播报中（down 持续流动）
         self._down_speaking_since = 0.0  # 本轮播报起始时刻（宽限期判定基准）
         self._barge_run = 0             # 连续高能量帧计数（持续语音确认）
+        # 打断延迟分段的两个 monotonic 锚点（见 _arm_barge_latency 的说明）：
+        self._barge_run_started_mono: float | None = None  # 连续高能量序列的**第一帧**
+        self._barge_emit_stop_mono: float | None = None    # 旧回复**停止向下游送出**的时刻
         self._barge_grace_s = barge_grace_s
         self._barge_sustain_frames = max(1, barge_sustain_frames)
         self._barge_drops = 0           # 打断丢弃的下行帧计数
@@ -159,6 +163,11 @@ class PeerVoiceSession:
         self._reply_seq = 0         # reply 计数器（会话内单调递增）
         self._chunk_seq = 0         # 当前 reply 内的云端 chunk 序号
         self._last_down_mono = 0.0  # 上一帧下行的 monotonic 时刻（reply 边界判定）
+        # 打断延迟（桥侧权威口径，2026-09-13）：全部用本进程 time.monotonic() 做差，
+        # 绝不与 sidecar/手机时间戳相减（PC 与手机墙钟差约 11s，t_enq/t_send 跨进程不可比）。
+        self._reply_sent_frames: dict[str, int] = {}      # reply_id → 已送出帧数
+        self._reply_last_sent_mono: dict[str, float] = {}  # reply_id → 末帧送出时机（本进程 mono）
+        self._barge_lat_pending: dict | None = None        # 未结算的一次打断测量
         # GPT-Live 式待命/唤醒状态机
         # _standby=True 时禁止模型输出（下行音频/文本均丢弃）；上行仍由当前 RTC 会话接收。
         # 注意：真正的唤醒门禁仍需手机侧 KWS/重进房；后端不能把云端模型当 KWS。
@@ -187,6 +196,10 @@ class PeerVoiceSession:
             "down_queue_depth": 0,
             "queue_high_watermark": 0,
             "queue_drops": 0,
+            # 丢帧归因（2026-09-13）：queue_drops 保留为两者之和（既有消费方不破），
+            # 新增分方向字段，让「58 到底是上行还是下行丢的」可见。
+            "queue_drops_up": 0,
+            "queue_drops_down": 0,
             "backpressure_events": 0,
             "standby": False,           # GPT-Live 待命态（True=AI 静默）
             "standby_drops": 0,         # standby 期间丢弃的下行帧计数
@@ -258,11 +271,16 @@ class PeerVoiceSession:
                     and pcm_rms(pcm) > 800.0):
                 if now - self._down_speaking_since >= self._barge_grace_s:
                     self._barge_run += 1
+                    if self._barge_run == 1:
+                        # 连续高能量序列的第一帧——detect_ms 的起点（我们自己的决策耗时）
+                        self._barge_run_started_mono = time.monotonic()
                     if self._barge_run >= self._barge_sustain_frames:
                         self._barge_in = True
                         self._barge_run = 0
                         self._apm_barge_drops_reset()
+                        self._arm_barge_latency()  # 先记 barge_t0 与旧 reply_id（权威口径）
                         self.shaper.reset()   # 清空未推送的下行帧（正在播的 20ms 帧自然播完）
+                        self._mark_barge_emit_stop()  # reset 生效=我们这层停止送出旧回复
                         # 打断冲刷必须**下沉到 sidecar**：清 rtc_bridge 队列还不够 ——
                         # sidecar 的 DownlinkPacer 还会积压最多 50 帧(1s) 待播音频。
                         # 不下发这条指令，用户插话后旧回复会继续播完那 1 秒
@@ -273,12 +291,16 @@ class PeerVoiceSession:
                         if self._router is not None:
                             self._router.clear()   # 丢弃被中断的 AI 文本（不路由到 Brain）
                         # P0-5/F4：丢弃窗口开窗打点（判定"下行丢弃窗口误开"假设 C）
-                        logger.info("[lat] barge_in open mono=%.3f", now)
+                        # 时钟口径修正（2026-09-13）：此前打的是 time.time() 墙钟，与同文件
+                        # 其他 [lat] 打点（time.monotonic()）混在一起不可比，改回 monotonic。
+                        logger.info("[lat] barge_in open mono=%.3f", time.monotonic())
                         logger.info("barge-in: user speech during AI playback, downlink flushed")
                 else:
                     self._barge_run = 0   # 宽限期内高能量=回声瞬态，不计入持续序列
+                    self._barge_run_started_mono = None   # 序列已断，锚点必须作废
             else:
                 self._barge_run = 0
+                self._barge_run_started_mono = None       # 同上：避免下次打断误用陈旧锚点
         if self._barge_in:
             self._last_down_check = now
         if now - self._last_up_rms_log >= 2.0:
@@ -294,6 +316,82 @@ class PeerVoiceSession:
 
     def _apm_barge_drops_reset(self) -> None:
         self._barge_drops = 0
+
+    # ---------- 打断延迟（桥侧权威口径） ----------
+
+    def _arm_barge_latency(self) -> None:
+        """打断被检测到的那一刻：记 barge_t0 与正在播的旧 reply_id。
+
+        为什么这是权威口径（2026-09-13）
+        --------------------------------
+        手机侧 `onPlayAudioFrame` **拿不到 reply_id**，只能靠「能量静音」猜旧回复是否
+        结束，两个口径都不可靠：①「最后一帧含能量的帧」会把模型对插话的新回复也算成
+        「还在说」⇒ 系统性高估；②「插话后第一个 ≥200ms 静音间隙」会把句间停顿误判为
+        结束，且可能给 null。桥侧天然知道 reply 身份（`DownFrame.reply_id`）与插话时刻。
+
+        时钟铁律：barge_t0 与旧 reply 末帧送出时刻都用**本 rtc_bridge 进程的
+        time.monotonic()**，两者相减才有意义。绝不用墙钟、绝不与 sidecar/手机时间戳
+        相减（PC 与手机墙钟差约 11s）。
+
+        必须在 `shaper.reset()` **之前**调用：此时清点队列才能反映打断瞬间仍在等待
+        推送、随即被丢弃的旧回复余量（residual）。
+        """
+        if self._barge_lat_pending is not None:
+            self._settle_barge_latency("superseded")
+        self._barge_lat_pending = {
+            "old_reply": self.shaper.current_reply_id or self._reply_id,
+            "t0": time.monotonic(),
+            "residual": self.shaper.queued_frames,
+            # 连续高能量序列的起点：detect_ms = t0 − t_run，即**我们自己的决策耗时**
+            # （宽限期 + 持续帧确认）。这是可控项里最值得盯的一段。
+            "t_run": self._barge_run_started_mono,
+        }
+        self._barge_run_started_mono = None   # 消费掉，避免下一次误用陈旧锚点
+        self._barge_emit_stop_mono = None
+
+    def _mark_barge_emit_stop(self) -> None:
+        """旧回复**停止向下游送出**的时刻（必须在 `shaper.reset()` 之后立即调用）。
+
+        为什么要单独记这一个锚点：`shaper.reset()` 会把**还排在队列里、尚未推送**的
+        旧回复帧整批丢掉（实测达 158 帧 ≈ 3.16s）。也就是说打断之后我们**立刻就停**了，
+        而"旧 reply 最后一帧被送出"发生在打断**之前** —— 用它当 finish 线会算出 0ms，
+        那是量错了事件、不是延迟真的为 0（physically 不可能）。
+        """
+        self._barge_emit_stop_mono = time.monotonic()
+
+    def _settle_barge_latency(self, reason: str) -> None:
+        """结算一次打断测量并打权威日志：保证出数（stop_ms 必为 int，绝不 None）。
+
+        reason：new_reply（新 reply 已开始送出）/ down_silent（下行静默关窗）/
+        close（会话结束）/ peer_reenter / peer_leave / superseded（连续打断）。
+        """
+        pend = self._barge_lat_pending
+        if pend is None:
+            return
+        self._barge_lat_pending = None
+        old = pend["old_reply"]
+        frames = self._reply_sent_frames.get(old, 0)
+        last = self._reply_last_sent_mono.get(old)
+        t0 = pend["t0"]
+        emit_t = self._barge_emit_stop_mono
+        self._barge_emit_stop_mono = None
+        # detect_ms：连续高能量第一帧 → 我们做出打断决定。这是**我们自己的决策成本**
+        #   （宽限期 barge_grace_s + 持续帧确认 sustain_frames），是最值得优化的可控项。
+        detect_ms = (max(0, int(round((t0 - pend["t_run"]) * 1000.0)))
+                     if pend.get("t_run") is not None else -1)
+        # emit_stop_ms：决定 → **我们这层停止向下游送出旧回复**（同 tick 内 flush，应 ≈0）。
+        #   这才是"我们这一层的停止延迟"，不会被"帧早就送完了"钳成 0。
+        emit_stop_ms = (max(0, int(round((emit_t - t0) * 1000.0)))
+                        if emit_t is not None else -1)
+        # last_sent_ms：旧 reply 最后一帧**送进节拍器**的时刻。它 ≠ 用户听到的时刻；
+        #   打断时残余帧被清空，所以它通常早于 t0，被钳成 0 属正常（仅作参考，不要当延迟）。
+        last_sent_ms = (max(0, int(round((last - t0) * 1000.0)))
+                        if last is not None else -1)
+        logger.info(
+            "[lat] barge_in stop old_reply=%s frames=%d detect_ms=%d emit_stop_ms=%d "
+            "last_sent_ms=%d residual_frames=%d reason=%s",
+            old or "-", frames, detect_ms, emit_stop_ms, last_sent_ms,
+            pend["residual"], reason)
 
     async def _cancel_model_response(self) -> None:
         """打断时**主动请求模型取消正在进行的 response**（fail-soft）。
@@ -326,7 +424,9 @@ class PeerVoiceSession:
         if self._down_speaking:
             self.stats["server_barge_in"] = self.stats.get("server_barge_in", 0) + 1
             self._apm_barge_drops_reset()
+            self._arm_barge_latency()  # 先记 barge_t0 与旧 reply_id（权威口径）
             self.shaper.reset()
+            self._mark_barge_emit_stop()  # 与本地能量路径对称：reset 生效=停止送出
             # 打断冲刷必须**下沉到 sidecar**，与本地能量路径（on_up_audio 的 barge-in
             # 分支）保持对称：清 rtc_bridge 队列还不够 —— sidecar 的 DownlinkPacer
             # 还会积压最多 50 帧(1s) 待播音频。此前云端 VAD 路径只做 shaper.reset()，
@@ -389,6 +489,9 @@ class PeerVoiceSession:
         self.stats["down_queue_depth"] = down["queue_depth"]
         self.stats["queue_high_watermark"] = max(up["queue_high_watermark"],
                                                  down["queue_high_watermark"])
+        # 分方向归因 + 保留 queue_drops 作为两者之和（既有消费方不破）
+        self.stats["queue_drops_up"] = up["queue_drops"]
+        self.stats["queue_drops_down"] = down["queue_drops"]
         self.stats["queue_drops"] = up["queue_drops"] + down["queue_drops"]
         self.stats["backpressure_events"] = up["backpressure_events"] + down["backpressure_events"]
 
@@ -469,6 +572,8 @@ class PeerVoiceSession:
         if self._down_speaking and now - self._last_down_ts > 0.6:
             self._down_speaking = False
             self._marker_tail_drop = False  # 播报结束：关闭标记尾音丢弃窗口
+            # 打断测量结算：下行静默 ⇒ 旧 reply 不可能再有帧（若尚未因新 reply 结算）
+            self._settle_barge_latency("down_silent")
             # P0-5/F4：丢弃窗口关窗打点 + 各窗口丢帧计数（假设 C 判定）
             logger.info("[lat] discard window closed mono=%.3f barge_drops=%d "
                         "marker_tail_drops=%d standby_drops=%d",
@@ -535,6 +640,15 @@ class PeerVoiceSession:
         # F6/F7 追溯字段（附加字段，旧 sidecar 忽略未知 key 即可正常工作）
         msg.update(frame.trace_fields())
         await self._send_msg(msg)
+        # 打断延迟（桥侧权威口径）：按 reply_id 追踪末帧送出时刻。只用本进程 monotonic。
+        rid = frame.reply_id
+        if rid:
+            self._reply_sent_frames[rid] = self._reply_sent_frames.get(rid, 0) + 1
+            self._reply_last_sent_mono[rid] = time.monotonic()
+            pend = self._barge_lat_pending
+            if pend is not None and rid != pend["old_reply"]:
+                # 已有新 reply 的帧送出 ⇒ 旧 reply 不可能再有帧 ⇒ 结算
+                self._settle_barge_latency("new_reply")
 
     async def _on_text(self, text: str) -> None:
         """APM 文本 delta → 标记检测 + router 累积
@@ -618,6 +732,7 @@ class PeerVoiceSession:
             self._up_q.flush()   # 清掉断连期间堆积的旧帧，防跨会话串音
         self.feeder.reset()
         self.shaper.reset()
+        self._settle_barge_latency("peer_reenter")  # 会话重启前先结算未完成的打断测量
         # barge-in 状态重置（新会话干净起步）
         self._barge_in = False
         self._down_speaking = False
@@ -632,6 +747,7 @@ class PeerVoiceSession:
 
     async def on_peer_leave(self, user_id: str) -> None:
         """手机（远端）离开：释放 APM 会话，回待命"""
+        self._settle_barge_latency("peer_leave")  # 保证打断测量不留 null
         self._peer_entered = False
         self._peer_user_id = ""
         logger.info("peer leave device=%s peer=%s", self.device_id, user_id)
@@ -663,6 +779,7 @@ class PeerVoiceSession:
             closed_cleanly = False
         await self._notify_apm_cancelled(closed_cleanly)
         await self.shaper.stop()
+        self._settle_barge_latency("close")  # 尾帧已送出后再结算，保证不留 null
         if self._consumer is not None:
             self._consumer.cancel()
             try:

@@ -22,6 +22,15 @@ function runPhone(cloud, log) {
   let lastSpeechTs = null;       // 最近一次「有有效能量」的时刻：结束判定必须用它
   // ── 打断（barge-in）测量：模型说到一半时手机插话，量「插话 → 模型停止输出」的延迟 ──
   // 这是三项体验里此前**完全没测过**的一项（流畅度/完整度已有指标）。
+  //
+  // ⚠️ 权威口径在**桥侧**（rtc_bridge 进程内），不在本文件：
+  //     `[lat] barge_in stop old_reply=<id> frames=<n> stop_ms=<int>`
+  //   桥侧天然知道 reply 身份（DownFrame.reply_id），且插话时刻与旧回复末帧送出时刻
+  //   都是**同一进程的 time.monotonic()**，相减才有意义（跨进程/跨设备墙钟差约 11s，
+  //   不可相减）。本文件的 barge_in_stop_ms 只是**交叉校验**，有三个已知缺陷：
+  //     ① onPlayAudioFrame 拿不到 reply_id，只能靠「能量静音」猜旧回复是否结束；
+  //     ② 「最后一帧含能量的帧」会把模型对插话的**新回复**也算成「还在说」⇒ 系统性高估；
+  //     ③ 「插话后第一个 ≥200ms 静音间隙」会被**句间停顿**误判为结束，且可能给 n/a。
   let bargeInSentTs = null;          // 插话首帧发出的时刻
   let lastSpeechAfterBargeTs = null; // 插话后仍听到语音的最后一刻（含**新回复**，会高估）
   let gapStartTs = null;             // 插话后第一个静音间隙的起点（累计中）
