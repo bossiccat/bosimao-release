@@ -114,3 +114,38 @@ async def test_success_posts_once_with_service_and_gateway_assertion() -> None:
     assert len(calls) == 1
     assert calls[0].headers["authorization"] == "Bearer service-secret"
     assert calls[0].headers["x-internal-gateway-assertion"] == "gateway-secret"
+
+
+@pytest.mark.asyncio
+async def test_rejection_message_carries_business_code_for_attribution() -> None:
+    """非 200 必须把**业务错误码**写进异常消息，否则兑付失败无法归因。
+
+    为什么单独立这一条：40101 / 40114 / 40021 各自精确对应一道不同的校验
+    （服务凭证不被接受 / 断言哈希或证书绑定不一致 / 会话状态）。旧实现把这几个
+    统一吞成 "redemption rejected"，实测为此白排查了多轮。
+
+    这条埋点此前**没有任何测试守护**：2026-09-14 变异校验发现，把它改成恒 "n/a"
+    时 contract 20 例 + unit 65 例**全绿** ⇒ 等于没有保护。现补上。
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            json={"code": 40114, "data": None,
+                  "message": "rtc_bridge_service_auth_failed"},
+            request=request,
+        )
+
+    client = HelloRedemptionClient(
+        base_url="https://control-plane.internal",
+        service_credential="service-secret",
+        ca_file="ca.pem", client_cert_file="client.pem", client_key_file="client.key",
+        gateway_assertion="gateway-secret", transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(HelloRedemptionError) as exc:
+        await client.redeem(_hello())
+
+    message = str(exc.value)
+    assert "http=401" in message, message
+    assert "code=40114" in message, f"必须带业务码才能归因，实测 {message!r}"
+    assert "n/a" not in message, "不得把已知业务码降级成 n/a（那会毁掉归因能力）"

@@ -57,6 +57,42 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
      'const DEFAULT_CONTROL_PLANE_URL: &str =\n    "https://jax-voice-api-283963-7-1436773060.sh.run.tcloudbase.com";',
      'const DEFAULT_CONTROL_PLANE_URL: &str =\n    "https://jax-backend-283963-7-1436773060.sh.run.tcloudbase.com";',
      "control_plane_endpoint"),
+    # ---- 更早的关键行为（2026-09-14 扩展：让"有没有牙齿"成为例行度量）----
+    ("打断不再冲刷 sidecar pacer（去掉 flush_downlink）",
+     "backend/rtc_bridge/session.py",
+     'await self._send_msg({"type": MSG_CTRL, "action": "flush_downlink"})',
+     'pass  # MUTATED: 打断不再冲刷 sidecar pacer',
+     "barge_in_flush"),
+
+    ("播放期上行门控不再丢弃（去掉 continue ⇒ 回声会喂给云端）",
+     "backend/rtc_bridge/session.py",
+     'self.stats["up_gated_playback"] = self.stats.get("up_gated_playback", 0) + 1\n                continue',
+     'self.stats["up_gated_playback"] = self.stats.get("up_gated_playback", 0) + 1  # MUTATED',
+     "gate or barge or up_q or consume"),
+
+    ("打断不再请求模型取消 response（payload 换掉）",
+     "backend/app/voice/qwen_realtime_bridge.py",
+     'payload = {"type": "response.cancel"}',
+     'payload = {"type": "noop"}  # MUTATED',
+     "barge_in_response_cancel"),
+
+    ("下行帧龄丢弃失效（阈值放大 1000 倍 ⇒ 几乎不再丢）",
+     "backend/rtc_bridge/bounded_audio_queue.py",
+     "while self._entries and (now - self._entries[0].created_at) * 1000.0 > limit_ms:",
+     "while self._entries and (now - self._entries[0].created_at) * 1000.0 > limit_ms * 1000:  # MUTATED",
+     "queue or attribution"),
+
+    ("hello 门禁去掉 certificate_binding 比对",
+     "backend/app/api/routes_voice_hello.py",
+     "or certificate != expected_certificate_binding):",
+     "or False):  # MUTATED: 不再比对 certificate_binding",
+     "cloudapi_hello_wiring"),
+
+    ("兑付错误码不再分类（恒 n/a ⇒ 无法归因）",
+     "backend/rtc_bridge/redemption.py",
+     'code = str((response.json() or {}).get("code", "n/a"))',
+     'code = "n/a"  # MUTATED',
+     "commercial or redemption or redeem or error"),
 ]
 
 
@@ -89,8 +125,12 @@ def main() -> int:
             continue
         try:
             proc = subprocess.run(
-                [PY, "-m", "pytest", "backend/tests/contract", "-q", "-k", sel,
-                 "--no-header", "-x"],
+                # 必须同时扫 contract **与** unit：守护会住在任意一侧。
+                # 实测踩过——只跑 contract 时，"上行播放期门控"与"下行帧龄丢弃"的守护
+                # （test_uplink_playback_gating.py / test_queue_attribution.py 在 unit/）
+                # 完全不可见，于是被误报成"契约无区分力"，白白得出 3 个假缺口。
+                [PY, "-m", "pytest", "backend/tests/contract", "backend/tests/unit",
+                 "-q", "-k", sel, "--no-header", "-x"],
                 cwd=str(ROOT), capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=600)
             if proc.returncode == 5:      # pytest: no tests collected
