@@ -8,7 +8,18 @@
 
 复用 backend/app 的商业安全路由（ADR-014 fail-closed）：同一套 guarded 语义、
 nonce/限流/错误码/契约测试已验证过的代码原样上云，不自造第二套。
-hello（mTLS 客户端证书绑定）与 agent-threads 路由不装配——它们是 PC 内部控制面。
+hello proof 的**签发与兑付**都必须在本服务器装配：session / pending claim / hello proof
+是本服务职责（docs/plans/2026-09-07-voice-cloud-session-migration.md §2），部署 Secret
+注入包含 hello signing。不装配 hello 会让 SecuredVoiceDeps.sidecar_sign 恒为 None，
+POST /api/v1/voice/session/sign 恒返 50303 —— 整条云端语音链路是死的。
+兑付端 POST /api/v1/voice/internal/rtc-bridge/hello-redeem 需要两项服务端装配（与 PC
+入口 backend/app/main.py 同一套机制，不自造第二套、不放松校验）：
+  1. 受信网关身份中间件 TrustedGatewayIdentityMiddleware —— 解析
+     VOICE_TRUSTED_GATEWAY_HOSTS 并把受信来源+正确断言盖章进 scope，
+     供 trusted_certificate_binding(scope) 读取；否则兑付端拿不到盖章值恒 40114。
+  2. CredentialValidator 传 rtc_bridge_credential_hash —— 缺失时
+     verify_rtc_bridge(bearer) 恒 40101（backend/app/voice/auth.py:161-166）。
+agent-threads 路由不装配——它是 PC 内部控制面。
 ACK 上报（ack_reporter）在云端无 PC 后端时按既有语义优雅降级（None）。
 """
 from __future__ import annotations
@@ -35,6 +46,7 @@ from app.voice.config import (  # noqa: E402
     validate_voice_storage,
 )
 from app.voice.devices import DeviceService  # noqa: E402
+from app.voice.hello_runtime import build_hello_runtime  # noqa: E402
 from app.voice.nonce import NonceService  # noqa: E402
 from app.voice.rate_limit import RateLimitConfig, RateLimiter  # noqa: E402
 from app.voice.rtc_session import RtcSessionConfig, RtcSessionService  # noqa: E402
@@ -42,6 +54,7 @@ from app.voice.store_factory import (  # noqa: E402
     build_voice_store,
     shutdown_voice_store,
 )
+from app.voice.trusted_gateway import TrustedGatewayIdentityMiddleware  # noqa: E402
 from app.api.routes_voice_secured import create_secured_voice_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
@@ -114,7 +127,45 @@ service = RtcSessionService(
         room_prefix=settings.trtc_room_prefix or "jax-",
     )
 )
-validator = CredentialValidator(store, security.owner_credential_hash, sidecar_credentials)
+validator = CredentialValidator(
+    store, security.owner_credential_hash, sidecar_credentials,
+    # 兑付端 hello-redeem 的 rtc_bridge 服务身份（与 PC 入口 backend/app/main.py:135-138
+    # 同一算法/来源）：缺此哈希时 verify_rtc_bridge 恒 40101，兑付 fail-closed 终局。
+    rtc_bridge_credential_hash=(
+        CredentialValidator.hash_credential(settings.voice_rtc_bridge_credential)
+        if settings.voice_rtc_bridge_credential else ""
+    ),
+)
+
+# hello proof 签发运行时（复用 PC 入口同一套 build_hello_runtime，不自造第二套）。
+# - 生产模式：任一 hello 配置键缺失 → 启动即拒（ProductionGateError），绝不在请求期
+#   退化成 50303（那正是本次缺陷）。异常只列缺失的**配置键名**，不含密钥值。
+# - 非生产：缺键时 hello 不装配（hello_service=None），保持本地开发/测试可跑。
+_HELLO_REQUIRED_SETTINGS = (
+    ("VOICE_HELLO_PRIVATE_KEY_PEM", settings.voice_hello_private_key_pem),
+    ("VOICE_HELLO_PUBLIC_KEY_PEM", settings.voice_hello_public_key_pem),
+    ("VOICE_RTC_BRIDGE_CREDENTIAL", settings.voice_rtc_bridge_credential),
+    ("VOICE_RTC_BRIDGE_CERT_BINDING", settings.voice_rtc_bridge_cert_binding),
+    ("VOICE_GATEWAY_SHARED_ASSERTION", settings.voice_gateway_shared_assertion),
+)
+_missing_hello_settings = [name for name, value in _HELLO_REQUIRED_SETTINGS if not value]
+hello_runtime = None
+if _missing_hello_settings:
+    if settings.voice_production:
+        raise ProductionGateError(
+            "生产安全能力缺失: hello signing 配置缺失: "
+            + ", ".join(_missing_hello_settings)
+        )
+else:
+    hello_runtime = build_hello_runtime(
+        store=store,
+        production=settings.voice_production,
+        private_key_pem=settings.voice_hello_private_key_pem,
+        public_key_pem=settings.voice_hello_public_key_pem,
+        rtc_bridge_credential=settings.voice_rtc_bridge_credential,
+        certificate_binding=settings.voice_rtc_bridge_cert_binding,
+        gateway_assertion=settings.voice_gateway_shared_assertion,
+    )
 
 secured_router = create_secured_voice_router(
     store=store,
@@ -124,7 +175,15 @@ secured_router = create_secured_voice_router(
     limiter=RateLimiter(store, RateLimitConfig()),
     security=security,
     devices=DeviceService(store),
-    # hello_service=None：hello（PC 桥 mTLS 绑定）不上云；privacy 用容器内默认（no-op actions）
+    # hello 装配是 /session/sign 可用性的前提：不传会让 deps.sidecar_sign 恒为 None → 50303。
+    hello_service=hello_runtime.service if hello_runtime is not None else None,
+    hello_certificate_binding=(
+        hello_runtime.certificate_binding if hello_runtime is not None else ""
+    ),
+    hello_gateway_assertion_hash=(
+        hello_runtime.gateway_assertion_hash if hello_runtime is not None else ""
+    ),
+    # privacy 用容器内默认（no-op actions）
 )
 
 @asynccontextmanager
@@ -143,6 +202,26 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
+
+# 受信网关身份中间件（与 PC 入口 backend/app/main.py:293-306 同一套机制与解析方式）：
+# 兑付端 trusted_certificate_binding(request.scope) 只认本中间件在「来源受信 + 断言
+# HMAC 匹配」双条件下盖章的 scope 值。云端边缘 LB 是 IP 池，来源经
+# VOICE_TRUSTED_GATEWAY_HOSTS 显式声明（支持单 IP 与 CIDR）；缺此中间件时
+# hello-redeem 恒 40114（fail-closed）。断言哈希只在这里算，密钥值不进日志。
+app.add_middleware(
+    TrustedGatewayIdentityMiddleware,
+    gateway_assertion_hash=(
+        CredentialValidator.hash_credential(settings.voice_gateway_shared_assertion)
+        if settings.voice_gateway_shared_assertion else ""
+    ),
+    certificate_binding=settings.voice_rtc_bridge_cert_binding,
+    allowed_hosts=[
+        host.strip()
+        for host in settings.voice_trusted_gateway_hosts.split(",")
+        if host.strip()
+    ],
+)
+
 app.include_router(secured_router)
 
 

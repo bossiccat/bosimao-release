@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xauth \
         nodejs \
         npm \
+        ffmpeg \
         libnss3 \
         libatk1.0-0 \
         libatk-bridge2.0-0 \
@@ -44,8 +45,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Python 依赖：与 cloudapi 同一闭包（rtc_bridge 会 import app.*），额外需要 websockets。
+# edge-tts 用于**云端生成手机模拟器的中文提示音**（真语音，非音调），配合 ffmpeg 转 16k wav。
 COPY cloudbridge/requirements.txt ./cloudbridge-requirements.txt
-RUN pip install --no-cache-dir -r cloudbridge-requirements.txt
+RUN pip install --no-cache-dir -r cloudbridge-requirements.txt \
+    && pip install --no-cache-dir edge-tts==7.2.8
 
 # 受跟踪的三棵树：rtc_bridge（零改动）、sidecar（零改动）、backend/app（共享协议与配置）
 COPY backend/app ./backend/app
@@ -63,9 +66,44 @@ COPY config /config
 COPY certs/cloud-control-plane-issuer.pem /srv/certs/cloud-control-plane-issuer.pem
 ENV NODE_EXTRA_CA_CERTS=/srv/certs/cloud-control-plane-issuer.pem
 
-# sidecar 依赖：trtc-electron-sdk 的 postinstall 会拉取 Linux 原生 addon，
+# ⚠️ 客户端私钥/证书一律**不烘进镜像**：镜像层会被任何能拉取镜像的人读到。
+#    RTC_BRIDGE_CLIENT_CERT_PEM / RTC_BRIDGE_CLIENT_KEY_PEM /
+#    RTC_BRIDGE_CONTROL_PLANE_CA_PEM 由 CloudRun 以环境变量注入，supervisor 启动时
+#    经 cloudbridge/tls_material.py 落成 0o600 临时文件，再把 RTC_BRIDGE_*_FILE
+#    注入 rtc_bridge 子进程。此处只放公开的 CA 信任锚（上面的 issuer.pem），
+#    禁止 COPY client.key / client.crt / ca.key。
+
+# sidecar 依赖：trtc-electron-sdk 的 `install` 脚本会联网下载 Linux 原生 addon，
 # electron 会下载 Linux 运行时。**不把本机 node_modules 带进镜像**（Windows 二进制）。
-RUN cd sidecar && npm install --no-audit --no-fund
+# 注意：上面的注释曾写成「postinstall 会拉取」——实际是 `install`→`download`，且**会静默失败**，
+# 所以下面必须显式校验（见紧接其后的 fail-closed 段）。
+# --foreground-scripts：让 install 脚本的输出进构建日志（默认被 npm 吞掉，
+# 这正是「下载失败却构建成功」长期看不见的原因之一）。
+RUN cd sidecar && npm install --no-audit --no-fund --foreground-scripts
+
+# 原生 addon **fail-closed 校验**（2026-09-12 事故沉淀）
+# ---------------------------------------------------------------------------
+# trtc-electron-sdk 的原生库不在 npm 包里：`install` 脚本会从
+# https://web.sdk.qcloud.com/trtc/electron/download/...zip 下载并解压到
+# build/Release/。实测该下载会失败**且被脚本静默吞掉**，Docker 构建照样"成功"，
+# 于是产出一个「进程能起、但连不上 TRTC」的镜像。后果是云端媒体面从未进过房间：
+# 渲染进程 require('trtc-electron-sdk') 抛
+#   Cannot find module '../build/Release/trtc_electron_sdk.node'
+# 而这条错误在无头容器里既不进 stdout 也不落日志文件，藏了很久。
+# 这里做两件事：① 缺失则显式重下（有界重试，仅用于抵消网络抖动）；
+#              ② 仍缺失就让**构建失败**——宁可构建不过，也不产出坏镜像。
+RUN set -eu; cd sidecar; \
+    ADDON=node_modules/trtc-electron-sdk/build/Release/trtc_electron_sdk.node; \
+    for attempt in 1 2 3; do \
+      if [ -f "$ADDON" ]; then break; fi; \
+      echo "[trtc-addon] missing; download attempt ${attempt}/3"; \
+      ( cd node_modules/trtc-electron-sdk && npm run download ) || true; \
+    done; \
+    if [ ! -f "$ADDON" ]; then \
+      echo "[trtc-addon] FATAL: 原生 addon 仍缺失（${ADDON}）；拒绝构建 TRTC 不可用的镜像"; \
+      exit 1; \
+    fi; \
+    echo "[trtc-addon] OK: $(wc -c < "$ADDON") bytes"
 
 COPY cloudbridge ./cloudbridge
 

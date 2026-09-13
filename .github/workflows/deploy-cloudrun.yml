@@ -1,19 +1,27 @@
 # =============================================================================
 # 云端部署流水线（CloudBase CloudRun）—— 覆盖控制面与音频桥两个服务
 #
-# 目的：部署这件事不依赖任何本机 shell。
+# 目的：部署这件事不依赖任何本机 shell，且**缺配置时 fail-closed**（绝不带病上线）。
 #   - 构建在 CI runner 上完成，镜像 tag = commit SHA（不可变、可回滚、可审计）；
-#   - 运行时凭据（DSN / TRTC / cipher key 等）保存在 **CloudRun 服务配置本身**，
-#     按镜像部署会保留，因此仓库与 CI 都不持有任何明文凭据；
-#   - 部署是否成功由**产品自身的探针**判定：
+#   - 运行时配置（DSN / TRTC / hello 密钥 / QWEN / RTC_BRIDGE / VPC 等）由本流水线
+#     从 GitHub Secrets/Vars 显式注入，仓库与镜像都不持有明文值；
+#   - preflight 对**本次矩阵服务需要的每一个键**逐个校验非空，缺任一项即打印缺失
+#     键名（只打键名、绝不打值）并以非零码中止；
+#   - 部署是否成功由**产品自身**的探针判定：
 #       jax-voice-api    → /api/v1/voice/cloud/status（生产位 + 存储分步探针）+ /cloud/selfcheck
 #       jax-voice-bridge → /api/v1/voice/bridge/status（两个子进程存活 + rtc_bridge 健康）
 #     不看日志、不靠人解读。
 #
-# 必须在 GitHub 侧配置（缺任一项 preflight 直接失败，绝不带病部署）：
+# ⚠️ VpcConf 必须由本流水线注入：它此前只存在于云端控制台，全仓无记录；一旦丢失，
+#    实例就连不到内网 PostgreSQL。api 与 bridge 挂同一 VPC/子网——bridge 内的
+#    rtc_bridge 要经 VPC 出口回调控制面，出口源 IP 才能落进控制面的窄白名单。
+#
+# 必须在 GitHub 侧配置（键名与用途见
+# docs/plans/2026-09-07-voice-cloud-session-migration.md「部署配置固化」；值一律不落仓库）：
 #   Secrets: TENCENTCLOUD_SECRETID / TENCENTCLOUD_SECRETKEY   tcb 登录
 #            TCR_REGISTRY / TCR_NAMESPACE / TCR_USERNAME / TCR_PASSWORD  镜像推送
 #            VOICE_OWNER_CREDENTIAL  自检端点鉴权（与 CloudRun 上同一值）
+#            其余运行时键（见 job env）可放 Secrets，亦可放 Vars
 #   Vars:    VPC_ID / VPC_CIDR / SUBNET_ID / SUBNET_CIDR  CloudRun 出网接入 PG 内网
 # =============================================================================
 name: deploy-cloudrun
@@ -56,30 +64,76 @@ jobs:
             port: 9000
             base_url: https://jax-voice-api-283963-7-1436773060.sh.run.tcloudbase.com
             gate: api
+            # 该服务运行时的必需键（缺任一 → preflight 非零中止）。
+            # 生产位 + 存储 + 安全能力 + hello 运行时装配所需的密钥全在此列。
+            required_env: >-
+              VOICE_PRODUCTION VOICE_STORAGE_BACKEND VOICE_DATABASE_URL
+              VOICE_TLS_ENABLED RTC_TERMINATION_ENABLED VOICE_OWNER_CREDENTIAL
+              VOICE_SIDECAR_CREDENTIAL TRTC_SDKAPPID TRTC_SECRETKEY
+              VOICE_HELLO_PRIVATE_KEY_PEM VOICE_HELLO_PUBLIC_KEY_PEM
+              VOICE_RTC_BRIDGE_CERT_BINDING VOICE_RTC_BRIDGE_CREDENTIAL
+              VOICE_GATEWAY_SHARED_ASSERTION VOICE_TRUSTED_GATEWAY_HOSTS
           - service: jax-voice-bridge
             dockerfile: cloudbridge/Dockerfile
             port: 9200
             base_url: https://jax-voice-bridge-283963-7-1436773060.sh.run.tcloudbase.com
             gate: bridge
+            # rtc_bridge 经 VPC 出口回调控制面所需的 mTLS 凭据与断言，缺一不可。
+            required_env: >-
+              CONTROL_PLANE_BASE_URL VOICE_SIDECAR_CREDENTIAL TRTC_SDKAPPID
+              TRTC_SECRETKEY QWEN_REALTIME_WS_URL QWEN_REALTIME_API_KEY
+              RTC_BRIDGE_CONTROL_PLANE_BASE_URL RTC_BRIDGE_SERVICE_CREDENTIAL
+              RTC_BRIDGE_GATEWAY_ASSERTION RTC_BRIDGE_CLIENT_CERT_PEM
+              RTC_BRIDGE_CLIENT_KEY_PEM RTC_BRIDGE_CONTROL_PLANE_CA_FILE
+    # 运行时配置来源：值一律不落仓库。优先 Secrets；该键未定义时回退同名 Vars
+    # （非敏感开关如 VOICE_PRODUCTION / VPC_* 可放 Vars）。
+    # 这里声明的是**来源映射**，preflight 会对本次矩阵服务实际需要的键逐个校验非空；
+    # 若某个在 required_env 里的键没有在这里声明来源，它会因取到空值而被拦住
+    # （契约测试 test_required_env_manifest_matches_injection 会静态锁死这一点）。
+    env:
+      TENCENTCLOUD_SECRETID: ${{ secrets.TENCENTCLOUD_SECRETID }}
+      TENCENTCLOUD_SECRETKEY: ${{ secrets.TENCENTCLOUD_SECRETKEY }}
+      TCR_REGISTRY: ${{ secrets.TCR_REGISTRY }}
+      TCR_NAMESPACE: ${{ secrets.TCR_NAMESPACE }}
+      TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+      TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
+      VPC_ID: ${{ vars.VPC_ID }}
+      VPC_CIDR: ${{ vars.VPC_CIDR }}
+      SUBNET_ID: ${{ vars.SUBNET_ID }}
+      SUBNET_CIDR: ${{ vars.SUBNET_CIDR }}
+      VOICE_PRODUCTION: ${{ secrets.VOICE_PRODUCTION || vars.VOICE_PRODUCTION }}
+      VOICE_STORAGE_BACKEND: ${{ secrets.VOICE_STORAGE_BACKEND || vars.VOICE_STORAGE_BACKEND }}
+      VOICE_DATABASE_URL: ${{ secrets.VOICE_DATABASE_URL || vars.VOICE_DATABASE_URL }}
+      VOICE_TLS_ENABLED: ${{ secrets.VOICE_TLS_ENABLED || vars.VOICE_TLS_ENABLED }}
+      RTC_TERMINATION_ENABLED: ${{ secrets.RTC_TERMINATION_ENABLED || vars.RTC_TERMINATION_ENABLED }}
+      VOICE_OWNER_CREDENTIAL: ${{ secrets.VOICE_OWNER_CREDENTIAL || vars.VOICE_OWNER_CREDENTIAL }}
+      VOICE_SIDECAR_CREDENTIAL: ${{ secrets.VOICE_SIDECAR_CREDENTIAL || vars.VOICE_SIDECAR_CREDENTIAL }}
+      TRTC_SDKAPPID: ${{ secrets.TRTC_SDKAPPID || vars.TRTC_SDKAPPID }}
+      TRTC_SECRETKEY: ${{ secrets.TRTC_SECRETKEY || vars.TRTC_SECRETKEY }}
+      VOICE_HELLO_PRIVATE_KEY_PEM: ${{ secrets.VOICE_HELLO_PRIVATE_KEY_PEM || vars.VOICE_HELLO_PRIVATE_KEY_PEM }}
+      VOICE_HELLO_PUBLIC_KEY_PEM: ${{ secrets.VOICE_HELLO_PUBLIC_KEY_PEM || vars.VOICE_HELLO_PUBLIC_KEY_PEM }}
+      VOICE_RTC_BRIDGE_CERT_BINDING: ${{ secrets.VOICE_RTC_BRIDGE_CERT_BINDING || vars.VOICE_RTC_BRIDGE_CERT_BINDING }}
+      VOICE_RTC_BRIDGE_CREDENTIAL: ${{ secrets.VOICE_RTC_BRIDGE_CREDENTIAL || vars.VOICE_RTC_BRIDGE_CREDENTIAL }}
+      VOICE_GATEWAY_SHARED_ASSERTION: ${{ secrets.VOICE_GATEWAY_SHARED_ASSERTION || vars.VOICE_GATEWAY_SHARED_ASSERTION }}
+      VOICE_TRUSTED_GATEWAY_HOSTS: ${{ secrets.VOICE_TRUSTED_GATEWAY_HOSTS || vars.VOICE_TRUSTED_GATEWAY_HOSTS }}
+      CONTROL_PLANE_BASE_URL: ${{ secrets.CONTROL_PLANE_BASE_URL || vars.CONTROL_PLANE_BASE_URL }}
+      QWEN_REALTIME_WS_URL: ${{ secrets.QWEN_REALTIME_WS_URL || vars.QWEN_REALTIME_WS_URL }}
+      QWEN_REALTIME_API_KEY: ${{ secrets.QWEN_REALTIME_API_KEY || vars.QWEN_REALTIME_API_KEY }}
+      RTC_BRIDGE_CONTROL_PLANE_BASE_URL: ${{ secrets.RTC_BRIDGE_CONTROL_PLANE_BASE_URL || vars.RTC_BRIDGE_CONTROL_PLANE_BASE_URL }}
+      RTC_BRIDGE_SERVICE_CREDENTIAL: ${{ secrets.RTC_BRIDGE_SERVICE_CREDENTIAL || vars.RTC_BRIDGE_SERVICE_CREDENTIAL }}
+      RTC_BRIDGE_GATEWAY_ASSERTION: ${{ secrets.RTC_BRIDGE_GATEWAY_ASSERTION || vars.RTC_BRIDGE_GATEWAY_ASSERTION }}
+      # PEM 内容（不是路径）：容器内由 cloudbridge/tls_material.py 落成 0o600 临时文件；
+      # CA 用镜像内已装的系统信任库路径，避免把 11.9KB 的 bundle 塞进 5KB 上限的 EnvParam。
+      RTC_BRIDGE_CLIENT_CERT_PEM: ${{ secrets.RTC_BRIDGE_CLIENT_CERT_PEM || vars.RTC_BRIDGE_CLIENT_CERT_PEM }}
+      RTC_BRIDGE_CLIENT_KEY_PEM: ${{ secrets.RTC_BRIDGE_CLIENT_KEY_PEM || vars.RTC_BRIDGE_CLIENT_KEY_PEM }}
+      RTC_BRIDGE_CONTROL_PLANE_CA_FILE: ${{ secrets.RTC_BRIDGE_CONTROL_PLANE_CA_FILE || vars.RTC_BRIDGE_CONTROL_PLANE_CA_FILE }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           ref: ${{ github.event.inputs.ref != '' && github.event.inputs.ref || github.sha }}
 
-      - name: Preflight - required configuration
-        env:
-          TENCENTCLOUD_SECRETID: ${{ secrets.TENCENTCLOUD_SECRETID }}
-          TENCENTCLOUD_SECRETKEY: ${{ secrets.TENCENTCLOUD_SECRETKEY }}
-          TCR_REGISTRY: ${{ secrets.TCR_REGISTRY }}
-          TCR_NAMESPACE: ${{ secrets.TCR_NAMESPACE }}
-          TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
-          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
-          VOICE_OWNER_CREDENTIAL: ${{ secrets.VOICE_OWNER_CREDENTIAL }}
-          VPC_ID: ${{ vars.VPC_ID }}
-          VPC_CIDR: ${{ vars.VPC_CIDR }}
-          SUBNET_ID: ${{ vars.SUBNET_ID }}
-          SUBNET_CIDR: ${{ vars.SUBNET_CIDR }}
+      - name: Preflight - required infrastructure configuration
         run: |
           set -euo pipefail
           missing=0
@@ -92,9 +146,26 @@ jobs:
             fi
           done
           if [ "$missing" -ne 0 ]; then
-            echo "::error::部署所需的配置不完整，拒绝继续（fail-closed）"
+            echo "::error::部署所需的基础配置不完整，拒绝继续（fail-closed）"
             exit 1
           fi
+
+      - name: Preflight - required service configuration (${{ matrix.service }})
+        run: |
+          set -euo pipefail
+          # 只打印缺失的**键名**，绝不打印任何值。
+          missing=""
+          for name in ${{ matrix.required_env }}; do
+            if [ -z "${!name:-}" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::${{ matrix.service }} 缺少必需环境变量（仅键名）:$missing"
+            echo "::error::拒绝构建与部署（fail-closed）"
+            exit 1
+          fi
+          echo "${{ matrix.service }} 必需环境变量齐备（${{ matrix.required_env }}）"
 
       - name: Build canonical image (context = repo root)
         env:
@@ -116,13 +187,80 @@ jobs:
           docker push "${TCR_REGISTRY}/${TCR_NAMESPACE}/${SERVICE}:${GITHUB_SHA}"
 
       - name: Install and authenticate CloudBase CLI
-        env:
-          TENCENTCLOUD_SECRETID: ${{ secrets.TENCENTCLOUD_SECRETID }}
-          TENCENTCLOUD_SECRETKEY: ${{ secrets.TENCENTCLOUD_SECRETKEY }}
         run: |
           set -euo pipefail
           npm install -g @cloudbase/cli
           tcb login --apiKeyId "$TENCENTCLOUD_SECRETID" --apiKey "$TENCENTCLOUD_SECRETKEY"
+
+      - name: Inject service configuration (${{ matrix.service }})
+        env:
+          SERVICE: ${{ matrix.service }}
+          REQUIRED_ENV: ${{ matrix.required_env }}
+        run: |
+          set -euo pipefail
+          # 注入机制（2026-09-12 实测确定，原实现用的是错的通道）
+          # ---------------------------------------------------------------
+          # · `tcb cloudrun deploy` **没有** env 参数；
+          # · `tcb secrets set` 是**环境级**（全环境服务共享），而这里的运行时配置是
+          #   **服务级**的，写进去不会落到本服务的 EnvParams；旧版 CLI 甚至没有该子命令。
+          # · 唯一可靠通道是 tcbr 原生 API：
+          #       SubmitServerConfigChangeDiff --api-version 2022-02-17
+          #       body = {EnvId, ServerName, Items:[{Key:"EnvParam", Value:"<字符串化 JSON>"}]}
+          #   —— 注意 **写 `EnvParam`（单数）、读回 `EnvParams`（复数）**，且 Value 是**字符串**。
+          # · **EnvParam 是整表覆盖**：只发新键会清空既有键 → 必须先读回现值再合并。
+          # · Items 只改列出的项 → VpcConf / Port 不受影响。
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+
+          API_VERSION = "2022-02-17"
+          env_id = os.environ["ENV_ID"]
+          service = os.environ["SERVICE"]
+          required = os.environ["REQUIRED_ENV"].split()
+
+          def tcb_api(action, body):
+              out = subprocess.run(
+                  ["tcb", "api", "tcbr", action, "--api-version", API_VERSION,
+                   "--body", json.dumps(body), "--json"],
+                  capture_output=True, text=True, check=True).stdout
+              return json.loads(out[out.find("{"):])     # 首行是 "i → TCBR.xxx" 提示
+
+          # 1) 读回现有 EnvParams（整表覆盖，必须带上）
+          detail = tcb_api("DescribeCloudRunServerDetail",
+                           {"EnvId": env_id, "ServerName": service})["data"]
+          raw = (detail.get("ServerConfig") or {}).get("EnvParams") or "{}"
+          current = json.loads(raw) if isinstance(raw, str) else dict(raw)
+
+          # 2) 合并本次要注入的键（只打键名，绝不打值）
+          added, missing = [], []
+          for name in required:
+              value = os.environ.get(name, "")
+              if not value:
+                  missing.append(name)
+                  continue
+              if current.get(name) != value:
+                  added.append(name)
+              current[name] = value
+          if missing:
+              print(f"::error::{service} 注入阶段缺值（仅键名）: {' '.join(missing)}")
+              sys.exit(1)
+
+          # 3) 提交（整表覆盖语义 → 发合并后的全量）
+          tcb_api("SubmitServerConfigChangeDiff", {
+              "EnvId": env_id, "ServerName": service,
+              "Items": [{"Key": "EnvParam", "Value": json.dumps(current, ensure_ascii=False)}],
+          })
+
+          # 4) 读回自证：必需键必须全部存在（只比键名，不比值）
+          back = tcb_api("DescribeCloudRunServerDetail",
+                         {"EnvId": env_id, "ServerName": service})["data"]
+          back_raw = (back.get("ServerConfig") or {}).get("EnvParams") or "{}"
+          got = json.loads(back_raw) if isinstance(back_raw, str) else dict(back_raw)
+          lost = [n for n in required if n not in got]
+          if lost:
+              print(f"::error::{service} 注入后读回缺键（仅键名）: {' '.join(lost)}")
+              sys.exit(1)
+          print(f"{service}: 注入完成（键数 {len(got)}，变更 {len(added)}，环境变量整表覆盖语义已处理）")
+          PY
 
       - name: Deploy image with VPC attachment
         env:
@@ -132,6 +270,8 @@ jobs:
           set -euo pipefail
           # VpcConf 只有 CLI 的 --vpcConfig 会真正落盘（MCP 的 deploy/updateConfig
           # 回报 applied 但实测不生效），且该命令会保留服务上既有的环境变量。
+          # api 需要它连内网 PG；bridge 也需要它——rtc_bridge 经 VPC 出口回调控制面，
+          # 出口源 IP 才能落进控制面的窄白名单。
           printf '\n' | tcb cloudrun deploy \
             -s "$SERVICE" \
             --port "$PORT" \
@@ -143,7 +283,6 @@ jobs:
         env:
           GATE: ${{ matrix.gate }}
           BASE_URL: ${{ matrix.base_url }}
-          VOICE_OWNER_CREDENTIAL: ${{ secrets.VOICE_OWNER_CREDENTIAL }}
         run: |
           set -euo pipefail
           python3 - <<'PY'

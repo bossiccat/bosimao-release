@@ -9,6 +9,9 @@
     "cloudbridge/Dockerfile",
     "cloudbridge/supervisor.py",
     "cloudbridge/requirements.txt",
+    "cloudbridge/sim_phone.py",
+    "cloudbridge/sim_provision.py",
+    "cloudbridge/tls_material.py",
     "backend/rtc_bridge",
     "sidecar/package.json"
   ],

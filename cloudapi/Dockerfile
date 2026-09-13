@@ -25,5 +25,13 @@ COPY config /config
 # 容器内不挂任何本地数据卷：容器文件系统视为易失，无状态可水平扩容。
 ENV VOICE_STORAGE_BACKEND=postgresql
 
+# 生产开关必须固化在镜像里。app/voice/store_factory.py:84-94 以
+# settings.voice_production 分支：False → 容器内的本地文件夹具（数据易失，
+# 与「云端无状态 + PG 持久化」目标架构不符），True → PostgresVoiceStore。
+# 只靠云端 EnvParams 手工注入时，任何不带 EnvParams 的部署都会**静默回退本地夹具**。
+# 缺 DSN 时 validate_voice_storage() 会在启动期 fail-closed 拒绝——这是预期行为，
+# 不得绕过，也绝不允许这里写成 false。
+ENV VOICE_PRODUCTION=true
+
 EXPOSE 9000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9000"]

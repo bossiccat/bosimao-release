@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -160,6 +161,7 @@ class _StubChild:
         self.starts = 1
         self.pid = 4242
         self.kwargs = {"extra": "stub"}
+        self.liveness = True
 
     def alive(self) -> bool:
         return self._alive
@@ -180,6 +182,7 @@ def test_watch_exits_nonzero_when_rtc_bridge_dies() -> None:
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
     sup.shutting_down = False
+    sup.sim_enabled = False
     sup.sidecar_enabled = True
     sup.crash_grace_s = 0
     sup.bridge = _StubChild(alive=False, exit_code=1)
@@ -194,6 +197,7 @@ def test_watch_exits_nonzero_when_sidecar_dies() -> None:
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
     sup.shutting_down = False
+    sup.sim_enabled = False
     sup.sidecar_enabled = True
     sup.crash_grace_s = 0
     sup.bridge = _StubChild(alive=True)
@@ -210,6 +214,7 @@ def test_watch_exits_nonzero_when_sidecar_dies() -> None:
 def test_status_reports_children_health_and_verdict() -> None:
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
+    sup.sim_enabled = False
     sup.bridge_health_url = "http://127.0.0.1:19093/health"
     sup.sign_url = "https://example.invalid"
     sup.device_id = "jax-cloud-bridge"
@@ -230,6 +235,7 @@ def test_status_reports_children_health_and_verdict() -> None:
 def test_status_is_not_ok_when_health_probe_fails() -> None:
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
+    sup.sim_enabled = False
     sup.bridge_health_url = "http://127.0.0.1:19093/health"
     sup.sign_url = ""
     sup.device_id = "jax-cloud-bridge"
@@ -274,6 +280,7 @@ def test_watch_holds_the_status_endpoint_before_exiting() -> None:
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
     sup.shutting_down = False
+    sup.sim_enabled = False
     sup.sidecar_enabled = False
     sup.crash_grace_s = 0.3
     sup.bridge = _StubChild(alive=False, exit_code=1)
@@ -289,9 +296,12 @@ def test_watch_holds_the_status_endpoint_before_exiting() -> None:
 def test_sidecar_is_not_given_the_phone_only_device_argument() -> None:
     """实测事故：role=sidecar 带 --device 会被 sidecar 自身判 SIDECAR_UNEXPECTED_DEVICE_ARG
     并 fail-closed 退出（config.js:64 / rtc.js:364），导致容器崩溃重启。
-    --device 只属于 role=phone，云端对端不得传。"""
+    --device 只属于 role=phone，因此**对端**不得传——但手机模拟器必须传。"""
     text = (CLOUDBRIDGE / "supervisor.py").read_text(encoding="utf-8")
-    assert "--device=" not in text, "sidecar 启动参数里不得出现 --device="
+    sidecar_block = text.split("self.sidecar = Child(", 1)[1].split(")", 1)[0]
+    assert "--device=" not in sidecar_block, "sidecar 启动参数里不得出现 --device="
+    sim_block = text.split("self.sim_phone = Child(", 1)[1].split("liveness=False", 1)[0]
+    assert "--device=" in sim_block, "手机模拟器必须以 --device 指定自己的 device_id"
 
 
 def test_bridge_health_port_stays_loopback_only() -> None:
@@ -299,3 +309,239 @@ def test_bridge_health_port_stays_loopback_only() -> None:
     text = (CLOUDBRIDGE / "supervisor.py").read_text(encoding="utf-8")
     assert "ws://127.0.0.1:19092" in text
     assert "127.0.0.1:19093" in text
+
+
+# --- 6. 云端手机模拟（无真机的端到端验证）----------------------------------
+
+
+def _load_sim_phone():
+    spec = importlib.util.spec_from_file_location(
+        "jax_voice_bridge_sim_phone", CLOUDBRIDGE / "sim_phone.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+REAL_PHONE_LOG = [
+    "PHONE 进房 room=jax-sim-phone user=jax-sim-phone",
+    "PHONE 进房成功 120ms",
+    "PHONE wav=/srv/sim/prompt.wav 96000B（16k s16）",
+    "PHONE 首包回复 @3120ms（自上行开始）",
+    "PHONE 收到了回复 88帧/26KB，2s 后退出",
+    "PHONE 回复已保存: /srv/sim/reply.wav（56320B）",
+    "PHONE 上行 350帧 / 回复 88帧",
+]
+
+
+def test_phone_log_parsing_yields_comparable_latency() -> None:
+    """首包延迟必须换算成「用户说完→听见」的口径，否则数字会被误读。
+
+    phone.js 报的是「自上行开始」的延迟，其中包含它自己固定补的 2s 尾部静音；
+    上行 350 帧 = 7000ms，减去 2000ms = 说话 5000ms，故回复在说话结束后 3120-5000→0
+    之外的真实值应由本换算给出（此处 7000-2000=5000；3120 < 5000 说明回复早于静音尾结束）。
+    """
+    metrics = _load_sim_phone().parse_phone_log(REAL_PHONE_LOG)
+    assert metrics.state == "replied"
+    assert metrics.first_reply_ms == 3120
+    assert metrics.enter_room_ms == 120
+    assert metrics.up_frames == 350 and metrics.reply_frames == 88
+    assert metrics.reply_bytes == 56320
+    assert metrics.utterance_ms == 7000
+    assert metrics.speech_ms == 5000
+    # 回复早于「静音尾结束」→ 换算值夹到 0，绝不出现负数
+    assert metrics.reply_after_speech_ms == 0
+    assert metrics.to_dict()["ok"] is True
+
+
+def test_phone_log_parsing_detects_no_reply_and_failures() -> None:
+    module = _load_sim_phone()
+    assert module.parse_phone_log(["PHONE hold=45s 内未收到回复（或超时），退出"]).state == "no_reply"
+    assert module.parse_phone_log(["PHONE PHONE_SESSION_SIGN_FAILED"]).failure == "PHONE_SESSION_SIGN_FAILED"
+    assert module.parse_phone_log(["PHONE 进房失败 -1002"]).state == "failed"
+
+
+def test_sim_phone_is_not_a_liveness_child() -> None:
+    """模拟器跑完即退出是预期：绝不能因此把容器判死（否则会无限重启）。"""
+    module = _load_supervisor()
+    sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
+    sup.shutting_down = False
+    sup.sidecar_enabled = False
+    sup.crash_grace_s = 0
+    sup.sim_enabled = False
+    sup.bridge = _StubChild(alive=True)
+    sup.sidecar = _StubChild(alive=True)
+    dead_sim = _StubChild(alive=False, exit_code=0, name="sim-phone")
+    dead_sim.liveness = False
+    sup.sim_phone = dead_sim
+
+    # 一次性子进程已退出，但 liveness 子进程都健康 → 不得抛 SystemExit
+    assert sup._first_dead() is None
+
+
+def test_sim_phone_launches_in_the_phone_role_with_prompt_and_recording() -> None:
+    text = (CLOUDBRIDGE / "supervisor.py").read_text(encoding="utf-8")
+    for flag in ("--role=phone", "--wav=", "--out-wav=", "--hold=", "--device="):
+        assert flag in text, f"手机模拟启动参数缺少 {flag}"
+    assert "liveness=False" in text, "模拟器必须标记为非存活子进程"
+
+
+def test_image_can_synthesise_the_prompt_audio_in_cloud() -> None:
+    """提示音必须能在云端生成：真实中文语音（edge-tts）转 16k wav（ffmpeg）。
+
+    用音调代替语音测不出链路真伪——模型只对语音产生有意义的回复。
+    """
+    dockerfile = (CLOUDBRIDGE / "Dockerfile").read_text(encoding="utf-8")
+    assert "ffmpeg" in dockerfile
+    assert "edge-tts" in dockerfile
+
+
+def test_status_reports_simulation_when_enabled() -> None:
+    module = _load_supervisor()
+    sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
+    sup.sim_enabled = False
+    sup.bridge_health_url = "http://127.0.0.1:19093/health"
+    sup.sign_url = ""
+    sup.device_id = "jax-cloud-bridge"
+    sup.sidecar_enabled = True
+    sup.sim_enabled = True
+    sup.bridge = _StubChild(alive=True)
+    sup.sidecar = _StubChild(alive=True)
+    object.__setattr__(sup, "_probe_bridge_health", lambda: "ok")
+    import threading as _threading
+    sup._sim_lock = _threading.Lock()
+    sim = _load_sim_phone()
+    sup.sim_metrics = sim.parse_phone_log(REAL_PHONE_LOG)
+
+    payload = sup.status()
+    assert payload["simulation"]["state"] == "replied"
+    assert payload["simulation"]["reply_bytes"] == 56320
+
+
+# --- 7. TLS 材料：PEM 走环境变量、启动时落受限临时文件（私钥绝不烘进镜像）------
+#
+# 背景：rtc_bridge 必须用 mTLS 调云端控制面完成 hello 兑付（fail-closed 终局），
+# 但 client.key 是私钥，烘进镜像会把私钥固化进可被任意拉取者读到的镜像层。
+# 因此 PEM 经环境变量注入，由 supervisor 启动时落成 0o600 临时文件并注入 *_FILE。
+
+# 明显假值：仅用于断言「异常文本不泄漏 PEM」。带结尾换行以锁定 PEM 原样落盘。
+FAKE_CERT_PEM = "-----BEGIN FAKE CERT-----\nMIIBfakecert\n"
+FAKE_KEY_PEM = "-----BEGIN FAKE KEY-----\nMIIBfakekey\n"
+FAKE_CA_PEM = "-----BEGIN FAKE CA-----\nMIIBfakeca\n"
+
+
+def _load_tls_material():
+    spec = importlib.util.spec_from_file_location(
+        "jax_voice_bridge_tls_material", CLOUDBRIDGE / "tls_material.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_materialize_writes_three_files_with_strict_modes(tmp_path) -> None:
+    module = _load_tls_material()
+    env = {
+        "RTC_BRIDGE_CLIENT_CERT_PEM": FAKE_CERT_PEM,
+        "RTC_BRIDGE_CLIENT_KEY_PEM": FAKE_KEY_PEM,
+        "RTC_BRIDGE_CONTROL_PLANE_CA_PEM": FAKE_CA_PEM,
+    }
+    result = module.materialize_tls_files(tmp_path, env)
+
+    assert set(result) == {
+        "RTC_BRIDGE_CLIENT_CERT_FILE",
+        "RTC_BRIDGE_CLIENT_KEY_FILE",
+        "RTC_BRIDGE_CONTROL_PLANE_CA_FILE",
+    }
+    for path in result.values():
+        assert Path(path).is_absolute()
+        assert Path(path).is_file()
+    assert (tmp_path / "client.crt").read_text(encoding="utf-8") == FAKE_CERT_PEM
+    assert (tmp_path / "client.key").read_text(encoding="utf-8") == FAKE_KEY_PEM
+    assert (tmp_path / "ca.crt").read_text(encoding="utf-8") == FAKE_CA_PEM
+
+    if os.name == "posix":
+        # Windows 无 POSIX 权限位，os.chmod 后 st_mode 仍是 0o666/0o444，不可断言。
+        assert (tmp_path / "client.key").stat().st_mode & 0o777 == 0o600
+        assert tmp_path.stat().st_mode & 0o777 == 0o700
+
+
+def test_materialize_returns_empty_without_touching_disk_when_unconfigured(tmp_path) -> None:
+    module = _load_tls_material()
+    target = tmp_path / "never-created"
+    assert module.materialize_tls_files(target, {}) == {}
+    assert not target.exists(), "未配置时不得创建任何文件或目录"
+
+
+def test_materialize_rejects_partial_config_without_leaking_pem(tmp_path) -> None:
+    module = _load_tls_material()
+    env = {
+        "RTC_BRIDGE_CLIENT_CERT_PEM": FAKE_CERT_PEM,
+        "RTC_BRIDGE_CONTROL_PLANE_CA_PEM": FAKE_CA_PEM,
+        # 故意缺 RTC_BRIDGE_CLIENT_KEY_PEM
+    }
+    with pytest.raises(module.TlsMaterialError) as excinfo:
+        module.materialize_tls_files(tmp_path, env)
+
+    text = str(excinfo.value)
+    assert "RTC_BRIDGE_CLIENT_KEY_PEM" in text, "异常消息必须点出缺失的键名"
+    assert FAKE_KEY_PEM not in text
+    assert FAKE_CERT_PEM not in text
+    assert FAKE_CA_PEM not in text
+
+
+def test_materialize_raises_when_target_is_not_writable(tmp_path) -> None:
+    """目录不可写必须 fail-closed（用普通文件冒充父目录，跨平台稳定触发 OSError）。"""
+    module = _load_tls_material()
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    env = {
+        "RTC_BRIDGE_CLIENT_CERT_PEM": FAKE_CERT_PEM,
+        "RTC_BRIDGE_CLIENT_KEY_PEM": FAKE_KEY_PEM,
+        "RTC_BRIDGE_CONTROL_PLANE_CA_PEM": FAKE_CA_PEM,
+    }
+    with pytest.raises(module.TlsMaterialError):
+        module.materialize_tls_files(blocker / "sub", env)
+
+
+def test_supervisor_aliases_control_plane_base_url_for_bridge(monkeypatch) -> None:
+    """服务上的是 CONTROL_PLANE_BASE_URL，rtc_bridge 读的是 RTC_BRIDGE_CONTROL_PLANE_BASE_URL。"""
+    monkeypatch.setenv("CONTROL_PLANE_BASE_URL", "https://cp.example.invalid")
+    monkeypatch.delenv("RTC_BRIDGE_CONTROL_PLANE_BASE_URL", raising=False)
+    module = _load_supervisor()
+    sup = module.BridgeSupervisor()
+    assert sup.bridge._env["RTC_BRIDGE_CONTROL_PLANE_BASE_URL"] == "https://cp.example.invalid"
+
+
+def test_supervisor_does_not_override_explicit_bridge_base_url(monkeypatch) -> None:
+    monkeypatch.setenv("CONTROL_PLANE_BASE_URL", "https://alias.example.invalid")
+    monkeypatch.setenv(
+        "RTC_BRIDGE_CONTROL_PLANE_BASE_URL", "https://explicit.example.invalid"
+    )
+    module = _load_supervisor()
+    sup = module.BridgeSupervisor()
+    assert (
+        sup.bridge._env["RTC_BRIDGE_CONTROL_PLANE_BASE_URL"]
+        == "https://explicit.example.invalid"
+    )
+
+
+def test_status_surfaces_tls_material_failure() -> None:
+    module = _load_supervisor()
+    sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
+    sup.sim_enabled = False
+    sup.bridge_health_url = "http://127.0.0.1:19093/health"
+    sup.sign_url = ""
+    sup.device_id = "jax-cloud-bridge"
+    sup.sidecar_enabled = True
+    sup.bridge = _StubChild(alive=True)
+    sup.sidecar = _StubChild(alive=True)
+    sup._tls_material = {"ok": False, "error": "RTC_BRIDGE_CLIENT_KEY_PEM"}
+    object.__setattr__(sup, "_probe_bridge_health", lambda: "ok")
+
+    payload = sup.status()
+    assert payload["tls_material"] == {"ok": False, "error": "RTC_BRIDGE_CLIENT_KEY_PEM"}
