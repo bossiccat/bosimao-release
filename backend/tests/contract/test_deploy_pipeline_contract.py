@@ -13,8 +13,12 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -86,6 +90,51 @@ def _matrix() -> list[dict]:
     return doc["jobs"]["deploy"]["strategy"]["matrix"]["include"]
 
 
+def _doc() -> dict:
+    return yaml.safe_load(_text())
+
+
+def _steps() -> list[dict]:
+    return _doc()["jobs"]["deploy"]["steps"]
+
+
+def _step(name: str) -> dict:
+    for step in _steps():
+        if step.get("name") == name:
+            return step
+    raise AssertionError(f"workflow 里找不到步骤: {name}")
+
+
+def _step_order() -> dict[str, int]:
+    """步骤名 → 在 steps 中的下标（用于断言相对顺序，而不是靠字符串位置）。"""
+    return {s["name"]: i for i, s in enumerate(_steps()) if "name" in s}
+
+
+def _command_lines(step_name: str) -> str:
+    """步骤 shell 脚本里**去掉注释行**后的内容。
+
+    注释里可以提到某个包名（比如「刻意不装 windows-capture」），那不算安装清单的一部分。
+    """
+    run = _step(step_name)["run"]
+    return "\n".join(line for line in run.splitlines() if not line.strip().startswith("#"))
+
+
+def _header_comment() -> str:
+    """文件顶部的注释块（YAML 注释不会被 yaml.safe_load 保留，只能读原文）。"""
+    out: list[str] = []
+    for line in _text().splitlines():
+        if line.startswith("#"):
+            out.append(line)
+            continue
+        if not out:
+            continue
+        if line.strip() == "":
+            out.append(line)
+            continue
+        break
+    return "\n".join(out)
+
+
 def test_workflow_is_valid_yaml_and_deploys_both_services() -> None:
     doc = yaml.safe_load(_text())
     assert doc["name"] == "deploy-cloudrun"
@@ -97,16 +146,23 @@ def test_every_service_builds_from_a_canonical_dockerfile() -> None:
     entries = {e["service"]: e for e in _matrix()}
     assert entries["jax-voice-api"]["dockerfile"] == "cloudapi/Dockerfile"
     assert entries["jax-voice-bridge"]["dockerfile"] == "cloudbridge/Dockerfile"
-    text = _text()
-    assert '-f "${DOCKERFILE}"' in text, "必须用矩阵里的 canonical Dockerfile 构建"
-    assert "-t \"${TCR_REGISTRY}/${TCR_NAMESPACE}/${SERVICE}:${GITHUB_SHA}\"" in text
+    run = _step("Build canonical image (context = repo root)")["run"]
+    assert "docker build" in run
+    assert '-f "${DOCKERFILE}"' in run, "必须用矩阵里的 canonical Dockerfile 构建"
+    assert ":${COMMIT}" in run, "镜像 tag 必须用解析后的提交（见提交标识一致性测试）"
 
 
 def test_image_tag_is_immutable_commit_sha() -> None:
-    """tag 必须绑定 commit，不能是 latest —— 否则无法回滚也无法审计。"""
+    """tag 必须绑定 commit，不能是 latest —— 否则无法回滚也无法审计。
+
+    注意这里是「绑到实际检出的那个提交」，而不是绑到 GITHUB_SHA：后者在
+    workflow_dispatch 指定 ref 时只是触发分支的 tip，会与镜像内容不一致。
+    """
     text = _text()
-    assert ":${GITHUB_SHA}" in text
     assert ":latest" not in text
+    assert "${GITHUB_SHA}" not in text, \
+        "不得用 ${GITHUB_SHA} 充当镜像/部署标识（它与实际检出的提交可能是两个东西）"
+    assert ":${COMMIT}" in text
 
 
 def test_deploy_uses_image_and_attaches_vpc_with_exact_field_names() -> None:
@@ -267,3 +323,249 @@ def test_ci_does_not_require_ghost_bridge_cert_binding() -> None:
     import re
     text = WORKFLOW.read_text(encoding="utf-8")
     assert not re.search(r"(?<!VOICE_)RTC_BRIDGE_CERT_BINDING", text)
+
+
+# ── 2026-09-13 加固：部署前测试门禁 / 提交标识统一 / 已知缺口显式化 ──────────────
+#
+# 审计确认的三个缺陷（本段逐条锁死）：
+#   1. 全流程唯一的门禁是**部署之后**的 HTTP 探针，一行测试都没跑；
+#   2. checkout 用 `github.event.inputs.ref || github.sha` 决定检出，而镜像 tag / 部署用
+#      `${GITHUB_SHA}` —— 手动指定 ref 时两者指向不同提交，镜像内容与 tag 对不上；
+#   3. 「部署先于验证、失败不回滚」既没有回滚也没有写下来，属于隐性行为。
+#
+# 断言策略：先解析 YAML 拿结构（顺序、env 映射、有无 if/continue-on-error），再补文件
+# 系统事实（被引用的目录/文件是否真的存在），最后有一处真正执行脚本的行为断言。
+
+_GATE_BACKEND = "Pre-deploy gate - backend contract tests"
+_GATE_SIDECAR = "Pre-deploy gate - sidecar node tests"
+_TEST_DEPS = "Install pre-deploy test dependencies"
+_BUILD_STEP = "Build canonical image (context = repo root)"
+_PUSH_STEP = "Push image to TCR"
+_DEPLOY_STEP = "Deploy image with VPC attachment"
+_VERIFY_STEP = "Verify deployment through the product itself"
+
+# sidecar 里确实需要真机 electron / trtc-electron-sdk 的用例（Windows 专属 electron.exe）。
+# 这份清单不是手写的期望，而是由 test_sidecar_gate_excludes_only_electron_dependent_files
+# 从文件内容里**推**出来再比对的——新增同类用例时会立刻失败。
+_EXPECTED_SIDECAR_EXCLUSIONS = ("audio-contract", "exit-lifecycle", "sdk-smoke")
+
+# 只在 Windows / 需要原生编解码时可用，ubuntu runner 上必须**不出现**在安装清单里。
+_WINDOWS_ONLY_PACKAGES = (
+    "windows-capture",
+    "pywin32",
+    "sounddevice",
+    "silero-vad",
+    "sherpa-onnx",
+)
+
+
+def test_pre_deploy_gate_runs_before_the_build() -> None:
+    """测试门禁必须排在 build 之前：建好镜像再测就没意义了。"""
+    order = _step_order()
+    assert _BUILD_STEP in order
+    build_at = order[_BUILD_STEP]
+    for name in (_GATE_BACKEND, _GATE_SIDECAR):
+        assert name in order, f"缺少部署前测试门禁步骤: {name}"
+        assert order[name] < build_at, f"{name} 必须排在 {_BUILD_STEP} 之前"
+
+
+def test_pre_deploy_gate_has_no_bypass_path() -> None:
+    """不存在「测试没跑但部署照走」的路径。
+
+    两条：门禁步骤不得带 if（可被条件跳过）或 continue-on-error（失败被吞掉）。
+    顺带把这条不变量推广到**所有**步骤——目前确实如此，保持住就不可能出现旁路。
+    """
+    for step in _steps():
+        label = step.get("name") or step.get("uses", "<unnamed>")
+        assert "if" not in step, f"{label} 带了 if：可能被条件跳过"
+        assert not step.get("continue-on-error"), f"{label} 吞掉了失败：后续步骤会照走"
+    for name in (_GATE_BACKEND, _GATE_SIDECAR):
+        _step(name)  # 必须真实存在，而不是被改名或删掉
+
+
+def test_pre_deploy_gate_fails_closed_on_failure() -> None:
+    """每个门禁步骤都要 set -euo pipefail：非零退出即中止，构建/部署不执行。"""
+    for name in (_GATE_BACKEND, _GATE_SIDECAR):
+        assert "set -euo pipefail" in _step(name)["run"], f"{name} 未声明 fail-closed"
+
+
+def test_backend_contract_suite_is_really_invoked() -> None:
+    """门禁必须真的跑 backend/tests/contract，且那个目录里确实有用例（不能空转）。"""
+    run = _step(_GATE_BACKEND)["run"]
+    assert "python -m pytest backend/tests/contract" in run
+
+    contract_dir = ROOT / "backend" / "tests" / "contract"
+    assert contract_dir.is_dir(), "契约套件目录不存在"
+    cases = sorted(contract_dir.glob("test_*.py"))
+    assert len(cases) >= 20, f"契约套件文件数异常：{len(cases)}"
+    assert all("def test_" in p.read_text(encoding="utf-8") for p in cases)
+
+
+def test_test_dependencies_are_linux_installable_and_precede_the_gate() -> None:
+    """依赖安装排在门禁之前，且只装 ubuntu 上装得上的包。
+
+    实测背景（2026-09-13，干净 3.11 venv）：`backend/tests/contract` 会经
+    `app.main → core.orchestrator → capture.*` 拉起整个后端 import 闭包，最少需要
+    fastapi / httpx / numpy / pillow / psutil / pydantic-settings / PyYAML / jsonschema /
+    openapi-* / cryptography / PyJWT / uvicorn / websockets / pytest(-asyncio)。
+    而仓库 requirements.txt 里的 windows-capture / pywin32 / sounddevice / silero-vad /
+    sherpa-onnx 在 ubuntu runner 上装不上——混进来门禁会直接红在安装步骤上。
+    """
+    order = _step_order()
+    assert _TEST_DEPS in order
+    assert order[_TEST_DEPS] < min(order[n] for n in (_GATE_BACKEND, _GATE_SIDECAR))
+
+    commands = _command_lines(_TEST_DEPS)
+    assert "python -m pip install" in commands
+    for required in (
+        "pytest==",
+        "fastapi==",
+        "httpx==",
+        "numpy==",
+        "pillow==",
+        "psutil==",
+        "pydantic-settings==",
+        "PyYAML==",
+        "cryptography==",
+        "PyJWT==",
+        "jsonschema==",
+    ):
+        assert required in commands, f"缺少运行契约套件所必需的依赖: {required}"
+    for forbidden in _WINDOWS_ONLY_PACKAGES:
+        assert forbidden not in commands, f"{forbidden} 在 ubuntu runner 上装不上，不得进安装清单"
+
+
+def test_sidecar_gate_excludes_only_electron_dependent_files() -> None:
+    """sidecar 门禁用**排除法**只放掉确实需要真机 electron 的用例。
+
+    分两层：结构层确认用了排除法并有空集保护；文件系统层确认「被排除的文件确实依赖
+    electron/node_modules」，且其余用例文件都不依赖（所以在无 node_modules 的 runner
+    上可跑）。
+    """
+    run = _step(_GATE_SIDECAR)["run"]
+    assert "node --test" in run, "sidecar 门禁必须真的跑 node --test"
+    assert "exit 1" in run, "空集（一个用例都没收集到）必须非零退出（fail-closed）"
+
+    tests = sorted((ROOT / "sidecar" / "test").glob("*.test.js"))
+    assert tests, "sidecar 测试目录为空"
+
+    needs_node_modules = {
+        p.name[: -len(".test.js")]
+        for p in tests
+        if "node_modules" in p.read_text(encoding="utf-8")
+        or "electron.exe" in p.read_text(encoding="utf-8")
+    }
+    assert needs_node_modules == set(_EXPECTED_SIDECAR_EXCLUSIONS), (
+        "依赖 node_modules/electron 的 sidecar 用例集合变了："
+        f"{sorted(needs_node_modules)} —— 必须同步更新 workflow 的排除清单"
+    )
+    for stem in sorted(needs_node_modules):
+        assert stem in run, f"workflow 的排除清单里缺少 {stem}（不含它就是漏排除，门禁必红）"
+
+    # 反向：其余用例文件不得引用 node_modules / electron。
+    for p in tests:
+        if p.name[: -len(".test.js")] in needs_node_modules:
+            continue
+        text = p.read_text(encoding="utf-8")
+        assert "node_modules" not in text and "electron.exe" not in text, (
+            f"{p.name} 既不缺依赖也没被排除：排除清单与事实不符"
+        )
+
+
+_SIDECAR_TREE = ROOT / "sidecar"
+_BASH = shutil.which("bash")
+_NODE = shutil.which("node")
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or not _BASH or not _NODE,
+    reason=(
+        "该行为断言只在目标 runner（ubuntu-latest）上执行：Windows 上 which('bash') 命中的是 "
+        "WSL 启动器，不是真正可用的 bash。缺失时由上面的静态结构断言兜底。"
+    ),
+)
+def test_sidecar_gate_script_is_green_without_node_modules(tmp_path: Path) -> None:
+    """把 workflow 里的 sidecar 门禁脚本**原样执行**一遍（行为断言，不是字符串扫描）。
+
+    在「无 node_modules」的 sidecar 副本上跑：断言脚本真的能选出可跑的用例、全绿、并且
+    显式跳过了那三个需要真机 electron 的文件。这同时验证了这段 shell 本身没有语法错误。
+    """
+    sandbox = tmp_path / "sidecar"
+    shutil.copytree(_SIDECAR_TREE, sandbox, ignore=shutil.ignore_patterns("node_modules"))
+    assert not (sandbox / "node_modules").exists()
+
+    script = _step(_GATE_SIDECAR)["run"]
+    proc = subprocess.run(
+        [_BASH, "-c", script],
+        cwd=str(tmp_path),  # 脚本内部自己 cd sidecar
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=600,
+    )
+    assert proc.returncode == 0, f"sidecar 门禁脚本应全绿\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    for stem in _EXPECTED_SIDECAR_EXCLUSIONS:
+        assert f"{stem}.test.js" in proc.stdout, f"应当显式跳过 {stem}.test.js"
+    assert "running " in proc.stdout, "应当打印实际运行的用例文件数"
+
+
+def test_image_and_deploy_share_one_resolved_commit_identity() -> None:
+    """修掉「checkout 用 A、tag/部署用 B」的分歧。
+
+    GITHUB_SHA 是**触发分支的 tip**；workflow_dispatch 指定 ref 时它与实际检出的提交
+    不是一个东西。所以 workflow 必须在 checkout 之后立刻解析真实提交（git rev-parse HEAD），
+    让 build / push / deploy 共用同一个标识。
+    """
+    text = _text()
+    assert "${GITHUB_SHA}" not in text, "不得再用 ${GITHUB_SHA} 作为镜像/部署标识"
+
+    resolvers = [s for s in _steps() if "git rev-parse HEAD" in (s.get("run") or "")]
+    assert len(resolvers) == 1, "必须恰好有一个步骤解析真实检出的提交"
+    resolver = resolvers[0]
+    rid = resolver.get("id")
+    assert rid, "解析提交的步骤必须有 id，后续步骤才能引用它"
+    assert "$GITHUB_OUTPUT" in resolver["run"], "必须写进 GITHUB_OUTPUT 供后续步骤引用"
+
+    m = re.search(
+        r'echo\s+"([A-Za-z_][A-Za-z0-9_]*)=\$\(git rev-parse HEAD\)"', resolver["run"]
+    )
+    assert m, '解析步骤应形如: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"'
+    ref = "${{ steps.%s.outputs.%s }}" % (rid, m.group(1))
+
+    for name in (_BUILD_STEP, _PUSH_STEP, _DEPLOY_STEP):
+        step = _step(name)
+        declared = (step.get("env") or {}).get("COMMIT")
+        assert declared == ref, f"{name} 的镜像标识必须取 {ref}，实际: {declared!r}"
+        assert ":${COMMIT}" in step["run"], f"{name} 未把 COMMIT 用在镜像引用上"
+
+    # 反向：除 checkout 之外不得再出现 github.sha，否则分歧会重新长回来。
+    referencing = [
+        s for s in _steps() if "github.sha" in yaml.safe_dump(s, allow_unicode=True)
+    ]
+    assert len(referencing) == 1, "github.sha 只应出现在 checkout 的 ref 里"
+    assert str(referencing[0].get("uses", "")).startswith("actions/checkout@")
+
+
+def test_no_rollback_gap_is_documented_and_ordering_matches() -> None:
+    """把「部署先于验证、失败不回滚」从隐性行为变成显式已知缺口。
+
+    两件事都要成立，缺一不可：
+      · 结构性事实：Deploy 确实在 Verify 之前（这就是缺口的成因）；
+      · 文档性事实：顶部注释写清了失败不回滚、以及人工回退要读哪个字段、用哪条命令。
+    只写注释而顺序已经变了会误导人；顺序没变但没写下来，等于缺口仍然隐性。
+    """
+    order = _step_order()
+    assert order[_DEPLOY_STEP] < order[_VERIFY_STEP], "预期顺序是部署先于验证"
+
+    header = _header_comment()
+    assert "不回滚" in header, "必须写明「失败不回滚」"
+    assert "DescribeCloudRunServerDetail" in header, "必须写明用哪个 API 读回在线版本"
+    assert "OnlineVersionInfos" in header, "必须写明从哪个字段取出上一版 revision"
+    assert "tcb cloudrun deploy" in header, "必须给出人工回退的 CLI 命令"
+    assert "fail-fast" in header, "必须写明 fail-fast: false 的取舍"
+
+    assert _doc()["jobs"]["deploy"]["strategy"].get("fail-fast") is False
+    # 不能偷偷加一条自动回滚步骤来「假装修好了」：回滚属于需要单独决策的另一件事。
+    assert not any(
+        "rollback" in str(s.get("name", "")).lower() for s in _steps()
+    ), "本批不引入自动回滚；若确实要加，需先与用户确认"
