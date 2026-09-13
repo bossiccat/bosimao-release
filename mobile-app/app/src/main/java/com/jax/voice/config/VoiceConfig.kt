@@ -146,8 +146,18 @@ object VoiceConfig {
      * 会话签发接口 base URL（设置页可改，出厂默认 = 商业化云端网关）。
      * 形如 https://<云函数域名> 或 https://<host>/<prefix>；客户端拼 /api/v1/voice/session。
      * 云网关地址为公开非密信息（鉴权靠设备凭证），内置默认实现零配置开箱即用。
+     *
+     * ⚠️ 2026-09-13 修正：原默认值是 ADR-012 时代的 **CloudBase HTTP 访问服务默认域名**
+     * （`<EnvId>-<AppId>.ap-shanghai.app.tcloudbase.com`），那是给旧 `trtc-sign` 云函数用的。
+     * 实测该 host 的 `/health` 已是 **404**，即手机出厂默认连的是**已经不存在的网关**。
+     * 现役控制面是 CloudRun 服务 `jax-voice-api`：实测
+     * `POST {host}/api/v1/voice/session` 返回 **422**（路由在、body 校验失败），
+     * 且本机端到端语音链路（配对→/session→/sign→兑付）全部跑在这个域名上。
+     * 两者是**不同产品形态**：HTTP 访问服务默认域名官方定位为开发/测试（有频限与安全中间页），
+     * 生产仍建议绑定已备案自定义域名。换域名时**不要**改本常量就完事 ——
+     * 已分发 APK 的出厂默认固化在包里，见 `customSessionBaseUrl` 的注释。
      */
-    const val DEFAULT_SESSION_BASE_URL = "https://jinhong-d2g55ycl591208475-1436773060.ap-shanghai.app.tcloudbase.com"
+    const val DEFAULT_SESSION_BASE_URL = "https://jax-voice-api-283963-7-1436773060.sh.run.tcloudbase.com"
 
     fun sessionBaseUrl(context: Context): String =
         customSessionBaseUrl(context).ifBlank { DEFAULT_SESSION_BASE_URL }

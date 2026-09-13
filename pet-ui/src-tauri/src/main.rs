@@ -20,12 +20,29 @@ use jax_pet::watchdog::{
 use tauri::{Emitter, Manager};
 
 const SIDECAR_RUNTIME_DIR: &str = "jrt";
-// 商业化云端控制面（2026-09-08）：sidecar sign 指向 CloudBase 云托管 jax-backend，
-// 与手机 App 同一控制面；不再依赖本地 backend:8000（测试隧道/本地链路全部退役）。
-const SIDECAR_ARGS: [&str; 2] = [
-    "--role=sidecar",
-    "--sign-url=https://jax-backend-283963-7-1436773060.sh.run.tcloudbase.com",
-];
+// 商业化云端控制面（2026-09-13 修正）。
+//
+// ⚠️ 此前硬编码的是 `jax-backend`。实测两个服务**同时在线**（各自 /health 均 200），
+// 所以"连得上"从来不等于"连对了"：
+//   jax-backend  → {"status":"ok","model_server":"up","proc_name":"python",...}  ← PC 时代旧控制面
+//   jax-voice-api→ {"status":"ok","service":"jax-voice-api","trtc_configured":true,
+//                   "security_ready":true}                                    ← 现役云端控制面
+// 流水线（.github/workflows/deploy-cloudrun.yml 的 api:9000）部署的是 `jax-voice-api`，
+// 而且本机端到端语音链路（配对→/session→/sign→兑付）全部验证在这个域名上。
+// 桌面端却仍指向旧控制面，属于「两个客户端指错控制面」这一类缺陷。
+//
+// 允许构建期覆盖：换控制面不该要求改源码重新发版。
+// 覆盖方式：`JAX_CONTROL_PLANE_URL=https://... npm run tauri build`
+const DEFAULT_CONTROL_PLANE_URL: &str =
+    "https://jax-voice-api-283963-7-1436773060.sh.run.tcloudbase.com";
+
+/// sidecar 启动参数。`--sign-url` 取构建期覆盖值，缺省用现役云端控制面。
+fn sidecar_args() -> Vec<String> {
+    let base = option_env!("JAX_CONTROL_PLANE_URL")
+        .unwrap_or(DEFAULT_CONTROL_PLANE_URL)
+        .trim_end_matches('/');
+    vec!["--role=sidecar".to_string(), format!("--sign-url={base}")]
+}
 const WATCHDOG_HEALTHY_AFTER: Duration = Duration::from_secs(30);
 const COMPILED_MANIFEST_SHA256: &str = env!("JAX_SIDECAR_MANIFEST_SHA256");
 
@@ -252,7 +269,7 @@ fn resolve_sidecar_spec(
     let runtime_root = dir.join(SIDECAR_RUNTIME_DIR);
     let resolved = resolve_sidecar_runtime(&runtime_root, COMPILED_MANIFEST_SHA256)?;
     Ok(resolved.into_sidecar_spec(
-        SIDECAR_ARGS.iter().map(|s| s.to_string()).collect(),
+        sidecar_args(),
         dir.join("certs").join("ca.crt"),
         Duration::from_secs(5),
         Duration::from_secs(3),
