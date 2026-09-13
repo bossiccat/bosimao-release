@@ -2,6 +2,7 @@ package com.jax.voice.voice
 
 import android.app.Service
 import android.content.Intent
+import android.media.MediaRecorder
 import android.os.IBinder
 import android.util.Log
 import com.jax.voice.R
@@ -227,7 +228,7 @@ class VoiceForegroundService : Service() {
         // 直接覆盖会漏掉它的 AudioRecord 线程（正是本次要根治的泄漏类型）
         micRecorder?.stop()
         micRecorder = null
-        micRecorder = MicRecorder { samples -> dispatcher?.onFrame(samples) }
+        micRecorder = MicRecorder({ samples -> dispatcher?.onFrame(samples) }, captureSourceFromRes())
         micRecorder!!.setOnDied { onMicDied() }
         if (!micRecorder!!.start()) {
             Log.e(TAG, "mic start failed")
@@ -241,6 +242,21 @@ class VoiceForegroundService : Service() {
         updateNotificationTitle()
         Log.i(TAG, "pipeline started: mic 16k + KWS + serialized coordinator")
         buildingPipeline = false
+    }
+
+    /** M0 A/B：从 gradle resValue 注入的 jax_capture_source 解析采集源（缺省/异常一律回退 MIC=生产行为）。
+     *  RealCustomAudioSource 侧经 resolveCaptureSource() 自读同一 resValue（ActivityThread 反射），无需服务接线。 */
+    private fun captureSourceFromRes(): Int {
+        return try {
+            val resId = resources.getIdentifier("jax_capture_source", "string", packageName)
+            val name = if (resId != 0) getString(resId) else "MIC"
+            Log.i(TAG, "jax_capture_source=$name")
+            if (name == "VOICE_COMMUNICATION") MediaRecorder.AudioSource.VOICE_COMMUNICATION
+            else MediaRecorder.AudioSource.MIC
+        } catch (t: Throwable) {
+            Log.w(TAG, "captureSourceFromRes fallback MIC: ${t.message}")
+            MediaRecorder.AudioSource.MIC
+        }
     }
 
     /** 效果注入：签发/进房/退房只在此接线，会话裁决全部交给 coordinator */
@@ -409,7 +425,7 @@ class VoiceForegroundService : Service() {
             val d = FrameDispatcher(wakeEngine = engine, onRms = { VoiceController.setRms(it) })
                 .also { it.wakeEnabled = wakeActive }
             dispatcher = d
-            val recorder = MicRecorder { samples -> d.onFrame(samples) }
+            val recorder = MicRecorder({ samples -> d.onFrame(samples) }, captureSourceFromRes())
             recorder.setOnDied { onMicDied() }
             if (recorder.start()) {
                 micRecorder = recorder

@@ -52,6 +52,36 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
         /** 真机取证：直接观测「5 路是否降为 1 路」 */
         private fun captureThreadCount(): Int =
             Thread.getAllStackTraces().keys.count { it.name == CAPTURE_THREAD_NAME }
+
+        /**
+         * M0 A/B（decision-relocation §M0）：本源是播放段唯一活着的采集源，是回声耦合的
+         * 主被测对象。采集源由 gradle resValue jax_capture_source 注入（spec §11-3 规定 MIC
+         * → 平台 AEC 无回声参考 = 空操作，VC 变体实测平台 AEC 是否真生效；已知风险：TRTC
+         * SPEECH 档绑 VC 源在本机曾送全零，VC 变体若 lvl raw 恒 0 即同路径静音，G0 判 M1）。
+         * 本类无 Context，经 ActivityThread 反射取 app context 读资源——反射失败/资源缺失
+         * 一律回退 MIC（与生产行为一致）。
+         */
+        fun resolveCaptureSource(): Int {
+            return try {
+                val at = Class.forName("android.app.ActivityThread")
+                val ctx = at.getDeclaredMethod("currentApplication").invoke(null) as? android.content.Context
+                    ?: return MediaRecorder.AudioSource.MIC
+                val resId = ctx.resources.getIdentifier("jax_capture_source", "string", ctx.packageName)
+                val name = if (resId != 0) ctx.getString(resId) else "MIC"
+                Log.i(TAG, "jax_capture_source=$name")
+                if (name == "VOICE_COMMUNICATION") MediaRecorder.AudioSource.VOICE_COMMUNICATION
+                else MediaRecorder.AudioSource.MIC
+            } catch (t: Throwable) {
+                Log.w(TAG, "resolveCaptureSource fallback MIC: ${t.message}")
+                MediaRecorder.AudioSource.MIC
+            }
+        }
+
+        fun sourceName(src: Int): String = when (src) {
+            MediaRecorder.AudioSource.MIC -> "MIC"
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION -> "VOICE_COMMUNICATION"
+            else -> "src=$src"
+        }
         /**
          * 电平日志周期（帧）：20ms/帧 × 25 = 500ms。
          *
@@ -96,8 +126,10 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
             running.set(false)
             return false
         }
+        // M0 A/B：每次 start 重新解析 resValue 注入的采集源（默认/异常=MIC 与生产一致）
+        val captureSource = resolveCaptureSource()
         val record = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
+            captureSource,
             RtcCustomAudioPcm.SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
@@ -110,23 +142,25 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
             return false
         }
         // 平台 AEC/NS/AGC：回音根治核心。isAvailable=false 不阻断（真机日志留痕，降级为无特效上行）。
+        // M0 G0 关键判据：enabled 回读 + created 状态留痕——若 VC 变体下 AEC created 但实测
+        // 空操作（回声耦合比无改善），G0 判 M1 而非 M2。
         try {
             if (AcousticEchoCanceler.isAvailable()) {
                 aec = AcousticEchoCanceler.create(record.audioSessionId)?.also {
                     it.enabled = true
-                    Log.i(TAG, "AEC enabled (session=${record.audioSessionId})")
+                    Log.i(TAG, "AEC created (session=${record.audioSessionId}) enabled=${it.enabled}")
                 }
             } else Log.w(TAG, "AEC not available on this device")
             if (NoiseSuppressor.isAvailable()) {
                 ns = NoiseSuppressor.create(record.audioSessionId)?.also {
                     it.enabled = true
-                    Log.i(TAG, "NS enabled")
+                    Log.i(TAG, "NS created enabled=${it.enabled}")
                 }
             }
             if (AutomaticGainControl.isAvailable()) {
                 agc = AutomaticGainControl.create(record.audioSessionId)?.also {
                     it.enabled = true
-                    Log.i(TAG, "AGC enabled")
+                    Log.i(TAG, "AGC created enabled=${it.enabled}")
                 }
             } else Log.w(TAG, "AGC not available on this device")
         } catch (t: Throwable) {
@@ -136,7 +170,7 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
         thread = Thread({ loop(record, cloud) }, CAPTURE_THREAD_NAME).apply { start() }
         Log.i(
             TAG,
-            "custom capture started (16k/mono/20ms) inst=${instId()} captureThreads=${captureThreadCount()}"
+            "custom capture started (16k/mono/20ms) source=${sourceName(captureSource)} inst=${instId()} captureThreads=${captureThreadCount()}"
         )
         return true
     }

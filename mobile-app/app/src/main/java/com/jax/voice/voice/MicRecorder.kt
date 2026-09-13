@@ -20,7 +20,12 @@ import android.util.Log
  * - **Error 不吞**：onFrame 抛 Error（OOM/UnsatisfiedLinkError）→ 记日志 + 停止 + 上报（由服务重建），不再裸崩进程；
  * - onDied 回调由服务设置，用于重建管线 / 更新 UI（把"静默死"变成可见状态）。
  */
-class MicRecorder(private val onFrame: (FloatArray) -> Unit) {
+class MicRecorder(
+    private val onFrame: (FloatArray) -> Unit,
+    // M0 A/B 实验（decision-relocation §M0）：采集源 flag 化。默认 MIC 与生产一致；
+    // gradle -PjaxCaptureSource=VOICE_COMMUNICATION 经 resValue 注入做 A/B 对比。
+    private val captureSource: Int = MediaRecorder.AudioSource.MIC,
+) {
 
     internal interface StopControl {
         fun release()
@@ -66,7 +71,7 @@ class MicRecorder(private val onFrame: (FloatArray) -> Unit) {
         // 运行时授权检查；本类只负责采集，不重复申请/检查（spec §4.1 采集层无权限职责）。
         @android.annotation.SuppressLint("MissingPermission")
         val record = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
+            captureSource,
             SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
@@ -79,8 +84,16 @@ class MicRecorder(private val onFrame: (FloatArray) -> Unit) {
         }
         audioRecord = record
         running = true
+        // M0 取证证据标签：确认运行中的采集源（防"改了没装上/装了没生效"）
+        Log.w(TAG, "start source=${sourceName(captureSource)}")
         thread = Thread({ loop(record) }, "jax-mic").apply { start() }
         return true
+    }
+
+    private fun sourceName(src: Int): String = when (src) {
+        MediaRecorder.AudioSource.MIC -> "MIC"
+        MediaRecorder.AudioSource.VOICE_COMMUNICATION -> "VOICE_COMMUNICATION"
+        else -> "src=$src"
     }
 
     private fun loop(record: AudioRecord) {

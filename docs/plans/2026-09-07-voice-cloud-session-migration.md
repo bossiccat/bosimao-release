@@ -1,83 +1,337 @@
-# 语音控制面上云迁移方案（B 方案：会话签发 API 上 CloudBase）
+# 语音控制面 CloudBase PostgreSQL 迁移方案
 
-日期：2026-09-07 ｜ 状态：待用户审批 ｜ 纪律：preflight → build → deploy → verify → 切流 → 回滚预案
+日期：2026-09-05（持续审计版）  
+状态：**设计完成，实施未闭环，商业 NO-GO**  
+执行纪律：`preflight -> schema review -> adapter -> staging -> deploy -> verify -> canary -> promote`
 
-## 0. 用户决策（2026-09-07 21:25 明确）
+## 0. 不可变用户决策
 
-用户拍板：**B（云端）才是商业形态，一直要的就是云端**。
-今晚 PC 侧已做的改造（证书重签/0.0.0.0 绑定/防火墙）保留为本地开发态，不回滚；
-adb reverse 隧道与 localhost:8443 彻底废弃（reverse 规则已删空）。
+用户已经明确要求：正式产品必须云端化，不能把本地 SQLite、`localhost`、`127.0.0.1`、`adb reverse`、Tailscale、PowerShell/Bash/Python 脚本、计划任务或 watchdog 作为产品运行依赖。
 
-## 1. 架构事实（代码实锤，非推测）
+因此：
 
-| 事实 | 出处 |
-|------|------|
-| v0.6.0 起音频统一走 TRTC，自研 WS 中继（LAN/云端 relay/配对码/E2EE）已废弃删除 | `mobile-app/.../config/VoiceConfig.kt:11-14` |
-| 手机端不持有 SecretKey，**唯一存云函数环境变量** | `VoiceConfig.kt:12` |
-| 手机填 `session_base_url`，拼 `/api/v1/voice/session` 拉 room_id + userSig 进房 | `VoiceConfig.kt:13-14`、`net/VoiceSessionApi.kt:90` |
-| 音频路径：手机 ←TRTC 云→ PC sidecar（跨网可用，无需同网段） | ADR-012 / master-roadmap 锁定架构 |
-| PC 端签发 API 现状：FastAPI `backend/app/api/routes_voice*.py`，跑在 jax-backend.exe :8000 | jax-services.ps1:303 |
-| CloudBase 环境已存在且可用：`jax-relay-283963-7-1436773060.sh.run.tcloudbase.com`（/relay/health ok） | relay_server 部署 + 21:30 探活 |
+- Android 控制面通过公网 HTTPS 访问 CloudBase CloudRun。
+- 音频媒体面由腾讯云 TRTC 跨公网传输。
+- TRTC `SecretKey`、owner credential、sidecar credential、hello signing key 只进入受控 Secret 注入边界。
+- Windows sidecar / bridge 是桌宠端媒体参与者，不承载手机控制面数据库。
+- SQLite 只能作为本地测试夹具或开发诊断数据源；不能出现在正式 CloudRun 持久化路径。
+- 任何脚本只能属于构建、迁移、诊断或 CI，不得由用户启动桌宠后再负责会话可用性、自愈、重连或数据一致性。
 
-**结论**：商业化的唯一缺口 = 把「会话签发 + 设备注册/配对」控制面搬到云，手机填云端域名。
-音频路径不动（TRTC 本来就是云），PC sidecar 不动（桌宠本体在 PC）。
+在下面所有门禁关闭前，商业状态保持：
 
-## 2. 云端组件设计（CloudRun 容器，最大化复用现有代码）
-
-选型：**CloudBase CloudRun 容器**（不是云函数）——直接复用 FastAPI 代码，
-支持 WebSocket/长连接，与已部署的 jax-relay 同环境同体系。
-
-```
-手机 App（任意网络：蜂窝/Wi-Fi）
-   │  HTTPS /api/v1/voice/*（配对、注册、会话签发）
-   ▼
-CloudBase CloudRun「jax-voice-api」容器
-   │  · 复用 backend/app：routes_voice* + guarded_route + TLS 终结（平台默认 HTTPS）
-   │  · TRTC SDKAppID/SecretKey → CloudRun 环境变量（唯一存放处，符合 ADR-012）
-   │  · 数据层：CloudBase MySQL（devices/sessions/pairing_codes 三张表，替代本地 SQLite/文件）
-   ▼
-腾讯云 TRTC（音频，已就绪）
-   ▲
-PC jax-rtc-sidecar（桌宠本体，只进 TRTC 房间，不再承载控制面）
+```text
+NO-GO
 ```
 
-### 范围内接口（从 routes_voice*.py 迁移）
-- `POST /api/v1/voice/devices/pairing-code`（owner Bearer + X-Request-Nonce）
-- `POST /api/v1/voice/devices/register`（配对码一次性消费，409 语义保留）
-- `GET  /api/v1/voice/session`（room_id + userSig 签发；nonce 契约保留）
-- 健康检查 `/health`
-- guard 语义：云上无需 mTLS client 绑定那套（那是 PC 内部桥接用的），改用设备凭证 + nonce；
-  **FastAPI 守卫顺序铁律沿用**（自定义 APIRoute，避免 422 泄露 schema）。
+## 1. 已核实的当前状态
 
-### 明确不上云（范围外）
-- rtc_bridge / MiniCPM-o 链路（在 PC，属桌宠本体）
-- jax-model 本地大模型（PC GPU）
-- relay_client（v0.6.0 已废；云端 relay 实例保留但不再是语音路径）
+| 项目 | 当前事实 | 判定 |
+|---|---|---|
+| CloudBase 环境 | `jinhong-d2g55ycl591208475`，`ap-shanghai` | PG 资源已存在 |
+| RuntimeBackends | `postgresql=true`、`nosql=true`、`mysql=false` | 只能走 PG，不走 MySQL |
+| PG 业务 schema | 尚无语音业务表 | 未就绪 |
+| 远端 migration history | 语音业务 migration 未应用 | 未就绪 |
+| FastAPI 生产入口 | `backend/app/main.py` 直接构造 `VoiceStore` | 仍为 SQLite |
+| 存储实现 | `backend/app/voice/storage.py` 和 repositories 绑定 `sqlite3`、`?`、`BEGIN IMMEDIATE` | 不能直接复用 PG |
+| CloudRun 镜像 | `deploy/backend/Dockerfile` 仍创建 `/app/backend/data` | 只能支撑临时 SQLite，不能算持久化 |
+| PG driver/pool | 尚未在生产入口闭环验证 | 未就绪 |
+| CloudRun -> PG 网络 | VPC、私网 endpoint、Subnet、Security Group 尚未取得可验证配置 | 禁止猜测或部署 |
+| F6/F7 播放证据 | 最多到 E2 部分，E3/E4 缺失 | `response.done -> 手机扬声器完整播放` 为 NO-GO |
 
-## 3. 迁移管线（六步，每步有验收）
+本阶段没有执行远端 DDL、生产 DML、CloudRun 部署、流量切换或 canary promote。
 
-| 步骤 | 内容 | 验收 |
-|------|------|------|
-| P1 preflight | 盘点 routes_voice* 依赖（DB 层、配置、nonce 库）；云环境确认（用 jax-relay 同一 env） | 依赖清单 + 云环境就绪截图 |
-| P2 build | Dockerfile（python3.11-slim + backend/app 语音子集）；MySQL schema 迁移脚本 | 容器本地起 + /health ok |
-| P3 deploy | 部署 CloudRun「jax-voice-api」；注入 TRTC_SDKAPPID/TRTC_SECRET/OWNER_TOKEN；绑定默认域名 | 公网 /health 200；旧数据不迁移，全新起始 |
-| P4 verify（真机） | 手机 session_base_url → 云端域名；配对→注册→签发→进房全链路 | TRTC 进房 + 桥日志 rooms=1 |
-| P5 切流验收 | 「停止监听→再点立即对话」×10 循环自动化；**手机切蜂窝（关 Wi-Fi）重复全链路** | 10/10 PASS + 蜂网 PASS |
-| P6 回滚预案 | 手机 URL 可随时切回 Tailscale 直连（已就绪）；云端仅新增无删除 | 回滚 = 改一个 URL |
+## 2. 目标架构
 
-## 4. 风险与决策点
+```text
+Android App
+    │ 公网 HTTPS：pairing / register / session / nonce / audit
+    ▼
+CloudBase CloudRun：jax-voice-api
+    ├── FastAPI guarded routes（body 校验前先做安全守卫）
+    ├── bounded PostgreSQL connection pool
+    ├── transaction boundary / retry / graceful shutdown
+    ├── Secret 注入：TRTC、owner、sidecar、hello signing
+    └── CloudBase PostgreSQL（唯一正式控制面持久化）
+            │
+            ├── pairing / device / nonce / rate limit
+            ├── session / pending claim / hello proof
+            ├── termination / ACK / KWS / wake generation
+            └── privacy audit / encrypted transcript metadata
 
-| # | 风险/决策 | 说明 | 需要用户确认 |
-|---|-----------|------|--------------|
-| R1 | CloudBase 环境复用 | jax-relay 所在 env（283963-7-1436773060）是否同意再部署一个 CloudRun 服务 | ✅/❌ |
-| R2 | TRTC SecretKey 入云 | 从 PC .env 迁到 CloudRun 环境变量；PC 侧保留（sidecar 进房也要 userSig？——sidecar 走桥/后端签发，需在 P1 盘点清楚） | 知悉 |
-| R3 | 设备/配对数据 | 本地已注册设备（f32e502b…，10-04 到期）不迁移，手机在云端重新配对一次 | 知悉 |
-| R4 | 费用 | CloudRun 按量 + MySQL；语音量小阶段成本可忽略 | 知悉 |
-| R5 | 域名 | 一期用 CloudRun 默认域名（*.tcloudbase.com）；自有域名二期 | 知悉 |
+Android App  <── 腾讯云 TRTC 音频房间 ──>  Windows sidecar / rtc_bridge
+                                                  │
+                                                  └── Realtime model
+```
 
-## 5. 验收总口径（对应 G 系门禁）
+控制面和媒体面必须分离。PG 只存控制面元数据、哈希、审计信息和应用层加密后的敏感字段；不存原始音频、明文 credential、明文 nonce、明文 proof 或明文 `userSig`。
 
-- 手机在**蜂窝网络**（PC 不在同一网络）完成 配对→签发→TRTC 通话 全链路
-- 「停止监听→立即对话」×10 循环 0 失败
-- PC 后端 :8000 宕机不影响手机配对/签发（控制面独立性证明）
-- 现有 NO-GO 纪律不变：云端验收 PASS 前，本地 Tailscale 形态仍是可回退安全态
+## 3. PostgreSQL schema 资产
+
+本地 versioned migration：
+
+```text
+cloudbase/migrations/20260908154838_voice_control_plane.sql
+```
+
+该 migration 覆盖现有 SQLite 001-007 的全部控制面表：
+
+- `settings`
+- `device_credentials`
+- `pairing_codes`
+- `revoked_sessions`
+- `session_events`
+- `transcripts`
+- `privacy_audit_events`
+- `consumed_nonces`
+- `rate_limit_buckets`
+- `pending_session_claims`
+- `control_plane_sessions`
+- `control_plane_terminations`
+- `control_plane_acknowledgements`
+- `control_plane_ack_reports`
+- `control_plane_kws_readiness`
+- `control_plane_wake_events`
+- `control_plane_hello_proofs`
+
+schema 设计要点：
+
+- 使用 `GENERATED BY DEFAULT AS IDENTITY`，不使用 SQLite `AUTOINCREMENT`。
+- 时间统一为 `timestamptz`；应用边界再转换为 OpenAPI 要求的 RFC3339。
+- 审计和状态元数据使用 `jsonb`；加密 transcript / userSig 使用 `bytea`。
+- 哈希列使用 `char(64)` 并通过 `CHECK(length(...) = 64)` 防止脏值。
+- pending claim 的可领取索引使用 partial index；多实例领取必须使用 PostgreSQL 行锁或 `UPDATE ... RETURNING`。
+- termination、ACK、KWS、wake、hello proof 保留外键和 `ON DELETE CASCADE` 语义。
+- 终止幂等保持 `(session_id, generation, request_id)` 唯一。
+- `control_plane_wake_events` 不再允许把明文 `user_sig` 塞入 replay JSON；必须使用应用层加密字段。
+- `anon` 和 `authenticated` 不获得控制面表访问权；只允许受控后端 service role 访问。
+
+本地契约测试：
+
+```text
+backend/tests/contract/test_voice_pg_schema_contract.py
+```
+
+已验证：
+
+```text
+2 passed
+```
+
+该测试只验证本地 migration 的结构，不等同于远端 PG 已应用，也不等同于 adapter 已完成。
+
+## 4. 运行时 adapter 设计
+
+不能通过替换 DSN、把 `?` 改成 `%s` 或用 SQL 正则把 SQLite 伪装成 PostgreSQL。现有代码直接依赖 `sqlite3.Connection`、SQLite Row、`BEGIN IMMEDIATE` 和 `fetchone()[0]`，必须建立明确的 storage contract。
+
+建议的分层：
+
+```text
+VoiceStoreContract
+    ├── LocalSqliteVoiceStore（仅测试/开发）
+    └── PostgresVoiceStore（CloudRun 正式路径）
+            ├── asyncpg pool / typed connection wrapper
+            ├── repository adapters
+            ├── transaction context
+            └── health + graceful close
+```
+
+adapter 必须满足：
+
+- bounded pool：明确 `min_size`、`max_size`、连接超时和命令超时。
+- startup health check：无法连接 PG 时生产实例 fail-closed，不回退 SQLite。
+- shutdown：FastAPI lifespan 中先停止接收新控制面请求，再等待事务完成并关闭 pool。
+- retry：只对连接建立和明确的 transient serialization/deadlock 错误进行有限退避；不能重试已消费 nonce、pairing 或 proof 的不确定事务。
+- placeholder、时间类型、JSON、bytes 和 row mapping 全部通过 adapter 统一处理。
+- 事务边界不能散落在路由中。
+- `LedgerBase` 不得再用 `isinstance(store, VoiceStore)` 把 PG adapter 拒之门外；改用 contract/protocol 或独立 PG ledger。
+
+关键原子事务：
+
+| 事务 | 必须原子完成 |
+|---|---|
+| pairing register | 消费 pairing code + 创建设备 credential + privacy audit |
+| nonce | subject 绑定、过期判断、一次性消费 |
+| pending claim | `FOR UPDATE SKIP LOCKED` 或等价 `UPDATE ... RETURNING`，单次领取 |
+| hello sign | 校验 claim + 插入 proof + `SIGNING -> ENTERING` |
+| hello redeem | proof 一次性消费 + `ENTERING -> ACTIVE` |
+| termination | session 状态 + termination 幂等记录 |
+| ACK | reporter upsert + aggregate ACK + terminal state |
+| wake | 旧代状态 + 新代 session + pending claim + replay record |
+
+## 5. CloudRun -> PG 连接门禁
+
+在取得官方资源信息前，禁止猜测以下字段：
+
+- `VpcId`
+- `SubnetId`
+- 私网数据库 endpoint
+- Security Group
+- CloudRun `VpcConf`
+- 连接用户名、密码或 Secret 名称
+
+必须先取得并归档：
+
+1. PG 实例网络模式和连接入口。
+2. CloudRun 所在地域、VPC 和子网可达性。
+3. 数据库安全组入站规则和最小端口范围。
+4. Secret Manager 注入映射，禁止把 DSN 写入镜像或仓库。
+5. CloudRun `serverConfig.VpcConf` 与运行时 `DATABASE_URL` 的对应关系。
+6. 连接池在两个实例并发下的最大连接预算。
+
+如果这些信息不能通过平台管理接口或官方控制台证实，停止部署，不用本地 SQLite、Tailscale 或脚本绕过。
+
+## 6. 分阶段实施和验收
+
+### P1：preflight
+
+- 冻结 SQLite 001-007 作为本地夹具，不再把它们当云端迁移。
+- 审计全部 voice repository SQL、类型和事务。
+- 确认 PG 资源、CloudRun 初始化状态、Secret 和 VPC 信息。
+- 输出依赖清单和差异矩阵。
+
+### P2：schema review
+
+- 对本地 migration 执行 SQL 静态检查。
+- 使用 `planMigration` 预览，不执行生产 apply。
+- 检查表、字段、索引、外键、CHECK、GRANT 和 RLS/role boundary。
+- 明确 `user_sig` 的应用层加密实现和密钥轮换策略。
+
+### P3：adapter + contract
+
+- 先写 PG adapter 契约和并发测试，再切入口。
+- 至少覆盖两个并发 worker 领取同一 pending claim 的 race。
+- 覆盖 nonce、pairing、hello proof、termination、ACK、wake 的重放和失败回滚。
+- 旧 SQLite 测试继续运行，但不能作为 PG 通过证据。
+
+### P4：staging
+
+- 只在 staging apply migration。
+- CloudRun 至少两个实例，验证重启后数据仍存在。
+- 验证数据库连接失败时 fail-closed，而不是静默落盘。
+- 完成 backup、restore、PITR 和隔离恢复演练。
+- 验证 migration rollback/forward-only 策略和审计记录。
+
+### P5：公网真机验收
+
+- 手机不使用 `localhost`、`adb reverse`、Tailscale 或局域网隧道。
+- Wi-Fi 和蜂窝网络分别完成 pairing -> register -> session -> TRTC enter -> playback。
+- 停止监听后重新点击立即对话，连续 `10/10 PASS`。
+- PC 本地 backend/model 停止后，云端控制面仍能工作；媒体依赖边界要单独记录。
+- 记录请求 ID、session ID、generation、TRTC room、sidecar frame range 和错误码。
+
+### P6：canary
+
+- 先 consumer probe，再 staging multi-instance，再 installer/clean-install，再 canary。
+- 只能通过正式 CloudRun traffic 控制做灰度和回滚。
+- 未完成 PG 持久化、真机蜂窝、备份恢复或语音播放证据前，不得 promote。
+
+## 7. 回滚原则
+
+回滚不是把手机 URL 改回 Tailscale，也不是重新启用本地 SQLite。正式回滚必须是：
+
+- CloudRun traffic rollback 到上一份已验证版本。
+- 数据库 migration 采用 forward-compatible 设计，必要时使用明确的 rollback migration。
+- 保留旧版本只读兼容窗口，禁止删除已写入的业务数据。
+- 若数据库不可用，接口明确返回受控 `503`，不能把请求写到本地文件后继续返回成功。
+
+## 8. 当前阻断
+
+| 阻断 | 证据 | 关闭条件 |
+|---|---|---|
+| 生产入口仍为 SQLite | `backend/app/main.py:108-109` | PG adapter + pool + fail-closed 入口完成 |
+| PG migration 未应用 | 远端 history 无语音业务版本 | staging plan/apply/verify 完成 |
+| PG adapter 未闭环 | repositories 仍 `sqlite3` | contract、race、integration 全绿 |
+| CloudRun VPC 未证实 | 未取得官方 `VpcConf`/endpoint | 平台证据归档 |
+| 脚本仍在运行边界 | `scripts/jax-services.ps1`、watchdog 等 | 移到应用/服务/CloudRun 生命周期并做依赖审计 |
+| F6/F7 E3/E4 缺失 | 无 Android output drain/物理声学证据 | 完整播放、gap、冲刷时间可追溯 |
+| teammate 审计失败 | `general-purpose-2` 上游限流 | 重新取得独立只读审计，或保留 NO-GO |
+
+## 9. 结论
+
+本轮完成了 PG schema 本地资产和契约测试，但没有完成正式 PG 持久化，也没有部署或切流。当前准确状态仍是：
+
+```text
+CloudBase PG：资源存在，语音业务 schema 尚未应用
+生产控制面：仍为 SQLite
+PG adapter/pool：未闭环
+CloudRun -> PG：网络与 Secret 边界未验收
+F6/F7：E3/E4 缺失
+商业状态：NO-GO
+```
+
+后续必须按 `schema -> adapter -> staging -> recovery -> real-device -> canary` 顺序推进。任何把本地脚本、隧道、SQLite 或静态日志包装成商业化通过的做法都不接受。
+
+## 10. 部署配置固化（CI 注入，2026-09-11）
+
+部署配置不能再"只存在于云端控制台"。已把配置固化进
+`.github/workflows/deploy-cloudrun.yml`：构建与部署由 CI 负责，运行时键由 CI 从
+GitHub Secrets/Vars 注入，且 **preflight 对本次矩阵服务需要的每个键校验非空**——
+缺任一项即打印缺失键名（只打键名、绝不打值）并以非零码中止，绝不带病部署。
+
+### 10.1 必须在 GitHub 侧配置的键（只列键名与用途，值一律不落仓库）
+
+用 `tcb` 登录与推镜像的基础项：
+
+| 键 | 存放 | 用途 |
+|---|---|---|
+| `TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` | Secrets | `tcb login` |
+| `TCR_REGISTRY` / `TCR_NAMESPACE` / `TCR_USERNAME` / `TCR_PASSWORD` | Secrets | 镜像构建推送 |
+| `VPC_ID` / `VPC_CIDR` / `SUBNET_ID` / `SUBNET_CIDR` | Vars | CloudRun 出网接入内网 PG |
+
+`jax-voice-api` 必需键（15 项，缺一即 fail-closed）：
+
+`VOICE_PRODUCTION`、`VOICE_STORAGE_BACKEND`、`VOICE_DATABASE_URL`、
+`VOICE_TLS_ENABLED`、`RTC_TERMINATION_ENABLED`、`VOICE_OWNER_CREDENTIAL`、
+`VOICE_SIDECAR_CREDENTIAL`、`TRTC_SDKAPPID`、`TRTC_SECRETKEY`、
+`VOICE_HELLO_PRIVATE_KEY_PEM`、`VOICE_HELLO_PUBLIC_KEY_PEM`、
+`VOICE_RTC_BRIDGE_CERT_BINDING`、`VOICE_RTC_BRIDGE_CREDENTIAL`、
+`VOICE_GATEWAY_SHARED_ASSERTION`、`VOICE_TRUSTED_GATEWAY_HOSTS`。
+
+其中 `VOICE_HELLO_PRIVATE_KEY_PEM`/`VOICE_HELLO_PUBLIC_KEY_PEM` 是 hello 运行时
+装配（`backend/app/voice/hello_runtime.build_hello_runtime`）的**新增必需项**：
+`VOICE_PRODUCTION=true` 下缺它会在启动期 fail-closed 崩溃。它们此前不在云端
+EnvParams 里，必须在 GitHub 侧补齐，否则 preflight 会拦住这次部署——这是设计意图。
+
+`jax-voice-bridge` 必需键（13 项，缺一即 fail-closed）：
+
+`CONTROL_PLANE_BASE_URL`、`VOICE_SIDECAR_CREDENTIAL`、`TRTC_SDKAPPID`、
+`TRTC_SECRETKEY`、`QWEN_REALTIME_WS_URL`、`QWEN_REALTIME_API_KEY`、
+`RTC_BRIDGE_CONTROL_PLANE_BASE_URL`、`RTC_BRIDGE_SERVICE_CREDENTIAL`、
+`RTC_BRIDGE_GATEWAY_ASSERTION`、`RTC_BRIDGE_CLIENT_CERT_FILE`、
+`RTC_BRIDGE_CLIENT_KEY_FILE`、`RTC_BRIDGE_CONTROL_PLANE_CA_FILE`、
+`RTC_BRIDGE_CERT_BINDING`。
+
+存放建议：凭据/密钥/DSN 放 Secrets，非敏感开关（如 `VOICE_PRODUCTION`、
+`VOICE_TRUSTED_GATEWAY_HOSTS`、各 `*_FILE` 路径）可放 Vars；workflow 里用
+`${{ secrets.KEY || vars.KEY }}` 引用，两者任一存在即可。
+
+未列入必填清单、但仍留在 CloudRun 服务配置上的键（`TRTC_ROOM_PREFIX`、
+`LOG_LEVEL`、`VOICE_USER_SIG_CIPHER_KEY`、`BRIDGE_DEVICE_ID`、
+`BRIDGE_SIDECAR_ENABLED`、`VOICE_ENGINE`、`BRIDGE_CRASH_GRACE_S` 等）由
+`tcb cloudrun deploy` 的"保留服务既有环境变量"语义维持，本流水线不接管。
+
+### 10.2 VpcConf 必须由 CI 注入
+
+`jax-voice-api` 的 `VpcConf = REPLACE_WITH_VPC_ID / REPLACE_WITH_SUBNET_ID` 此前**只存在于云端
+控制台**，仓库内无记录；整包覆盖式发布一旦丢失它，实例就连不到
+`REPLACE_WITH_PG_PRIVATE_IP:5432`，存储探针必然不绿。现在 api 与 bridge **都**在部署命令里通过
+`--vpcConfig` 注入（值取自 `vars.VPC_ID` / `vars.VPC_CIDR` / `vars.SUBNET_ID` /
+`vars.SUBNET_CIDR`，不硬编码）。bridge 也需要它：其 `rtc_bridge` 要经 VPC 出口回调
+控制面，出口源 IP 才能落进控制面的窄白名单。
+
+### 10.3 Dockerfile 固化生产开关
+
+`cloudapi/Dockerfile` 已与 `VOICE_STORAGE_BACKEND=postgresql` 并列固化
+`ENV VOICE_PRODUCTION=true`。原因：`store_factory.build_voice_store` 按
+`settings.voice_production` 分支，为假时装配容器内 SQLite 夹具（数据易失、与目标
+架构不符）。缺 DSN 时 `validate_voice_storage()` 会在启动期 fail-closed 拒绝——
+这是预期行为，不得绕过。
+
+### 10.4 注入形式说明（CLI 约束）
+
+`tcb cloudrun deploy` **没有** env 参数；运行时配置的官方 CI 注入形式是
+`tcb secrets set <KEY> <VALUE> --env-id`（容器启动时以环境变量注入，改完须重新部署）。
+注意该命令写入的 secrets 是**环境级**而非服务级：两服务重叠键
+（`VOICE_SIDECAR_CREDENTIAL` / `TRTC_SDKAPPID` / `TRTC_SECRETKEY`）取值一致，不会
+互相覆盖。已由本流水线接管的键，应从 CloudRun 服务 EnvParams 移除，避免出现双源。
+

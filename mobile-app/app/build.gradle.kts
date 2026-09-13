@@ -18,6 +18,11 @@ android {
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
+
+        // M0 采集源 A/B（decision-relocation §M0）：gradle -PjaxCaptureSource=VOICE_COMMUNICATION
+        // 注入实验变体；默认无 -P 时为 MIC，与生产行为完全一致。
+        resValue("string", "jax_capture_source",
+            (project.findProperty("jaxCaptureSource") as String? ?: "MIC").trim().uppercase())
     }
 
     buildTypes {

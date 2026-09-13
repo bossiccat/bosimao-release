@@ -20,7 +20,12 @@ use jax_pet::watchdog::{
 use tauri::{Emitter, Manager};
 
 const SIDECAR_RUNTIME_DIR: &str = "jrt";
-const SIDECAR_ARGS: [&str; 1] = ["--role=sidecar"];
+// 商业化云端控制面（2026-09-08）：sidecar sign 指向 CloudBase 云托管 jax-backend，
+// 与手机 App 同一控制面；不再依赖本地 backend:8000（测试隧道/本地链路全部退役）。
+const SIDECAR_ARGS: [&str; 2] = [
+    "--role=sidecar",
+    "--sign-url=https://jax-backend-283963-7-1436773060.sh.run.tcloudbase.com",
+];
 const WATCHDOG_HEALTHY_AFTER: Duration = Duration::from_secs(30);
 const COMPILED_MANIFEST_SHA256: &str = env!("JAX_SIDECAR_MANIFEST_SHA256");
 
