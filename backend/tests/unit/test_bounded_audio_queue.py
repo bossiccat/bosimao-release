@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-import time
+import logging
 
 from rtc_bridge.bounded_audio_queue import BoundedAudioQueue, QueueEntry
 
@@ -62,6 +62,45 @@ def test_max_frame_age_expired_entries_dropped():
     entry = q.pop()
     assert entry is not None and entry.payload[0] == ord("b")
     assert q.drops == 1
+
+
+# ---------- 帧龄丢弃可观测性（B3）----------
+# 原实现丢超龄帧**一条日志都没有**：max_frames=200 形同虚设、有效缓冲实际只有约
+# 1s 这一事实在运行期不可见。这里锁死「计数 + metrics 曝光 + 日志节流」。
+
+def test_age_drop_counted_and_exposed_in_metrics():
+    clock = _Clock()
+    q = BoundedAudioQueue(max_frames=100, max_bytes=100 * FRAME,
+                          max_frame_age_ms=100, now_fn=clock)
+    q.push(b"a" * FRAME)
+    q.push(b"b" * FRAME)
+    clock.advance(0.2)  # 两帧均超龄（200ms > 100ms）
+    entry = q.pop()
+    assert entry is None, "全部过龄应返回 None"
+    assert q.age_dropped == 2, "帧龄丢弃必须单独计数"
+    assert q.drops == 2, "总丢帧计数保持不变"
+    assert q.metrics()["age_dropped"] == 2, "age_dropped 必须暴露在 metrics() 里"
+
+
+def test_age_drop_log_is_throttled(caplog):
+    clock = _Clock()
+    q = BoundedAudioQueue(max_frames=100, max_bytes=100 * FRAME,
+                          max_frame_age_ms=100, now_fn=clock)
+    with caplog.at_level(logging.WARNING, logger="rtc_bridge.bounded_audio_queue"):
+        q.push(b"a" * FRAME)          # @1000s
+        clock.advance(0.2)            # now=1000.2
+        q.push(b"b" * FRAME)          # 丢 a（200ms>100）→ 第 1 条日志
+        clock.advance(0.2)            # now=1000.4
+        q.push(b"c" * FRAME)          # 丢 b → 距上次 0.2s → 被节流，不打
+        clock.advance(1.2)            # now=1001.6
+        q.push(b"d" * FRAME)          # 丢 c → 距上次 1.4s → 第 2 条日志
+
+    recs = [r for r in caplog.records if "age-drop" in r.getMessage()]
+    assert len(recs) == 2, f"日志必须每秒至多一条，实得 {len(recs)} 条"
+    assert q.age_dropped == 3
+    assert q.drops == 3
+    msg = recs[-1].getMessage()
+    assert "丢弃 1 帧" in msg and "上限 100ms" in msg, f"日志须写清丢弃数与上限：{msg}"
 
 
 def test_generation_flush_removes_old_generation():
