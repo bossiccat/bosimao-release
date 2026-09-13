@@ -104,3 +104,40 @@ def test_session_and_health_split_drops_by_direction(monkeypatch):
     assert m["queue_drops_up"] == 3
     assert m["queue_drops_down"] == 5
     assert m["queue_drops"] == 8
+
+
+def test_health_exposes_playback_gate_drops(monkeypatch):
+    """播放期上行门控的丢弃必须**单独**透出。
+
+    它是与队列**无关**的另一条丢弃通路：AI 播报中（且打断尚未确认）每帧弹出即丢，
+    目的是防扬声器回声被云端 commit 成用户输入。不与 queue_drops_* 分开，
+    就会把「队列丢帧」与「刻意的门控丢弃」混为一谈 —— 2026-09-13 实测同一轮里
+    `queue_drops_up=22` 而 `up_gated_playback=107`，量级差约 5 倍，混算必然误判。
+    """
+    class _StubApm:
+        def __init__(self, *a, **kw) -> None:
+            pass
+
+        async def feed_pcm(self, pcm: bytes) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("rtc_bridge.session.ApmBridge", _StubApm)
+
+    async def _send(msg: dict) -> None:
+        pass
+
+    async def _health(gated: int | None) -> dict:
+        s = PeerVoiceSession(device_id="d", room_id="r", send_msg=_send,
+                             apm_api_url="ws://fake", apm_system_prompt="p")
+        if gated is not None:
+            s.stats["up_gated_playback"] = gated
+        hs = HealthServer("127.0.0.1", 0, {"room_id": "r", "_session_ref": s})
+        m = hs._metrics()
+        await s.close()
+        return m
+
+    assert asyncio.run(_health(7))["up_gated_playback"] == 7
+    assert asyncio.run(_health(None))["up_gated_playback"] == 0, "缺省必须为 0，不能 KeyError"

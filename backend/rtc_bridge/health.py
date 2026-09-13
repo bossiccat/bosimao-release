@@ -92,6 +92,9 @@ class HealthServer:
             m["queue_drops_up"] = session.stats.get("queue_drops_up", 0)
             m["queue_drops_down"] = session.stats.get("queue_drops_down", 0)
             m["backpressure_events"] = session.stats.get("backpressure_events", 0)
+            # 播放期上行门控主动丢弃的帧数（**另一条与队列无关的丢弃通路**）。
+            # 不暴露它就会把"队列丢帧"与"刻意的门控丢弃"混为一谈。
+            m["up_gated_playback"] = session.stats.get("up_gated_playback", 0)
         else:
             m.setdefault("up_frames", 0)
             m.setdefault("down_frames", 0)
@@ -104,6 +107,7 @@ class HealthServer:
             m.setdefault("queue_drops_up", 0)
             m.setdefault("queue_drops_down", 0)
             m.setdefault("backpressure_events", 0)
+            m.setdefault("up_gated_playback", 0)
         m["rooms"] = 1 if m.get("room_id") else 0
         return m
 
