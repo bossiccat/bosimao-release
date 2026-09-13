@@ -45,6 +45,16 @@ def validate_hello(value: object) -> dict:
 
 
 class HelloRedemptionClient:
+    """hello 兑付客户端。
+
+    ⚠️ 超时默认值（2026-09-12 修正）：原为 connect=0.5s / total=2.0s，那是
+    「sidecar 与控制面**同机**」时代的调参。媒体面回到用户机器、控制面在公网后，
+    沿用该值会把**成功的兑付判成失败**，而兑付失败是 fail-closed 终局
+    （`server.py` 立即 `ctrl exit hello_redemption_failed`，永不建会话），
+    线上表现为「随机连不上」。现默认放宽到 5s/15s；同机场景可用
+    `RTC_BRIDGE_CONTROL_PLANE_CONNECT_TIMEOUT_S` / `..._TOTAL_TIMEOUT_S` 收紧。
+    """
+
     def __init__(
         self,
         *,
@@ -54,8 +64,8 @@ class HelloRedemptionClient:
         client_cert_file: str,
         client_key_file: str,
         gateway_assertion: str,
-        connect_timeout_s: float = 0.5,
-        total_timeout_s: float = 2.0,
+        connect_timeout_s: float = 5.0,
+        total_timeout_s: float = 15.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         required = (
@@ -113,7 +123,18 @@ class HelloRedemptionClient:
         ) as client:
             response = await client.post(self._url, json=payload, headers=self._headers)
         if response.status_code != 200:
-            raise HelloRedemptionError("redemption rejected")
+            # 只带**数字**：HTTP 状态 + 业务错误码。服务端返回的是锁定错误码，每一个
+            # 精确对应一道不同的校验（40101=服务凭证不被接受 / 40114=断言哈希或证书绑定
+            # 不一致 / 40021=会话状态）。旧实现把这两者统一吞成 "redemption rejected"，
+            # 导致兑付失败完全无法归因 —— 实测为此白排查了多轮。
+            code = "n/a"
+            try:
+                code = str((response.json() or {}).get("code", "n/a"))
+            except (ValueError, TypeError):
+                pass
+            raise HelloRedemptionError(
+                f"redemption rejected http={response.status_code} code={code}"
+            )
         try:
             body = response.json()
             data = body["data"]
@@ -121,7 +142,11 @@ class HelloRedemptionClient:
             raise HelloRedemptionError("invalid redemption response") from exc
         identity = ("session_id", "device_id", "room_id", "sidecar_user_id", "generation")
         if body.get("code") != 0 or data.get("redeemed") is not True:
-            raise HelloRedemptionError("redemption rejected")
+            # 同上：带上业务码，否则 200 但业务拒绝时同样无法归因
+            raise HelloRedemptionError(
+                f"redemption rejected body_code={body.get('code')} "
+                f"redeemed={data.get('redeemed')}"
+            )
         if any(data.get(key) != payload[key] for key in identity):
             raise HelloRedemptionError("redemption binding mismatch")
         if not isinstance(data.get("expires_at"), str) or not data["expires_at"]:

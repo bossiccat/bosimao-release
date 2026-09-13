@@ -42,6 +42,10 @@ class BoundedAudioQueue:
         self.drops = 0
         self.backpressure_events = 0
         self.enqueued = 0
+        # 帧龄丢弃计数：超龄条目在每次 push/pop 时被静默丢弃（原实现无任何日志），
+        # 是「max_frames 形同虚设、有效缓冲实际只有约 1s」这一事实的唯一可观测入口。
+        self.age_dropped = 0
+        self._last_age_drop_log = float("-inf")  # 首帧过龄即打，之后 ≥1s 一条
         # P0-5/F9：帧龄分布采样（量化 U4/U5 停摆导致的丢帧）
         self._age_samples: deque[float] = deque(maxlen=1000)
         self._pops = 0
@@ -63,6 +67,7 @@ class BoundedAudioQueue:
             "queue_drops": self.drops,
             "backpressure_events": self.backpressure_events,
             "queue_bytes": self.bytes_total,
+            "age_dropped": self.age_dropped,
         }
 
     # ---- 入队（非阻塞） ----
@@ -147,7 +152,36 @@ class BoundedAudioQueue:
     # ---- 内部 ----
 
     def _drop_expired(self, now: float) -> None:
+        """丢弃超过 max_frame_age_ms 的队首条目。
+
+        帧龄过期丢弃的**语义按方向不同**，调用方必须把 max_frame_age_ms 配对好：
+
+        · 上行（手机→桥）：迟到帧确实没有价值 ⇒ 帧龄过期丢弃是对的，保持 1s 尺度。
+        · 下行（桥→手机）：**早到不是陈旧**。模型以突发方式一次推下整段回复，而
+          shaper 按实时 50 帧/s 出队，所以「排队等待播放」的帧天然会停留数秒 ——
+          把 max_frame_age_ms 当陈旧判据会按整帧切掉待播内容（2026-09-13 实测：
+          模型产出 6.88s、手机只收到 4.26s，约 38% 被丢 ⇒「3 倍速 + 吐字不清」）。
+          正确修法是把下行 max_frame_age_ms 提到「整段回复」尺度（见 config.py 的
+          down_* 注释），**不是**去掉这道保护 —— 超限仍丢旧 + 计数 + 日志。
+
+        计数 `age_dropped` + 节流日志（≥1s 一条，避免高频丢帧刷爆日志）用于让
+        「有效缓冲实际有多大」在运行期可见。
+        """
         limit_ms = float(self.max_frame_age_ms)
+        dropped_in_call = 0
+        head_age_ms = 0.0
         while self._entries and (now - self._entries[0].created_at) * 1000.0 > limit_ms:
+            if dropped_in_call == 0:
+                head_age_ms = (now - self._entries[0].created_at) * 1000.0
             self._entries.popleft()
             self.drops += 1
+            self.age_dropped += 1
+            dropped_in_call += 1
+        if dropped_in_call and now - self._last_age_drop_log >= 1.0:
+            self._last_age_drop_log = now
+            logger.warning(
+                "[lat] audio age-drop: 丢弃 %d 帧 / 队首帧龄 %.0fms / 上限 %dms"
+                "（age_dropped=%d，累计丢帧=%d）",
+                dropped_in_call, head_age_ms, self.max_frame_age_ms,
+                self.age_dropped, self.drops,
+            )

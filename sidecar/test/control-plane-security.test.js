@@ -18,6 +18,12 @@ test('session requests use an independent Bearer credential and fresh high-entro
   assert.notEqual(first['X-Request-Nonce'], second['X-Request-Nonce']);
 });
 
+test('control-plane headers carry a Bearer device credential and a 64-hex nonce', () => {
+  const headers = security.controlPlaneHeaders({ credential: 'a.b' });
+  assert.equal(headers.Authorization, 'Bearer a.b');
+  assert.match(headers['X-Request-Nonce'], /^[0-9a-f]{64}$/);
+});
+
 test('rtc session and pending requests attach security headers', () => {
   assert.match(RTC_SOURCE, /controlPlaneHeaders\(/);
   assert.match(RTC_SOURCE, /\/api\/v1\/voice\/session\/pending/);

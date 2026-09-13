@@ -19,10 +19,12 @@ from .frame_meta import DownFrame
 
 logger = logging.getLogger(__name__)
 
-# 默认下行预算（AC-10；压力测试后可调）
-DEFAULT_DOWN_MAX_FRAMES = 200
-DEFAULT_DOWN_MAX_BYTES = 200 * 640
-DEFAULT_DOWN_MAX_FRAME_AGE_MS = 1000
+# 默认下行预算（AC-10）。尺度说明见 config.py 的 down_* 注释：模型突发式下发 +
+# 实时 50 帧/s 出队 ⇒ 队列须能装下一整段回复（1500 帧 × 20ms = 30s），早到的帧是
+# 待播内容而非陈旧数据。必须与 config.py / session.py 保持同一组尺度。
+DEFAULT_DOWN_MAX_FRAMES = 1500
+DEFAULT_DOWN_MAX_BYTES = 1500 * 640
+DEFAULT_DOWN_MAX_FRAME_AGE_MS = 30000
 
 
 class DownlinkShaper:

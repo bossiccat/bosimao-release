@@ -43,9 +43,61 @@ test('production sidecar accepts no device and rejects device before startup', (
 test('role-scoped startup validation is fail-closed', () => {
   assert.equal(validateStartup(parseArgList(['--role=sidecar']), {}), 'SIDECAR_CREDENTIAL_MISSING');
   assert.equal(validateStartup(parseArgList(['--role=phone']), {}), 'PHONE_DEVICE_REQUIRED');
-  assert.equal(validateStartup(parseArgList(['--role=phone', '--device=android-1']), {}), null);
+  assert.equal(
+    validateStartup(parseArgList(['--role=phone', '--device=android-1']), {}),
+    'PHONE_DEVICE_CREDENTIAL_MISSING',
+  );
   assert.equal(validateStartup(parseArgList(['--role=unknown']), {}), 'SIDECAR_INVALID_ARGS');
   assert.equal(validateStartup(parseArgList(['--role=sidecar', '--role=phone']), {}), 'SIDECAR_INVALID_ARGS');
+});
+
+test('phone simulator startup requires a runtime device credential (never argv)', () => {
+  // 凭证只从环境变量读入：缺失时 fail-closed，不能靠 CLI 参数补
+  assert.equal(
+    validateStartup({ role: 'phone', device: 'abc', invalid: false }, {}),
+    'PHONE_DEVICE_CREDENTIAL_MISSING',
+  );
+  assert.equal(
+    validateStartup({ role: 'phone', device: 'abc', invalid: false }, { VOICE_SIM_DEVICE_CREDENTIAL: 'abc.def' }),
+    null,
+  );
+  // 回归保护：sidecar 分支（含 fail-closed 语义）不得被本次改动波及
+  assert.equal(
+    validateStartup({ role: 'sidecar', device: undefined, invalid: false }, { VOICE_SIDECAR_CREDENTIAL: 'x' }),
+    null,
+  );
+  assert.equal(
+    validateStartup({ role: 'sidecar', device: undefined, invalid: false }, {}),
+    'SIDECAR_CREDENTIAL_MISSING',
+  );
+});
+
+test('join-grace is a bounded positive numeric option', () => {
+  assert.equal(parseArgList(['--role=phone', '--device=x', '--join-grace=3']).joinGraceS, 3);
+  assert.equal(parseArgList(['--role=phone', '--device=x']).joinGraceS, 8);
+  assert.equal(parseArgList(['--role=phone', '--device=x', '--join-grace=0']).invalid, true);
+  assert.equal(parseArgList(['--role=phone', '--device=x', '--join-grace=abc']).invalid, true);
+});
+
+test('phone simulator signs with a real device credential and stable log contract', () => {
+  // 凭证必须真实传递：复用控制面头构造器，body 必带 entry_point
+  assert.match(PHONE_SOURCE, /controlPlaneHeaders\(\{\s*credential\s*\}\)/);
+  assert.match(PHONE_SOURCE, /process\.env\.VOICE_SIM_DEVICE_CREDENTIAL/);
+  assert.match(PHONE_SOURCE, /entry_point:\s*'main'/);
+  // 云端解析器依赖的固定文案（半角空格与半角 =）
+  assert.match(PHONE_SOURCE, /签发失败 code=/);
+  assert.match(PHONE_SOURCE, /远端就绪 @/);
+  assert.match(PHONE_SOURCE, /远端未就绪（/);
+  // 抛异常不得携带凭证/响应原文
+  assert.doesNotMatch(PHONE_SOURCE, /JSON\.stringify\(parsed\)/);
+  // upStartTs 必须在等待远端就绪之后才赋值（first_reply_ms 口径自上行开始）
+  assert.match(PHONE_SOURCE, /onRemoteUserEnterRoom[\s\S]*remoteReadyTs\s*=\s*Date\.now\(\)/);
+  assert.ok(
+    PHONE_SOURCE.indexOf('await waitRemoteReady()') < PHONE_SOURCE.lastIndexOf('upStartTs = Date.now()'),
+    'upStartTs 必须在 waitRemoteReady 之后赋值',
+  );
+  // 渲染进程侧同款 fail-closed 检查
+  assert.match(RTC_SOURCE, /PHONE_DEVICE_CREDENTIAL_MISSING/);
 });
 
 test('production polling runtime remains resident beyond the hold window', () => {

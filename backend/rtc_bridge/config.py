@@ -18,6 +18,11 @@ class BridgeConfig:
     test_audio_enabled: bool = False
     # 语音前台引擎：qwen_realtime 已通过真实 session.created 握手验证；apm 保留回退。
     voice_engine: str = "qwen"
+    # 决策归位 M2 kill-switch：false = 本地能量 barge-in 与播放期上行门控整体退役，
+    # 打断判定归位云端 smart_turn（声学+语义双检，非语义声音不触发）。
+    # 默认 true 保持现有行为；G0 判定通过后切 false（run1 实锤：本地阈值在回声
+    # 污染信号上误杀回复 0.5-1.5s——「没讲完」体验的直接根源）。
+    local_barge_in: bool = True
     qwen_api_url: str = ""
     qwen_token: str = ""
     qwen_system_prompt: str = (
@@ -47,12 +52,24 @@ class BridgeConfig:
     down_frame_ms: int = 20
     sample_rate: int = 16000
     # 有界队列预算（AC-10：帧数/字节/帧龄三约束；压力测试后可调）
+    #
+    # 上行 up_*（手机→桥，100 帧 / 1s）：保持「同机低延迟遥测」尺度 —— 迟到的上行帧
+    # 确实没有价值，帧龄过期丢弃是对的。
+    #
+    # 下行 down_*（桥→手机）必须按「能装下一整段回复」的尺度配置，理由：
+    #   模型把整段回复的音频以远快于实时的**突发**一次推下来（实测 6.88s 音频约 1.5s
+    #   墙钟到齐），而 DownlinkShaper 严格按实时 50 帧/s 出队（shaper.py:137-138）。
+    #   ⇒ 对下行而言「早到」的帧不是陈旧数据，恰恰是要播的内容。旧值 200 帧 / 1s 是按
+    #   「同机低延迟遥测」调的，会把约 38% 的音频按**整帧**当陈旧数据丢弃（字被从中间
+    #   切断），直接表现为「3 倍速 + 吐字不清 + 话讲不完」。
+    #   1500 帧 × 20ms = 30s 仍是有界安全上界：超限照样丢旧 + 计数 + 打日志，只是把
+    #   尺度从「1s 遥测」调到「整段回复」。
     up_max_frames: int = 100
     up_max_bytes: int = 100 * 640
     up_max_frame_age_ms: int = 1000
-    down_max_frames: int = 200
-    down_max_bytes: int = 200 * 640
-    down_max_frame_age_ms: int = 1000
+    down_max_frames: int = 1500
+    down_max_bytes: int = 1500 * 640
+    down_max_frame_age_ms: int = 30000
     # Control Plane hello redemption（HTTPS + mTLS，零重试）
     control_plane_base_url: str = ""
     control_plane_service_credential: str = ""
@@ -90,6 +107,10 @@ def load_bridge_config(env: dict | None = None) -> BridgeConfig:
         env.get("RTC_BRIDGE_TEST_AUDIO_ENABLED", "")
     ).strip().lower() in {"1", "true", "yes"}
     cfg.voice_engine = env.get("VOICE_ENGINE", cfg.voice_engine).strip().lower()
+    # M2 kill-switch（默认 true=本地决策；false=云端 smart_turn 决策归位）
+    cfg.local_barge_in = str(
+        env.get("RTC_BRIDGE_LOCAL_BARGE_IN", "true")
+    ).strip().lower() not in {"0", "false", "no", "off"}
     cfg.qwen_api_url = env.get("QWEN_REALTIME_WS_URL", cfg.qwen_api_url)
     cfg.qwen_token = env.get("QWEN_REALTIME_API_KEY", cfg.qwen_token)
     cfg.qwen_system_prompt = env.get("QWEN_REALTIME_SYSTEM_PROMPT", cfg.qwen_system_prompt)

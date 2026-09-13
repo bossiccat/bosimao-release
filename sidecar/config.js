@@ -29,6 +29,7 @@ function parseArgList(args) {
     wav: '',
     outWav: '',
     holdS: 120,
+    joinGraceS: 8,
     device: undefined,
     invalid: false,
   };
@@ -36,7 +37,7 @@ function parseArgList(args) {
   const options = new Map([
     ['--device', 'device'], ['--role', 'role'], ['--sign-url', 'signUrl'],
     ['--bridge-url', 'bridgeUrl'], ['--wav', 'wav'], ['--out-wav', 'outWav'],
-    ['--hold', 'holdS'],
+    ['--hold', 'holdS'], ['--join-grace', 'joinGraceS'],
   ]);
   for (const arg of args) {
     const separator = arg.indexOf('=');
@@ -47,9 +48,11 @@ function parseArgList(args) {
     seen.add(flag);
     const value = arg.slice(separator + 1);
     if (!value) out.invalid = true;
-    out[field] = field === 'holdS' ? Number(value) : value;
+    out[field] = (field === 'holdS' || field === 'joinGraceS') ? Number(value) : value;
   }
   if (!Number.isFinite(out.holdS) || out.holdS <= 0) out.invalid = true;
+  // join-grace 与 hold 同属数值字段：必须为有限正数，否则整体判非法
+  if (!Number.isFinite(out.joinGraceS) || out.joinGraceS <= 0) out.invalid = true;
   return out;
 }
 
@@ -65,7 +68,10 @@ function validateStartup(args, runtimeEnv) {
     if (!runtimeEnv.VOICE_SIDECAR_CREDENTIAL) return 'SIDECAR_CREDENTIAL_MISSING';
     return null;
   }
-  return args.device ? null : 'PHONE_DEVICE_REQUIRED';
+  if (!args.device) return 'PHONE_DEVICE_REQUIRED';
+  // 设备凭证只从运行时环境读入，不新增 CLI 参数：避免凭证明文出现在 argv / ps 输出里
+  if (!(runtimeEnv.VOICE_SIM_DEVICE_CREDENTIAL || '')) return 'PHONE_DEVICE_CREDENTIAL_MISSING';
+  return null;
 }
 
 const env = loadEnv();

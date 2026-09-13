@@ -5,6 +5,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import time
 from typing import Any, Awaitable, Callable
 
@@ -23,22 +24,69 @@ QWEN_COORDINATION_TOOLS = [
 ]
 
 
+_PCM16K_TAPS = 31
+_pcm16k_history = np.zeros(0, dtype=np.float64)
+
+
+def _lowpass_taps(cutoff_hz: float, rate_hz: float, taps: int) -> np.ndarray:
+    n = np.arange(taps) - (taps - 1) / 2.0
+    wc = 2.0 * np.pi * cutoff_hz / rate_hz
+    with np.errstate(divide="ignore", invalid="ignore"):
+        h = np.where(n == 0, wc / np.pi, np.sin(wc * n) / (np.pi * n))
+    h *= 0.54 - 0.46 * np.cos(2.0 * np.pi * np.arange(taps) / (taps - 1))  # Hamming
+    return h / h.sum()                                                     # 直流增益=1
+
+
+# 24k→16k：截止取目标奈奎斯特的 0.9 倍（16k → 7.2kHz），留过渡带
+_PCM16K_TAPS_ARR = _lowpass_taps(0.45 * 16000, 24000, _PCM16K_TAPS)
+
+
 def pcm24k_to_pcm16k(data: bytes) -> bytes:
+    """24 kHz → 16 kHz，**带抗混叠低通**（2026-09-12 音质根因修复）。
+
+    原实现是朴素抽取，无低通：
+
+        idx = (np.arange(len(samples) * 2 // 3) * 1.5).astype(np.int64)
+
+    24k→16k 会把 8–12 kHz 折叠回 0–8 kHz 变成非谐波噪声。这条路径是**模型回复音频的
+    入口**（`event["delta"]`），所以听感上「问句干净、回复发毛」—— 问句由 edge-tts 直接
+    合成 16k，从不经过这里；回复必经此处。实测回复谱亮度比问句高 68%，音调却正常，
+    正是「高频噪声叠加在语音上」的指纹。
+
+    实现要点：**跨调用有状态**（保留 N−1 个历史样本）。无状态滤波会让每块首尾失真，
+    在流式增量（变长 delta）下形成新的周期性瑕疵 —— 等于用一个缺陷换另一个。
+    """
+    global _pcm16k_history
     samples = np.frombuffer(data, dtype=np.int16)
     if not len(samples):
         return b""
-    idx = (np.arange(len(samples) * 2 // 3) * 1.5).astype(np.int64)
-    return samples[idx[idx < len(samples)]].tobytes()
+    buf = np.concatenate([_pcm16k_history, samples.astype(np.float64)])
+    filt = np.convolve(buf, _PCM16K_TAPS_ARR, mode="valid")   # len == len(samples)
+    n_out = len(samples) * 2 // 3
+    if n_out <= 0:
+        _pcm16k_history = buf[-(_PCM16K_TAPS - 1):]
+        return b""
+    idx = np.arange(n_out) * 1.5
+    i0 = np.floor(idx).astype(np.int64)
+    i0 = np.clip(i0, 0, len(filt) - 1)
+    i1 = np.clip(i0 + 1, 0, len(filt) - 1)
+    frac = idx - np.floor(idx)
+    out = filt[i0] * (1.0 - frac) + filt[i1] * frac
+    _pcm16k_history = buf[-(_PCM16K_TAPS - 1):]
+    return np.clip(np.round(out), -32768, 32767).astype(np.int16).tobytes()
 
 
 QWEN_RECONNECT_MAX_ATTEMPTS = 5
 
 
 class QwenRealtimeBridge:
-    def __init__(self, on_audio_out: Callable[[bytes], Awaitable[None]], on_text: Callable[[str], Awaitable[None]] | None = None, on_tool_call: Callable[[str, dict, str], Awaitable[str]] | None = None, api_url: str = "", token: str = "", system_prompt: str = "", on_error: Callable[[str], Awaitable[None]] | None = None, send_queue_frames: int = 25) -> None:
+    def __init__(self, on_audio_out: Callable[[bytes], Awaitable[None]], on_text: Callable[[str], Awaitable[None]] | None = None, on_tool_call: Callable[[str, dict, str], Awaitable[str]] | None = None, api_url: str = "", token: str = "", system_prompt: str = "", on_error: Callable[[str], Awaitable[None]] | None = None, send_queue_frames: int = 25, on_user_speech: Callable[[], Awaitable[None]] | None = None) -> None:
         self._on_audio_out = on_audio_out
         self._on_text = on_text
         self._on_tool_call = on_tool_call
+        # 服务端 VAD 判定用户开口（speech_started 事件）→ 会话层执行打断冲刷
+        # （M2 决策归位：打断判定用云端声学+语义，不再依赖本地被回声污染的能量阈值）
+        self._on_user_speech = on_user_speech
         self._api_url = api_url
         self._token = token
         self._system_prompt = system_prompt
@@ -68,6 +116,9 @@ class QwenRealtimeBridge:
         # P0-5/F1：每个 reply 的 TTFB 观测锚点
         self._reply_t0 = 0.0
         self._first_audio_logged = False
+        # 本 reply 模型侧产出的音频总字节（24k mono s16）。手机侧只能统计"到达了多少帧"，
+        # 拿它与模型侧总量一比，才能把「模型本来就说得短」与「我们的管道丢了音频」分开。
+        self._reply_bytes = 0
         # 上行解耦（2026-09-07）：feed_pcm 不再逐帧 await 云端 send——慢网会把
         # 20ms 上行消费循环整体拖死 → 队列积压 → 超 1000ms 帧龄整批判过期 = 吞话。
         # 改为有界队列 + 独立 sender task：feed 入队即返回；满则丢旧保新；
@@ -112,6 +163,30 @@ class QwenRealtimeBridge:
             except asyncio.QueueEmpty:
                 pass
             self._send_q.put_nowait(pcm)
+
+    async def cancel_response(self) -> bool:
+        """主动取消正在进行的 response（**打断**用）。
+
+        为什么必须显式发：`session.py` 原有的注释假定「云端 smart_turn 会自己
+        response.cancel 并停发音频」，但实测**否掉了这个假设** —— 用户插话后旧 response
+        仍继续下发到自然结束（实测 +3.18s），而两条打断路径（本地能量 / 云端 VAD）
+        都只清我们这一侧、从未告诉模型停下。导致打断延迟恒在 1.5–1.8s。
+
+        协议：OpenAI Realtime 兼容事件 `response.cancel`（Qwen 同族）。
+
+        fail-soft：连接不在/已关闭时返回 False 并记日志，**不抛**——打断路径上抛异常
+        会污染音频回调。
+        """
+        payload = {"type": "response.cancel"}
+        ws = self._ws
+        if ws is None:
+            return False
+        try:
+            await ws.send(json.dumps(payload))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("response.cancel 发送失败: %s", type(exc).__name__)
+            return False
 
     async def _sender_loop(self) -> None:
         while not self._closed and not self._dead:
@@ -218,16 +293,31 @@ class QwenRealtimeBridge:
                     "input_audio_buffer.committed", "response.created", "response.done", "error"}:
             logger.info("[lat] qwen event: %s %s mono=%.3f",
                         kind, str(event.get("error", ""))[:200], time.monotonic())
+        if kind == "input_audio_buffer.speech_started" and self._on_user_speech:
+            # 服务端确认的用户开口（smart_turn 声学+语义判定）——非语义声音
+            # （回声瞬态/语气词）不会触发；这是可信赖的打断信号源。
+            await self._invoke(self._on_user_speech)
         if kind == "response.created":
             self._reply_t0 = time.monotonic()
             self._first_audio_logged = False
+            self._reply_bytes = 0
         if kind == "response.audio.delta" and event.get("delta") and not self._first_audio_logged:
             # P0-5/F1：首个 response.audio.delta——response.created 到首音频的云端 TTFB
             self._first_audio_logged = True
             ttfb_ms = int((time.monotonic() - self._reply_t0) * 1000) if self._reply_t0 else -1
             logger.info("[lat] first_audio_delta ttfb_ms=%d mono=%.3f", ttfb_ms, time.monotonic())
         if kind == "response.audio.delta" and event.get("delta"):
-            await self._invoke(self._on_audio_out, pcm24k_to_pcm16k(base64.b64decode(event["delta"])))
+            raw = base64.b64decode(event["delta"])
+            self._reply_bytes += len(raw)
+            await self._invoke(self._on_audio_out, pcm24k_to_pcm16k(raw))
+        if kind == "response.done":
+            # 模型侧音频总量真值。口径：24k mono s16 ⇒ 秒 = 字节 / (24000 × 2)。
+            # 判读：与手机侧「语音帧数 × 20ms」比 —— 两者接近 ⇒ 我们没丢；
+            #       模型侧明显更短 ⇒ 模型本来就说得快/说得短。
+            logger.info(
+                "[lat] model audio done total_bytes=%d seconds=%.3f mono=%.3f",
+                self._reply_bytes, self._reply_bytes / 48000.0, time.monotonic(),
+            )
         elif kind in {"response.audio_transcript.delta", "response.text.delta"} and event.get("delta") and self._on_text:
             await self._invoke(self._on_text, event["delta"])
         elif kind in {"response.function_call_arguments.done", "response.function_call.done"}:
@@ -300,9 +390,30 @@ class QwenRealtimeBridge:
 QWEN_CONFIG_CONFIRM_TIMEOUT_S = 10.0
 
 
+def default_turn_detection() -> dict:
+    """turn_detection 配置（env 可调，零重编译 A/B）：
+    - QWEN_TURN_DETECTION=smart_turn（默认）| server_vad
+      smart_turn：声学+语义双重轮次检测，非语义声音（嗯/啊/回声瞬态）不触发
+      打断——决策归位（M2）的判定引擎。server_vad：纯声学，参数可调。
+    - QWEN_SILENCE_DURATION_MS（仅 server_vad 生效，200-6000，默认 800）：
+      静音判定时长；run2 实测中文长句需 ≥1000 才不在自然停顿处断句。
+    """
+    kind = (os.environ.get("QWEN_TURN_DETECTION") or "smart_turn").strip().lower()
+    if kind not in {"smart_turn", "server_vad"}:
+        kind = "smart_turn"
+    detection: dict = {"type": kind}
+    if kind == "server_vad":
+        try:
+            silence = int(os.environ.get("QWEN_SILENCE_DURATION_MS", "800"))
+        except ValueError:
+            silence = 800
+        detection["silence_duration_ms"] = max(200, min(6000, silence))
+    return detection
+
+
 async def connect_qwen(api_url: str, token: str, system_prompt: str, tools: list[dict], config_confirm_timeout_s: float = QWEN_CONFIG_CONFIRM_TIMEOUT_S) -> tuple[Any, str]:
     ws = await connect_ws(api_url, token)
-    await ws.send(json.dumps({"type": "session.update", "session": {"modalities": ["audio", "text"], "instructions": system_prompt, "input_audio_format": "pcm", "output_audio_format": "pcm", "max_history_turns": 50, "tools": tools, "turn_detection": {"type": "smart_turn"}}}))
+    await ws.send(json.dumps({"type": "session.update", "session": {"modalities": ["audio", "text"], "instructions": system_prompt, "input_audio_format": "pcm", "output_audio_format": "pcm", "max_history_turns": 50, "tools": tools, "turn_detection": default_turn_detection()}}))
     deadline = time.monotonic() + config_confirm_timeout_s
     while True:
         remaining = deadline - time.monotonic()

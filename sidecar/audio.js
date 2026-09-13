@@ -14,6 +14,19 @@
 // 目标格式：16k 单声道 s16
 const TARGET_RATE = 16000;
 
+// 降采样必须抗混叠：TRTC 下行实测 48k，朴素抽取会把 8–24kHz 折叠回可听带
+// （听感「糊/吐字不清」）。同一输入率复用实例，以保留跨帧滤波状态。
+const { Downsampler } = require('./resample');
+const _downsamplers = new Map();
+function downsamplerFor(rate) {
+  let d = _downsamplers.get(rate);
+  if (!d) {
+    d = new Downsampler(rate, TARGET_RATE);
+    _downsamplers.set(rate, d);
+  }
+  return d;
+}
+
 /**
  * TRTC 远端音频帧 → 16k 单声道 s16 Buffer
  * SDK 回调可能 48k/多声道；s16 数据按声道交叉存储。
@@ -38,15 +51,14 @@ function frameToS16Mono16k(frame) {
     mono[i] = sum / channel;
   }
 
-  // 2) 采样率 → 16k（线性抽取；16000 原样直通零开销）
+  // 2) 采样率 → 16k：**必须抗混叠**（2026-09-12 音质根因修复）
+  //    原实现是 out[i] = mono[floor(i*step)] —— 每隔 step 个直接抽取，无低通。
+  //    48k→16k 时 8–24kHz 会折叠回 0–8kHz 变成非谐波噪声，且不改变时长/基频/帧数，
+  //    因此「数帧数、量 F0、量能量」永远查不出来。改走带状态 FIR 的 Downsampler。
   if (sampleRate === TARGET_RATE) {
     return Buffer.from(mono.buffer, mono.byteOffset, mono.byteLength);
   }
-  const step = sampleRate / TARGET_RATE;
-  const outLen = Math.floor(mono.length / step);
-  const out = new Int16Array(outLen);
-  for (let i = 0; i < outLen; i++) out[i] = mono[Math.floor(i * step)];
-  return Buffer.from(out.buffer, out.byteOffset, out.byteLength);
+  return downsamplerFor(sampleRate).process(mono);
 }
 
 /**

@@ -12,6 +12,7 @@
 // Tauri OS-bound credential 注入尚未完成，是商业发布 P0 阻断项。
 const config = require('./config');
 const makeLogger = require('./logger');
+const { DownlinkPacer } = require('./downlink_pacer');
 const { BridgeClient } = require('./bridge');
 const { controlPlaneHeaders } = require('./security');
 const { requestRendererExit } = require('./exit-protocol');
@@ -43,7 +44,11 @@ let exited = false;
 // 边界（务必保持）：L3 的 sendCustomAudioData 返回成功只证明本地 API 调用返回，
 // 不证明 TRTC 已出网、不证明手机已收到、不证明扬声器已响。
 const DNL_LOG_EVERY = 100; // 首帧必打，之后节流
-const downProbe = { replyId: null, frames: 0, localFrames: 0 };
+// DNL4 对账基准：pacer.stats.sent/.dropped/.underruns 是**进程级累计、从不复位**，
+// 而 arrived 在**每次 replyId 变化时归零**。不做「同 reply 基准快照」，balance 就只在
+// 进程内第一个 reply 成立（后续 reply 的 sent/dropped 带着历史累计，必然对不上账）。
+const downProbe = { replyId: null, frames: 0, localFrames: 0,
+                    sentBase: 0, droppedBase: 0, underrunBase: 0 };
 
 // 统一字段前缀。meta 缺失/畸形（旧版 rtc_bridge）时 reply=-、seq 用本地帧计数、其余 -。
 // q = 队列深度：sidecar 看不到 rtc_bridge 侧队列，恒为 -1（占位，避免误读为 0）。
@@ -74,6 +79,35 @@ function runSidecar() {
   try { cloud.stopLocalAudio(); } catch (e) { /* ignore */ }
   try { cloud.enableCustomAudioCapture(true); } catch (e) { log('ERR', `enableCustomAudioCapture 失败: ${e.message}`); }
 
+  // 下行注入节拍器（2026-09-12 卡顿根因修复）
+  // rtc_bridge 是**突发**下发的（实测一次 19 帧）；原实现收到即 sendCustomAudioData，
+  // 背靠背连发会被 SDK 静默吞掉 → 手机侧音频出现能量悬崖（听感「卡顿/像被截断」）。
+  // 改为入队 + 20ms 一次一帧注入；队列溢出丢最旧并计数，让丢帧可观测。
+  // PQ 日志用于「若有异常，定位到具体是哪一步」——上一版接线就因缺少这类锚点而无法归因。
+  log('PQ', `创建 pacer（send 类型=${typeof cloud.sendCustomAudioData}）`);
+  const pacer = new DownlinkPacer({
+    send: (buf) => {
+      const tSend = process.hrtime.bigint();
+      try {
+        cloud.sendCustomAudioData(makeAudioFrame16k(buf));
+        stats.downFrames += 1;
+        stats.downBytes += buf.length;
+        const n = pacer.stats.sent;
+        if (n === 1 || n % DNL_LOG_EVERY === 0) {
+          log('DNL3', `sent=${n} dt_sdk_ns=${process.hrtime.bigint() - tSend} `
+            + 'L3=本地API调用返回（不证明已出网/手机已播放）');
+        }
+      } catch (e) {
+        log('ERR', `sendCustomAudioData 失败: ${e.message}`);
+      }
+    },
+    onDrop: (info) => log('DNLQ', `pacer 丢最旧帧 dropped=${info.dropped} pending=${info.queued} `
+      + 'L=队列溢出（上游仍在突发下发，或注入慢于实时）'),
+  });
+  log('PQ', 'pacer 创建完成');
+  pacer.start();
+  log('PQ', 'pacer 已启动（frameMs=20）');
+
   bridge = new BridgeClient(
     ARGS.bridgeUrl,
     (buf, meta) => { // 下行：rtc_bridge 推来的 16k s16（完整 640B 帧）→ 直接注入（Task 9：实际 SDK 契约支持 16k）
@@ -81,35 +115,35 @@ function runSidecar() {
       const tL2 = process.hrtime.bigint();
       const replyId = meta && typeof meta.replyId === 'string' ? meta.replyId : null;
       const newReply = replyId !== null && replyId !== downProbe.replyId;
-      if (newReply) { downProbe.replyId = replyId; downProbe.frames = 0; }
+      if (newReply) {
+        downProbe.replyId = replyId;
+        downProbe.frames = 0;
+        // 同 reply 基准快照：让下面 DNL4 的 sent/dropped/underruns 都是**本 reply 增量**
+        downProbe.sentBase = pacer.stats.sent;
+        downProbe.droppedBase = pacer.stats.dropped;
+        downProbe.underrunBase = pacer.stats.underruns;
+      }
       downProbe.frames += 1;
       downProbe.localFrames += 1;
       // 每轮 reply 首帧必打（人工排查最先看的一行），其余按 DNL_LOG_EVERY 节流
       const sampled = downProbe.frames === 1 || downProbe.frames % DNL_LOG_EVERY === 0;
       const prefix = downPrefix(meta, downProbe.localFrames);
 
-      // L3 开始：先取调用开始时刻，避免把下面的日志写盘耗时算进 dt_ws_to_sdk_ns
-      const tL3 = process.hrtime.bigint();
-      if (sampled) {
-        log('DNL2', `${prefix} bytes=${buf.length} n=${downProbe.frames} dt_ws_to_sdk_ns=${tL3 - tL2} dt_sdk_ns=- L2=WS收帧`);
-      }
-      if (sampled) {
-        log('DNL3', `${prefix} dt_ws_to_sdk_ns=${tL3 - tL2} dt_sdk_ns=- state=start L3=调用开始`);
-      }
-      try {
-        cloud.sendCustomAudioData(makeAudioFrame16k(buf));
-        const tEnd = process.hrtime.bigint();
-        stats.downFrames += 1;
-        stats.downBytes += buf.length;
-        if (sampled) {
-          log('DNL3', `${prefix} dt_ws_to_sdk_ns=${tL3 - tL2} dt_sdk_ns=${tEnd - tL3} state=ok `
-            + 'L3=本地API调用返回（不证明已出网/手机已播放）');
-        }
-      } catch (e) {
-        const tEnd = process.hrtime.bigint();
-        log('DNL3', `${prefix} dt_ws_to_sdk_ns=${tL3 - tL2} dt_sdk_ns=${tEnd - tL3} state=exn `
-          + `L3=调用异常 err=${e.message}`);
-        log('ERR', `sendCustomAudioData 失败: ${e.message}`);
+      pacer.push(buf);
+      if (sampled || downProbe.frames % 50 === 0) {
+        // 账目必须自洽：arrived − sent_delta − pending − dropped_delta === 0。
+        // 上一版直接打进程级累计的 sent/dropped，而 arrived 每 reply 归零 ——
+        // balance 只在进程内第一个 reply 成立，之后必然对不上账，「到底有没有丢帧」
+        // 因此无法判断（测量工具不可信，结论就无从谈起）。现在按**同 reply 基准**
+        // 取增量，并顺带打印本 reply 的欠载 tick 数（underruns）。
+        const sentDelta = pacer.stats.sent - downProbe.sentBase;
+        const droppedDelta = pacer.stats.dropped - downProbe.droppedBase;
+        const underrunDelta = pacer.stats.underruns - downProbe.underrunBase;
+        const pending = pacer.pending;
+        log('DNL4', `${prefix} arrived=${downProbe.frames} sent=${sentDelta} `
+          + `dropped=${droppedDelta} pending=${pending} underruns=${underrunDelta} `
+          + `balance=${downProbe.frames - sentDelta - pending - droppedDelta} `
+          + 'L4=入队后账目（balance 必须为 0）');
       }
     },
     (action, reason) => { // 控制面
@@ -121,6 +155,12 @@ function runSidecar() {
           return;
         }
         exitSidecar(reason || 'ctrl_exit');
+      }
+      // 打断冲刷：rtc_bridge 判定用户插话后下发；必须**立即清空节拍器队列**，
+      // 否则被打断的旧回复会把这最多 1 秒的积压播完（实测打断延迟 1.75s 的主因）。
+      if (action === 'flush_downlink') {
+        const dropped = pacer.clear();
+        log('CTRL', `打断冲刷：丢弃 ${dropped} 帧待播（pacer 队列已清空）`);
       }
       // E2E 测试（v0.6.4）：注入 2s 440Hz 测试音频上行 → TRTC 分发给手机端，
       // 用于验证「AI 音频 → 手机端播放」链路（手机端 DiagLog 应出现 firstAudioFrame/voiceVolume）
@@ -371,6 +411,12 @@ async function main() {
     requestRendererExit('fatal');
     return;
   }
+  // 手机模拟器必须像真机一样持有设备凭证（只从环境变量读，不进 argv）
+  if (ARGS.role === 'phone' && !(process.env.VOICE_SIM_DEVICE_CREDENTIAL || '')) {
+    log('FATAL', 'PHONE_DEVICE_CREDENTIAL_MISSING');
+    requestRendererExit('fatal');
+    return;
+  }
   try {
     const ver = getSdkVersion();
     log('BOOT', `trtc-electron-sdk getSDKVersion() = ${ver}`);
@@ -393,7 +439,7 @@ async function main() {
     scheduleInterval: setInterval,
     scheduleTimeout: setTimeout,
     requestFatal: () => requestRendererExit('fatal'),
-    logFatal: () => log('FATAL', 'SIDECAR_INITIALIZATION_FAILED'),
+    logFatal: (detail) => log('FATAL', `SIDECAR_INITIALIZATION_FAILED ${detail || 'err=<none>'}`),
   });
   if (!started) return;
   log('SIG', '意图轮询已启动（每 2s），等待手机唤醒...');

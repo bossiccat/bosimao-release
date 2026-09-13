@@ -227,6 +227,10 @@ class BridgeServer:
                 ),
                 # F6/F7：hello 的 session_id 下沉到会话，用于铸造跨进程 reply_id
                 session_id=session_id,
+                # 决策归位 M2 kill-switch（RTC_BRIDGE_LOCAL_BARGE_IN=false 切换）：
+                # false = 退役本地能量 barge-in + 播放期上行门控，打断判定交给
+                # 云端 smart_turn（声学+语义），speech_started 事件驱动下行冲刷。
+                local_barge_in=self.cfg.local_barge_in,
             )
             try:
                 await candidate.start()

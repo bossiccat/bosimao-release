@@ -39,6 +39,9 @@ def create_secured_voice_router(
             validator=validator,
             service=hello_service,
             expected_certificate_binding=hello_certificate_binding,
+            # 调用方（PC 入口 / cloudapi）传入的 gateway assertion hash 必须继续下传，
+            # 否则 trusted-gateway 校验参数在装配层被吞掉。
+            gateway_assertion_hash=hello_gateway_assertion_hash,
         ))
     if devices is not None:
         from .routes_voice_devices import build_device_router

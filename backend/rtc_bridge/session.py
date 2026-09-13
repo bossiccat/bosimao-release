@@ -41,6 +41,13 @@ DEFAULT_UP_MAX_FRAMES = 100
 DEFAULT_UP_MAX_BYTES = 100 * 640
 DEFAULT_UP_MAX_FRAME_AGE_MS = 1000
 
+# 默认下行预算：必须按「能装下一整段回复」配置（模型突发式下发 + 实时 50 帧/s 出队，
+# 早到的帧是待播内容而非陈旧数据）。1500 帧 × 20ms = 30s。
+# ⚠️ 必须与 config.py 的 down_* 默认值保持一致（契约测试守护，防两处再次漂移）。
+DEFAULT_DOWN_MAX_FRAMES = 1500
+DEFAULT_DOWN_MAX_BYTES = 1500 * 640
+DEFAULT_DOWN_MAX_FRAME_AGE_MS = 30000
+
 # P0-2（internal-latency-budget §1.1 U6）：说完判定补静音 pad 按引擎区分——
 # qwen smart_turn 自带说完判定，2s pad 冗余且让 pad 后开口的用户先被云端
 # 消化 2s 静音（speech_started 推迟最多 ~2s）→ 缩到 400ms；apm 无云端
@@ -75,21 +82,27 @@ class PeerVoiceSession:
         up_max_frames: int = DEFAULT_UP_MAX_FRAMES,
         up_max_bytes: int = DEFAULT_UP_MAX_BYTES,
         up_max_frame_age_ms: int = DEFAULT_UP_MAX_FRAME_AGE_MS,
-        down_max_frames: int = 200,
-        down_max_bytes: int = 200 * 640,
-        down_max_frame_age_ms: int = 1000,
+        down_max_frames: int = DEFAULT_DOWN_MAX_FRAMES,
+        down_max_bytes: int = DEFAULT_DOWN_MAX_BYTES,
+        down_max_frame_age_ms: int = DEFAULT_DOWN_MAX_FRAME_AGE_MS,
         on_voice_intent: Callable[[str], Awaitable[None]] | None = None,
         on_apm_cancelled: Callable[[bool], Awaitable[None]] | None = None,
         session_id: str = "",
         new_reply_gap_s: float = DEFAULT_NEW_REPLY_GAP_S,
         barge_grace_s: float = 0.5,
         barge_sustain_frames: int = 3,
+        local_barge_in: bool = True,
     ) -> None:
         self.device_id = device_id
         self.room_id = room_id
         # F6/F7：hello 里的 session_id 注入后用于铸造跨进程 reply_id
         self._session_id = session_id
         self._new_reply_gap_s = new_reply_gap_s
+        # 决策归位（docs/plans/2026-09-07 M2）：local_barge_in=False 时退役本地
+        # 能量 barge-in 与播放期上行门控——打断判定交给云端 smart_turn（声学+语义
+        # 双重检测，非语义声音不触发），服务端 speech_started 事件驱使下行冲刷。
+        # kill-switch：RTC_BRIDGE_LOCAL_BARGE_IN=false 切换，默认 true 保持现状。
+        self._local_barge_in = local_barge_in
         self._send_msg = send_msg
         # APM 会话被取消关闭后的回调（apm_cancelled_closed 上报钩子；可空）
         self._on_apm_cancelled = on_apm_cancelled
@@ -199,6 +212,7 @@ class PeerVoiceSession:
                 token=self._qwen_token,
                 system_prompt=self._qwen_system_prompt,
                 on_error=self._on_qwen_error,
+                on_user_speech=self._on_server_user_speech,
             )
         else:
             self.apm = ApmBridge(
@@ -236,24 +250,35 @@ class PeerVoiceSession:
         #    噪声）不触发；安静帧打断序列即归零。
         # 真实打断代价：反应延迟增加 (sustain-1)×20ms ≈ 40ms，远小于行业 300ms 标准。
         now = time.time()
-        if (self._down_speaking and not self._barge_in
-                and pcm_rms(pcm) > 800.0):
-            if now - self._down_speaking_since >= self._barge_grace_s:
-                self._barge_run += 1
-                if self._barge_run >= self._barge_sustain_frames:
-                    self._barge_in = True
-                    self._barge_run = 0
-                    self._apm_barge_drops_reset()
-                    self.shaper.reset()   # 清空未推送的下行帧（正在播的 20ms 帧自然播完）
-                    if self._router is not None:
-                        self._router.clear()   # 丢弃被中断的 AI 文本（不路由到 Brain）
-                    # P0-5/F4：丢弃窗口开窗打点（判定"下行丢弃窗口误开"假设 C）
-                    logger.info("[lat] barge_in open mono=%.3f", now)
-                    logger.info("barge-in: user speech during AI playback, downlink flushed")
+        # 本地能量 barge-in（默认路径）。M2 kill-switch（RTC_BRIDGE_LOCAL_BARGE_IN=false）
+        # 关闭后整块退役：打断判定归位云端 smart_turn（声学+语义），本地不再用被
+        # 扬声器回声污染的信号做决策——这是 run1 实锤「回复 0.5-1.5s 被误杀」的根治。
+        if self._local_barge_in:
+            if (self._down_speaking and not self._barge_in
+                    and pcm_rms(pcm) > 800.0):
+                if now - self._down_speaking_since >= self._barge_grace_s:
+                    self._barge_run += 1
+                    if self._barge_run >= self._barge_sustain_frames:
+                        self._barge_in = True
+                        self._barge_run = 0
+                        self._apm_barge_drops_reset()
+                        self.shaper.reset()   # 清空未推送的下行帧（正在播的 20ms 帧自然播完）
+                        # 打断冲刷必须**下沉到 sidecar**：清 rtc_bridge 队列还不够 ——
+                        # sidecar 的 DownlinkPacer 还会积压最多 50 帧(1s) 待播音频。
+                        # 不下发这条指令，用户插话后旧回复会继续播完那 1 秒
+                        # （实测打断延迟 1.75s 的主因，其中约 1s 由此而来）。
+                        await self._send_msg({"type": MSG_CTRL, "action": "flush_downlink"})
+                        # 同样要让**模型**停：实测云端不会自己取消（旧 response 继续下发 +3.18s）。
+                        await self._cancel_model_response()
+                        if self._router is not None:
+                            self._router.clear()   # 丢弃被中断的 AI 文本（不路由到 Brain）
+                        # P0-5/F4：丢弃窗口开窗打点（判定"下行丢弃窗口误开"假设 C）
+                        logger.info("[lat] barge_in open mono=%.3f", now)
+                        logger.info("barge-in: user speech during AI playback, downlink flushed")
+                else:
+                    self._barge_run = 0   # 宽限期内高能量=回声瞬态，不计入持续序列
             else:
-                self._barge_run = 0   # 宽限期内高能量=回声瞬态，不计入持续序列
-        else:
-            self._barge_run = 0
+                self._barge_run = 0
         if self._barge_in:
             self._last_down_check = now
         if now - self._last_up_rms_log >= 2.0:
@@ -269,6 +294,58 @@ class PeerVoiceSession:
 
     def _apm_barge_drops_reset(self) -> None:
         self._barge_drops = 0
+
+    async def _cancel_model_response(self) -> None:
+        """打断时**主动请求模型取消正在进行的 response**（fail-soft）。
+
+        为什么必须显式做：本文件此前的注释假定「云端 smart_turn 会自己 response.cancel
+        并停发音频」，但实测**否掉了该假设** —— 插话后旧 response 仍下发到自然结束
+        （+3.18s），而两条打断路径都只清我们这一侧、从未告诉模型停下，导致打断延迟
+        恒在 1.5–1.8s（与用本地能量还是云端 VAD 判定几乎无关）。
+
+        引擎不支持该方法时静默跳过（例如 ApmBridge），不阻断打断路径。
+        """
+        cancel = getattr(self.apm, "cancel_response", None)
+        if cancel is None:
+            return
+        try:
+            ok = await cancel()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cancel_model_response failed: %s", type(exc).__name__)
+            return
+        logger.info("[lat] response.cancel sent=%s（打断时主动停发）", ok)
+
+    async def _on_server_user_speech(self) -> None:
+        """云端 speech_started 事件（服务端 VAD 判定用户开口）。
+
+        M2 决策归位路径：打断由云端 smart_turn 判定（声学+语义，非语义声音如
+        回声瞬态/「嗯」「啊」不会触发），此处只负责执行——AI 播报中收到该事件
+        即冲刷下行（被打断的回复不再继续推送）+ 清理路由器（被中断文本不进
+        Brain）。这是可信赖的打断源：判定用的信号从未经过本地扬声器回声路径。
+        """
+        if self._down_speaking:
+            self.stats["server_barge_in"] = self.stats.get("server_barge_in", 0) + 1
+            self._apm_barge_drops_reset()
+            self.shaper.reset()
+            # 打断冲刷必须**下沉到 sidecar**，与本地能量路径（on_up_audio 的 barge-in
+            # 分支）保持对称：清 rtc_bridge 队列还不够 —— sidecar 的 DownlinkPacer
+            # 还会积压最多 50 帧(1s) 待播音频。此前云端 VAD 路径只做 shaper.reset()，
+            # 于是云端判定打断时旧音频仍把这 1 秒播完（与实测打断延迟 ~1.15s 量级吻合）。
+            await self._send_msg({"type": MSG_CTRL, "action": "flush_downlink"})
+            # 清我们这侧还不够 —— 必须让模型也停（实测云端不会自己取消）。
+            await self._cancel_model_response()
+            # 复用本地窗口机制：打断后到播放实际停止之间的残留 delta/文本
+            # 走既有丢弃路径（_on_audio_out / _on_text 的 _barge_in 检查），
+            # _check_down_speaking_over 会在下行静默后自动关窗。
+            self._barge_in = True
+            self._barge_run = 0
+            if self._router is not None:
+                self._router.clear()
+            logger.info(
+                "[lat] server_barge_in mono=%.3f (cloud smart_turn detected user speech)",
+                time.monotonic(),
+            )
+            logger.info("server barge-in: cloud smart_turn detected user speech, downlink flushed")
 
     async def _consume_up(self) -> None:
         while not self._closed:
@@ -286,7 +363,10 @@ class PeerVoiceSession:
             # 被 smart_turn commit 成用户输入，产生 ttfb=0-16ms 垃圾 response。
             # 真实打断由本地能量 barge-in 检测（宽限期+持续确认），开窗后本门
             # 立即放开，用户语音即刻可达云端。
-            if self._down_speaking and not self._barge_in:
+            # M2 kill-switch：local_barge_in=False 时本门退役——上行恒流喂云端，
+            # 打断由云端 smart_turn 语义判定（它自己会 response.cancel 并停发音频）。
+            if (self._local_barge_in and self._down_speaking
+                    and not self._barge_in):
                 self.stats["up_gated_playback"] = self.stats.get("up_gated_playback", 0) + 1
                 continue
             if self._pcm_dump is not None:
