@@ -52,21 +52,44 @@ def _classify(path: str) -> str:
     return "ASK"
 
 
-def _size(path: str) -> int:
+def _size(path: str) -> tuple[int, int, int]:
+    """返回 (表观大小, 独占大小, 硬链接文件数/字节)。
+
+    ⚠️ 为什么必须过滤 `st_nlink > 1`（2026-09-14 血的教训）：
+    表观大小用 `getsize` 累加会**重复计数被硬链接共享的数据块**，cargo target 尤其严重
+    （实测活跃 `pet-ui/src-tauri/target` 里 1220 个文件 / 2181 MB 是 nlink>1）。
+    据此估"可回收"会**大幅虚高** —— 实测删掉 6 个目录（表观 4.6 GB）后，
+    C 盘可用空间**不升反降 1.34 GB**，因为那些块仍被活跃 target 持有。
+    ⇒ 只有"独占大小"才是真正能释放的量。
+    """
     p = ROOT / path
+    if not p.exists():
+        return 0, 0, 0
+    apparent = exclusive = 0
+    shared_n = shared_b = 0
     if p.is_dir():
-        total = 0
         for root, _d, files in os.walk(p):
             for f in files:
+                fp = os.path.join(root, f)
                 try:
-                    total += os.path.getsize(os.path.join(root, f))
+                    st = os.stat(fp)
                 except OSError:
-                    pass
-        return total
-    try:
-        return p.stat().st_size
-    except OSError:
-        return 0
+                    continue
+                apparent += st.st_size
+                if st.st_nlink > 1:
+                    shared_n += 1
+                    shared_b += st.st_size
+                else:
+                    exclusive += st.st_size
+    else:
+        try:
+            st = p.stat()
+        except OSError:
+            return 0, 0, 0
+        apparent = exclusive = st.st_size
+        if st.st_nlink > 1:
+            shared_n, shared_b = 1, st.st_size
+    return apparent, exclusive, (shared_n, shared_b)  # type: ignore[return-value]
 
 
 def main() -> int:
@@ -74,19 +97,33 @@ def main() -> int:
                          capture_output=True, text=True, encoding="utf-8",
                          errors="replace").stdout
     untracked = [l[3:].rstrip() for l in raw.splitlines() if l.startswith("??")]
-    rows = sorted(((_size(p), p, _classify(p)) for p in untracked), reverse=True)
+    raw_rows = []
+    for path in untracked:
+        apparent, exclusive, shared = _size(path)
+        raw_rows.append((apparent, exclusive, shared[0], shared[1], path, _classify(path)))
+    rows = sorted(raw_rows, reverse=True)
 
-    groups: dict[str, list[tuple[int, str]]] = {"KEEP": [], "CLEAN": [], "ASK": []}
-    for size, path, tag in rows:
-        groups[tag].append((size, path))
+    groups: dict[str, list[tuple[int, int, int, int, str]]] = {"KEEP": [], "CLEAN": [], "ASK": []}
+    for apparent, exclusive, shn, shb, path, tag in rows:
+        groups[tag].append((apparent, exclusive, shn, shb, path))
 
     def mb(n: int) -> str:
         return f"{n / 1024 / 1024:.1f} MB"
 
+    tot_apparent = sum(r[0] for r in rows)
+    tot_exclusive = sum(r[1] for r in rows)
+    tot_shared_b = sum(r[3] for r in rows)
+
     lines = [
         "# 未跟踪条目盘点（发布拦路项 · 只读清单）",
         "",
-        f"共 **{len(rows)}** 条，合计 **{mb(sum(s for s, _, _ in rows))}**。",
+        f"共 **{len(rows)}** 条：表观 **{mb(tot_apparent)}**，"
+        f"其中**独占 {mb(tot_exclusive)}**、硬链接共享 **{mb(tot_shared_b)}**。",
+        "",
+        "> ⚠️ **估算可回收量只看「独占」列。** 表观大小会把被硬链接共享的数据块重复计数"
+        "（cargo target 尤其严重）。2026-09-14 实测：删掉表观 4.6 GB 的 6 个目录后，"
+        "C 盘可用空间**不升反降 1.34 GB** —— 那些块仍被活跃 target 持有。",
+        "",
         "**本清单只做分类，没有删除任何文件。**",
         "",
         "> 背景：`verify_claims` 要求 `git status --porcelain` 输出为空，",
@@ -102,9 +139,11 @@ def main() -> int:
     ):
         items = groups[tag]
         lines += [f"## {title}", "", note, "",
-                  f"共 {len(items)} 条，合计 {mb(sum(s for s, _ in items))}", "",
-                  "| 体积 | 路径 |", "|---|---|"]
-        lines += [f"| {mb(s)} | `{p}` |" for s, p in items]
+                  f"共 {len(items)} 条：表观 {mb(sum(i[0] for i in items))}，"
+                  f"独占 {mb(sum(i[1] for i in items))}", "",
+                  "| 表观 | 独占 | 硬链接 | 路径 |", "|---|---|---|---|"]
+        lines += [f"| {mb(a)} | {mb(e)} | {n} 个/{mb(b)} | `{p}` |"
+                  for a, e, n, b, p in items]
         lines.append("")
 
     lines += [
@@ -127,10 +166,10 @@ def main() -> int:
     out.write_text("\n".join(lines), encoding="utf-8")
 
     for tag in ("KEEP", "CLEAN", "ASK"):
-        n = len(groups[tag])
-        s = sum(x for x, _ in groups[tag])
-        print(f"  {tag:6} {n:3} 条  {mb(s)}")
-    print(f"\n总占用 {mb(sum(s for s, _, _ in rows))} / {len(rows)} 条")
+        items = groups[tag]
+        print(f"  {tag:6} {len(items):3} 条  表观 {mb(sum(i[0] for i in items))}"
+              f"  独占 {mb(sum(i[1] for i in items))}")
+    print(f"\n表观合计 {mb(tot_apparent)} / 独占合计 {mb(tot_exclusive)} / {len(rows)} 条")
     print(f"清单已写入: {out.relative_to(ROOT)}")
     return 0
 
