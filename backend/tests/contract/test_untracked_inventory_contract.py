@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -40,3 +41,19 @@ def test_inventory_keeps_a_protected_class() -> None:
     for protected in ("pet-ui/src-tauri/binaries/", "jax-backend.exe.bak-pre-swap-",
                       ".git.backup-", "certs/client.crt"):
         assert protected in src, f"必须保留清单里缺少 {protected}"
+
+def test_inventory_actually_runs_and_reports_hard_links() -> None:
+    """**必须真正执行脚本** —— 只静态扫源码会漏掉运行期缺陷。
+
+    2026-09-14 实测教训：本文件原有的三条断言只检查源码文本与 git 跟踪状态，
+    于是脚本里 `_size()` 返回口径不一致（有时 3 元组、有时含嵌套）导致
+    `TypeError: 'int' object is not subscriptable` —— **测试全绿，工具跑不起来**。
+    这正是本仓反复出现的"测试有形状没牙齿"。
+    """
+    proc = subprocess.run([sys.executable, str(SCRIPT)], cwd=str(ROOT),
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=600)
+    assert proc.returncode == 0, f"盘点脚本必须能跑通：{proc.stderr[-400:]}"
+    assert "表观" in proc.stdout and "独占" in proc.stdout, (
+        "输出必须同时给出「表观」与「独占」两列 —— 只有独占才估算得出真正能释放的量"
+    )

@@ -52,7 +52,7 @@ def _classify(path: str) -> str:
     return "ASK"
 
 
-def _size(path: str) -> tuple[int, int, int]:
+def _size(path: str) -> tuple[int, int, int, int]:
     """返回 (表观大小, 独占大小, 硬链接文件数/字节)。
 
     ⚠️ 为什么必须过滤 `st_nlink > 1`（2026-09-14 血的教训）：
@@ -64,7 +64,7 @@ def _size(path: str) -> tuple[int, int, int]:
     """
     p = ROOT / path
     if not p.exists():
-        return 0, 0, 0
+        return 0, 0, 0, 0
     apparent = exclusive = 0
     shared_n = shared_b = 0
     if p.is_dir():
@@ -85,11 +85,11 @@ def _size(path: str) -> tuple[int, int, int]:
         try:
             st = p.stat()
         except OSError:
-            return 0, 0, 0
+            return 0, 0, 0, 0
         apparent = exclusive = st.st_size
         if st.st_nlink > 1:
             shared_n, shared_b = 1, st.st_size
-    return apparent, exclusive, (shared_n, shared_b)  # type: ignore[return-value]
+    return apparent, exclusive, shared_n, shared_b
 
 
 def main() -> int:
@@ -99,8 +99,8 @@ def main() -> int:
     untracked = [l[3:].rstrip() for l in raw.splitlines() if l.startswith("??")]
     raw_rows = []
     for path in untracked:
-        apparent, exclusive, shared = _size(path)
-        raw_rows.append((apparent, exclusive, shared[0], shared[1], path, _classify(path)))
+        apparent, exclusive, shn, shb = _size(path)
+        raw_rows.append((apparent, exclusive, shn, shb, path, _classify(path)))
     rows = sorted(raw_rows, reverse=True)
 
     groups: dict[str, list[tuple[int, int, int, int, str]]] = {"KEEP": [], "CLEAN": [], "ASK": []}
