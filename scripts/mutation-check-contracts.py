@@ -93,6 +93,11 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
      'code = str((response.json() or {}).get("code", "n/a"))',
      'code = "n/a"  # MUTATED',
      "commercial or redemption or redeem or error"),
+    ("发布拦路项检查器硬编码放行（不再委托 verify_claims）",
+     "scripts/check-release-blockers.py",
+     "    result = verify_claims(\n        policy=policy,",
+     '    result = {"verdict": "pass", "errors": []}  # MUTATED: 硬编码放行\n    _ignored = verify_claims(\n        policy=policy,',
+     "release_blockers"),
 ]
 
 
