@@ -64,3 +64,50 @@ Windows 桌面"贾克斯"：**屏幕级监控 + 混合大脑 + 多 harness 管�
 5. 用户提供企微 webhook URL
 6. 用户确认 O-012 注入方式
 7. 用户安装 rust（解锁 tauri build）
+
+
+---
+
+## 8. 【2026-09-15 追加】产品已转向「波斯猫」商业双工语音 —— 上文 1–7 节**已过期**
+
+> ⚠️ **第 1–7 节冻结在 2026-08-03**，描述的是旧的「贾克斯模式」（截屏监控 + 混合大脑 + 指令注入
+> Codex/Trae）。**该形态已被取代**，保留仅为历史。**以本节为准。**
+
+### 8.1 现在是什么
+
+**波斯猫（Bosimao）**：商业化移动端**实时双工语音 agent** —— Android/模拟器 + MiniCPM-o 端到端语音前台，
+后端用 **Hermes 引擎做 ACP 委派**（不 fork、不自造引擎）。
+**控制面在云端**（CloudRun `jax-voice-api`），**媒体面在用户机器**（`rtc_bridge` + Electron sidecar + TRTC）。
+
+### 8.2 当前状态（实测）
+
+| 项 | 状态 |
+|---|---|
+| 语音三项指标（完整度/流畅度/打断） | ✅ 同文本语速比 0.91–1.04；下行零丢帧；打断 ~171–310ms |
+| 控制面兑付 | ✅ `hello-redeem` ok=true redeemed=true |
+| 工作区 | ✅ `git status --porcelain` 输出为空 |
+| 本地运行态脚本 | ✅ 已退役（守卫测试 3 passed） |
+| bridge 进 CI | ✅ 双服务矩阵 + 部署前测试门禁 |
+| 契约测试 | ✅ **313 passed, 1 skipped** |
+| 契约有牙齿 | ✅ 13/13 变异被捕获 |
+| **商业发布** | ❌ **NO-GO —— 剩 2 项阻塞**：两个 P0 声明 `EvidencePending`（`windows-popup-free` / `android-duplex-audio`，后者**必须真机**） |
+
+### 8.3 唯一的 GO 路径（三条命令 + 前置）
+
+前置：**真机到位** + 已产出候选产物。
+
+```bash
+cd C:/Users/Administrator/WorkBuddy/监视app
+./.venv/Scripts/python.exe scripts/record-release-evidence.py \
+    --claim-id android-duplex-audio --kind android-field \
+    --evidence <真机取证文件> --artifact <候选产物> --owner <实现方> --reviewer <独立复核人>
+./.venv/Scripts/python.exe scripts/check-release-blockers.py
+./.venv/Scripts/python.exe scripts/release-preflight.py verify
+```
+
+### 8.4 接手请读
+
+**`docs/release/2026-09-15-commercial-release-handover.md`** —— 含：验证过的状态与判据、
+GO 路径、**已知但未处理项**（桌面端 pinned CA 指向本机开发 CA、bridge EnvParam 已用 93%、
+流水线无回滚、581.5 MB 待清磁盘、GitHub 侧 46 项配置）、工具清单、**11 条铁律**、
+以及「如何自己验证（不要相信文档）」。
