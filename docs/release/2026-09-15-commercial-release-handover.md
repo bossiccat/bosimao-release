@@ -41,7 +41,7 @@
 | 项 | 状态 | 判据 |
 |---|---|---|
 | 工作区干净 | ✅ `git status --porcelain` **输出为空** | 未跟踪 130 → 0（`.gitignore` + 移出恢复材料，**非删除**） |
-| 本地运行态脚本退役 | ✅ | 守卫测试 3 passed；9 个脚本 + watchdog wrapper 均不在 |
+| 本地运行态脚本退役 | ✅ | 守卫测试 3 passed；12 个脚本 + watchdog wrapper 均不在 |
 | bridge 纳入 CI | ✅ | 矩阵双服务 `jax-voice-api`(9000) / `jax-voice-bridge`(9200)，含部署前测试门禁 |
 | 契约测试 | ✅ **313 passed, 1 skipped** | `pytest backend/tests/contract -q` |
 | 契约有牙齿 | ✅ **13/13** 行为回退被捕获 | `scripts/mutation-check-contracts.py` |
@@ -72,8 +72,14 @@ cd C:/Users/Administrator/WorkBuddy/监视app
 # 2) 看阻断清单
 ./.venv/Scripts/python.exe scripts/check-release-blockers.py     # 退出码 0=就绪 1=阻塞 2=输入不可用
 
-# 3) 权威判定
-./.venv/Scripts/python.exe scripts/release-preflight.py verify
+# 3) 权威判定（verify 需要 6 个必填参数；完整写法见 docs/governance/release-harness.md §运行命令）
+./.venv/Scripts/python.exe scripts/release-preflight.py verify \
+  --policy governance/release-policy.json \
+  --claims governance/claims \
+  --command-lock governance/command-lock.json \
+  --repo-root . \
+  --artifact-path <候选产物> \
+  --evidence-root artifacts/release-evidence
 ```
 
 ⚠️ 证据约束：`expires_at ≤ now+72h`、绑定**当前 commit + 产物 sha256**、`reviewer ≠ owner`、证据文件哈希要对得上。

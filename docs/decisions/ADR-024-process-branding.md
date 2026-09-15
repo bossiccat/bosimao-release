@@ -24,6 +24,8 @@ python.exe、杀毒零误报。当前 Windows 本机进程链（`scripts/jax-ser
 
 ### D1. backend → jax-backend.exe（已落地）
 
+（⚠️ 2026-09-15 注：`scripts/start-all.ps1` / `scripts/jax-services.ps1` / `scripts/start-model.ps1` 等 **12 个本地运行态脚本已于 2026-09-11 退役**，见 `docs/retirements/local-runtime-scripts-2026-09-11.md`；以下为**历史记录**，照它改脚本会找不到文件。）
+
 PyInstaller onefile 打包 FastAPI，`scripts/jax-services.ps1` `Start-BackendService` 与
 `scripts/start-all.ps1` 第 2 步改调 `jax-backend.exe --host 127.0.0.1 --port 8000`。
 spec/入口见 `backend/packaging/`（jax-backend.spec + jax_backend_entry.py），冻结态路径

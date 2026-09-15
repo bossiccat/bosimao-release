@@ -1,4 +1,12 @@
 # OPS-001: 模型服务宕机恢复记录（llama-server :19080）
+>
+> ⚠️ **本文档描述的是已退役的链路（2026-08-03/04 形态），不要照它操作。**
+> 它记录的「手机 App → 公网中继(jax-relay) → PC relay_client → 本地 voice 网关(127.0.0.1:8000)」
+> 及本地服务管理/watchdog/计划任务那一整套，已于 **2026-09-11 随本地运行态脚本一并退役**
+> （见 `docs/retirements/local-runtime-scripts-2026-09-11.md`：产品必须**完全走云端**）。
+> 现行架构与状态请读 `docs/STATUS.md` 第 8 节与
+> `docs/release/2026-09-15-commercial-release-handover.md`。**保留本节仅为历史。**
+
 
 > 状态：**已恢复（2026-08-03 卜宕机实测）** | 触发：后端联调连接拒绝
 

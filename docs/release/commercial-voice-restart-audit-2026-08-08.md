@@ -1,5 +1,8 @@
 # Commercial Voice Restart Audit - 2026-08-08
 
+> ⚠️ **这是 2026-08-08 的历史判定，不是当前结论。** 当前状态与 GO/NO-GO 判定请看
+> `docs/release/2026-09-15-commercial-release-handover.md`（2026-09-15）。
+
 ## Verdict
 
 `FAIL` for commercial release. The restart cleared the prior Gradle native lock failure and allowed Android compilation, unit tests, and APK assembly. This does not close the release gate: required UI P0 gate artifacts are missing, Token-external hardcoded colors remain, Android lint is blocked by an absent offline artifact, and no real-device three-entry/two-round/nonzero-speaker/P95 barge-in evidence exists.

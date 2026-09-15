@@ -24,7 +24,9 @@
 
 ### D1. 威胁模型校准（先定安全等级，再定存储）
 
-后端 uvicorn 以 `--host 127.0.0.1 --port 8000` 启动（`scripts/start-all.ps1:48`、`scripts/jax-services.ps1:169`），**只绑定本机回环**。Android 采集端不直连后端，而是经 `PublicRelay(wss) → relay_client → ws://127.0.0.1:8000/ws/voice` 中转（`start-all.ps1:5,66-67`）。故 owner credential 的防御面是**同机同一 Windows 用户会话下的其它本地进程**，不是远程/LAN 攻击者。
+（⚠️ 2026-09-15 注：`scripts/start-all.ps1` / `scripts/jax-services.ps1` / `scripts/start-model.ps1` 等 **12 个本地运行态脚本已于 2026-09-11 退役**，见 `docs/retirements/local-runtime-scripts-2026-09-11.md`；以下为**历史记录**，照它改脚本会找不到文件。）
+
+后端 uvicorn 曾以 `--host 127.0.0.1 --port 8000` 启动（`scripts/start-all.ps1:48`、`scripts/jax-services.ps1:169`），**只绑定本机回环**。Android 采集端不直连后端，而是经 `PublicRelay(wss) → relay_client → ws://127.0.0.1:8000/ws/voice` 中转（`start-all.ps1:5,66-67`）。故 owner credential 的防御面是**同机同一 Windows 用户会话下的其它本地进程**，不是远程/LAN 攻击者。
 
 这与 sidecar credential（ADR-019 明言「不声称抵御已完全控制该用户会话的攻击者」）同级。因此 owner credential 的安全等级定为「同用户本地进程隔离」，**不是**网络保密级秘密。
 

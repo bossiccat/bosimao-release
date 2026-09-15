@@ -191,7 +191,10 @@ def main() -> int:
             else:
                 print(f"  {n+1}. 处理 {code}：{e.get('message') if isinstance(e, dict) else ''}")
                 n += 1
-        print("  最后：跑 scripts/release-preflight.py verify 确认判定为 pass。")
+        print("  最后：跑 scripts/release-preflight.py verify 确认判定为 pass —— ")
+        print("        注意 verify 需要 6 个必填参数（--policy/--claims/--command-lock/")
+        print("        --repo-root/--artifact-path/--evidence-root），完整写法见")
+        print("        docs/governance/release-harness.md 的「运行命令」节。")
     return EXIT_READY if verdict == "pass" else EXIT_BLOCKED
 
 

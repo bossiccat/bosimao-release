@@ -1,4 +1,12 @@
 # OPS-004: 桌面端加固四件套（服务管理 / watchdog 自愈 / 计划任务 / 中继假死感知）
+>
+> ⚠️ **本文档描述的是已退役的链路（2026-08-03/04 形态），不要照它操作。**
+> 它记录的「手机 App → 公网中继(jax-relay) → PC relay_client → 本地 voice 网关(127.0.0.1:8000)」
+> 及本地服务管理/watchdog/计划任务那一整套，已于 **2026-09-11 随本地运行态脚本一并退役**
+> （见 `docs/retirements/local-runtime-scripts-2026-09-11.md`：产品必须**完全走云端**）。
+> 现行架构与状态请读 `docs/STATUS.md` 第 8 节与
+> `docs/release/2026-09-15-commercial-release-handover.md`。**保留本节仅为历史。**
+
 
 > 状态：**已落地（2026-08-05 卜宕机实测）** | 目标：解决桌面端"经常出问题"三大机制
 > 1. 云端中继实例假死（health 200 但 WS 业务卡死）→ 本地 watchdog 检测 + relay_client 假死感知退避

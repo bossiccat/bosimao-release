@@ -102,7 +102,13 @@ cd C:/Users/Administrator/WorkBuddy/监视app
     --claim-id android-duplex-audio --kind android-field \
     --evidence <真机取证文件> --artifact <候选产物> --owner <实现方> --reviewer <独立复核人>
 ./.venv/Scripts/python.exe scripts/check-release-blockers.py
-./.venv/Scripts/python.exe scripts/release-preflight.py verify
+./.venv/Scripts/python.exe scripts/release-preflight.py verify \
+  --policy governance/release-policy.json \
+  --claims governance/claims \
+  --command-lock governance/command-lock.json \
+  --repo-root . \
+  --artifact-path <候选产物> \
+  --evidence-root artifacts/release-evidence
 ```
 
 ### 8.4 接手请读
