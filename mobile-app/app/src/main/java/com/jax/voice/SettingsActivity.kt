@@ -1,7 +1,13 @@
 package com.jax.voice
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.SeekBar
@@ -35,6 +41,8 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var sbThreshold: SeekBar
     private lateinit var tvThreshold: TextView
     private lateinit var swOverlay: Switch
+    private lateinit var advancedContainer: View
+    private lateinit var tvAdvancedToggle: TextView
     private val pairingExecutor = Executors.newSingleThreadExecutor()
     private val registrationApi = DeviceRegistrationApi()
 
@@ -69,6 +77,19 @@ class SettingsActivity : AppCompatActivity() {
         sbThreshold = findViewById(R.id.sbThreshold)
         tvThreshold = findViewById(R.id.tvThreshold)
         swOverlay = findViewById(R.id.swOverlay)
+        advancedContainer = findViewById(R.id.advancedContainer)
+        tvAdvancedToggle = findViewById(R.id.tvAdvancedToggle)
+
+        // 商业化改版：「高级（开发者选项）」折叠区默认收起，点击头部展开/收起
+        findViewById<View>(R.id.advancedHeader).setOnClickListener {
+            val expanded = advancedContainer.visibility == View.VISIBLE
+            advancedContainer.visibility = if (expanded) View.GONE else View.VISIBLE
+            tvAdvancedToggle.setText(
+                if (expanded) R.string.settings_advanced_expand else R.string.settings_advanced_collapse
+            )
+        }
+        // 电池白名单引导（原主界面按钮移入高级区，行为不变）
+        findViewById<Button>(R.id.btnBatteryAdvanced).setOnClickListener { guideBattery() }
 
         // 回填当前配置
         // A7 修复（2026-08-21）：只回填用户自定义值（空 = 用出厂默认），绝不回填默认 URL——
@@ -150,6 +171,27 @@ class SettingsActivity : AppCompatActivity() {
                     Toast.makeText(this, R.string.settings_pairing_failed, Toast.LENGTH_LONG).show()
                 }
             }
+        }
+    }
+
+    /** 电池白名单引导（仅跳系统设置，不静默申请；UI 层逻辑与原主界面按钮一致） */
+    private fun guideBattery() {
+        try {
+            val pm = getSystemService(PowerManager::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                !pm.isIgnoringBatteryOptimizations(packageName)
+            ) {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            } else {
+                Toast.makeText(this, R.string.settings_battery_already, Toast.LENGTH_SHORT).show()
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "battery guide failed: ${t.message}", t)
         }
     }
 

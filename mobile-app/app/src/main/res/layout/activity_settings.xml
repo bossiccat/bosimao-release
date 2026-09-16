@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  商业化设置页（白底+绿）：设备配对 → 唤醒词/灵敏度/悬浮窗 → 「高级」折叠区（开发者选项：
+  会话服务器 URL + 电池白名单，默认收起）。全部 ID 与 SettingsActivity 绑定保持兼容。
+-->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/jax_bg"
@@ -16,166 +21,200 @@
             android:layout_height="wrap_content"
             android:text="@string/settings_title"
             android:textColor="@color/jax_fg"
-            android:textSize="24sp"
+            android:textSize="20sp"
             android:textStyle="bold" />
 
-        <!-- 会话服务器（TRTC 签发，v0.6.0 主配置） -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:text="@string/settings_session_label"
-            android:textColor="@color/jax_fg2"
-            android:textSize="14sp" />
-
-        <EditText
-            android:id="@+id/etSessionUrl"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:hint="@string/settings_session_hint"
-            android:inputType="textUri"
-            android:singleLine="true"
-            android:textColor="@color/jax_fg"
-            android:textColorHint="@color/jax_muted"
-            android:textSize="14sp" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:text="@string/settings_session_sub"
-            android:textColor="@color/jax_muted"
-            android:textSize="12sp" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="@dimen/jax_space_5"
-            android:text="@string/settings_pairing_title"
-            android:textColor="@color/jax_fg2"
-            android:textSize="14sp" />
-
-        <EditText
-            android:id="@+id/etPairingCode"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="@dimen/jax_space_2"
-            android:hint="@string/settings_pairing_code_hint"
-            android:inputType="textVisiblePassword"
-            android:maxLines="1"
-            android:textColor="@color/jax_fg"
-            android:textColorHint="@color/jax_muted" />
-
-        <EditText
-            android:id="@+id/etDeviceName"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="@dimen/jax_space_2"
-            android:hint="@string/settings_device_name_hint"
-            android:inputType="textCapWords"
-            android:maxLength="80"
-            android:maxLines="1"
-            android:textColor="@color/jax_fg"
-            android:textColorHint="@color/jax_muted" />
-
-        <Button
-            android:id="@+id/btnPairDevice"
-            android:layout_width="match_parent"
-            android:layout_height="@dimen/jax_touch_target_min"
-            android:layout_marginTop="@dimen/jax_space_3"
-            android:text="@string/settings_pairing_action" />
-
-        <!-- 设备 ID（生成后持久化，spec §7.1；TRTC 进房用户标识） -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:text="@string/settings_device_id_label"
-            android:textColor="@color/jax_fg2"
-            android:textSize="14sp" />
-
-        <TextView
-            android:id="@+id/tvDeviceId"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:textColor="@color/jax_accent"
-            android:textSize="14sp"
-            android:textIsSelectable="true" />
-
-        <!-- 唤醒词开关 -->
+        <!-- 设备配对卡 -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
+            android:layout_marginTop="@dimen/jax_space_3"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp">
 
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/settings_wake_label"
-                    android:textColor="@color/jax_fg2"
-                    android:textSize="14sp" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/settings_wake_sub"
-                    android:textColor="@color/jax_muted"
-                    android:textSize="12sp" />
-            </LinearLayout>
-
-            <Switch
-                android:id="@+id/swWake"
+            <TextView
                 android:layout_width="wrap_content"
-                android:layout_height="wrap_content" />
+                android:layout_height="wrap_content"
+                android:text="@string/settings_pairing_title"
+                android:textColor="@color/jax_fg"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/etPairingCode"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/jax_touch_target_min"
+                android:layout_marginTop="@dimen/jax_space_3"
+                android:hint="@string/settings_pairing_code_hint"
+                android:inputType="textVisiblePassword"
+                android:maxLines="1"
+                android:textColor="@color/jax_fg"
+                android:textColorHint="@color/jax_muted"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/etDeviceName"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/jax_touch_target_min"
+                android:layout_marginTop="@dimen/jax_space_2"
+                android:hint="@string/settings_device_name_hint"
+                android:inputType="textCapWords"
+                android:maxLength="80"
+                android:maxLines="1"
+                android:textColor="@color/jax_fg"
+                android:textColorHint="@color/jax_muted"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/btnPairDevice"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/jax_touch_target_min"
+                android:layout_marginTop="@dimen/jax_space_3"
+                android:text="@string/settings_pairing_action"
+                app:backgroundTint="@color/jax_color_accent"
+                app:cornerRadius="@dimen/jax_radius_md" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/jax_space_4"
+                android:text="@string/settings_device_id_label"
+                android:textColor="@color/jax_muted"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/tvDeviceId"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:textColor="@color/jax_accent"
+                android:textSize="14sp"
+                android:textIsSelectable="true" />
         </LinearLayout>
 
-        <!-- 灵敏度 -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:text="@string/settings_threshold_label"
-            android:textColor="@color/jax_fg2"
-            android:textSize="14sp" />
-
-        <TextView
-            android:id="@+id/tvThreshold"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:textColor="@color/jax_accent"
-            android:textSize="14sp" />
-
-        <SeekBar
-            android:id="@+id/sbThreshold"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:max="40" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/settings_threshold_sub"
-            android:textColor="@color/jax_muted"
-            android:textSize="12sp" />
-
-        <!-- 悬浮窗开关 -->
+        <!-- 唤醒与体验卡 -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
+            android:layout_marginTop="@dimen/jax_space_3"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <!-- 唤醒词开关 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:minHeight="@dimen/jax_touch_target_min"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_wake_label"
+                        android:textColor="@color/jax_fg"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_wake_sub"
+                        android:textColor="@color/jax_muted"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <Switch
+                    android:id="@+id/swWake"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
+            <!-- 灵敏度 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/jax_space_2"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/tvThreshold"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/settings_threshold_label"
+                    android:textColor="@color/jax_fg"
+                    android:textSize="14sp" />
+
+                <SeekBar
+                    android:id="@+id/sbThreshold"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/jax_space_1"
+                    android:max="40" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/settings_threshold_sub"
+                    android:textColor="@color/jax_muted"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- 悬浮窗开关 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/jax_space_2"
+                android:gravity="center_vertical"
+                android:minHeight="@dimen/jax_touch_target_min"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_overlay_label"
+                        android:textColor="@color/jax_fg"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_overlay_sub"
+                        android:textColor="@color/jax_muted"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <Switch
+                    android:id="@+id/swOverlay"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 高级折叠区（开发者选项，默认收起） -->
+        <LinearLayout
+            android:id="@+id/advancedHeader"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/jax_space_3"
+            android:background="@drawable/bg_card"
             android:gravity="center_vertical"
-            android:orientation="horizontal">
+            android:minHeight="@dimen/jax_touch_target_min"
+            android:orientation="horizontal"
+            android:padding="16dp">
 
             <LinearLayout
                 android:layout_width="0dp"
@@ -183,33 +222,104 @@
                 android:layout_weight="1"
                 android:orientation="vertical">
 
-                <TextView
+                <LinearLayout
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="@string/settings_overlay_label"
-                    android:textColor="@color/jax_fg2"
-                    android:textSize="14sp" />
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_advanced_title"
+                        android:textColor="@color/jax_fg"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_badge"
+                        android:paddingHorizontal="8dp"
+                        android:paddingVertical="2dp"
+                        android:text="@string/settings_advanced_badge"
+                        android:textColor="@color/jax_accent"
+                        android:textSize="10sp" />
+                </LinearLayout>
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="@string/settings_overlay_sub"
+                    android:layout_marginTop="2dp"
+                    android:text="@string/settings_advanced_sub"
                     android:textColor="@color/jax_muted"
                     android:textSize="12sp" />
             </LinearLayout>
 
-            <Switch
-                android:id="@+id/swOverlay"
+            <TextView
+                android:id="@+id/tvAdvancedToggle"
                 android:layout_width="wrap_content"
-                android:layout_height="wrap_content" />
+                android:layout_height="wrap_content"
+                android:text="@string/settings_advanced_expand"
+                android:textColor="@color/jax_accent"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/advancedContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/jax_space_2"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:visibility="gone">
+
+            <!-- 会话服务器（TRTC 签发） -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/settings_session_label"
+                android:textColor="@color/jax_fg"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/etSessionUrl"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/jax_space_2"
+                android:hint="@string/settings_session_hint"
+                android:inputType="textUri"
+                android:singleLine="true"
+                android:textColor="@color/jax_fg"
+                android:textColorHint="@color/jax_muted"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="@string/settings_session_sub"
+                android:textColor="@color/jax_muted"
+                android:textSize="12sp" />
+
+            <!-- 电池白名单引导（自主界面移入） -->
+            <Button
+                android:id="@+id/btnBatteryAdvanced"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/jax_touch_target_min"
+                android:layout_marginTop="@dimen/jax_space_3"
+                android:text="@string/btn_battery_guide"
+                style="@style/Widget.Material3.Button.OutlinedButton" />
         </LinearLayout>
 
         <Button
             android:id="@+id/btnSave"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:drawablePadding="6dp"
-            android:text="@string/btn_save" />
+            android:layout_height="@dimen/jax_touch_target_min"
+            android:layout_marginTop="@dimen/jax_space_4"
+            android:text="@string/btn_save"
+            app:backgroundTint="@color/jax_color_accent"
+            app:cornerRadius="@dimen/jax_radius_md" />
     </LinearLayout>
 </ScrollView>
