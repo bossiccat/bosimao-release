@@ -11,11 +11,19 @@ sidecar 的 `DownlinkPacer` 队列（最多 50 帧 = 1 秒）。不清它，用�
 云端判定打断时 sidecar 队列里的旧音频会继续播完（与实测打断延迟 ~1.15s 量级吻合）。
 
 本测试守住三段：判定侧下发（**两条路径都测**，行为断言）→ 传输 → sidecar 侧执行。
+
+2026-09-16 加固：第三段「sidecar 侧执行」原先只是源码字符串扫描
+（`assert "pacer.clear()" in rtc.js`），对行为改变完全无感；现改为在
+`sidecar/test/barge-in-flush-exec.test.js` 里用 vm 加载真实 rtc.js 驱动真实 ctrl 回调，
+断言节拍器队列真的被清空，并由本文件实际执行该 node 用例。
 """
 from __future__ import annotations
 
 import asyncio
+import re
+import shutil
 import struct
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -25,6 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # backend/
 from rtc_bridge.session import PeerVoiceSession  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
+_WORKFLOW = ROOT / ".github" / "workflows" / "deploy-cloudrun.yml"
+_SIDECAR_FLUSH_CASE = ROOT / "sidecar" / "test" / "barge-in-flush-exec.test.js"
+_NODE = shutil.which("node")
 
 
 # ---------- 不注入任何替身：真的走 PeerVoiceSession 默认路径 ----------
@@ -104,7 +115,12 @@ def test_both_barge_in_paths_are_symmetric_in_source():
     )
 
 
-# ---------- 保底源码扫描（原有用例，保留） ----------
+# ---------- sidecar 侧执行：行为断言（已取代原源码字符串扫描） ----------
+# 说明：`test_session_dispatches_flush_on_barge_in` 仍是源码扫描，但它是**下面那条行为
+# 断言之外的冗余保险**，且它守的是 Python 侧（本文件已用真实会话做了行为断言），
+# 与「字符串在但逻辑死」那种假绿不同：Python 侧的行为断言在
+# `test_local_energy_barge_in_dispatches_flush` / `test_cloud_vad_barge_in_dispatches_flush`。
+# 唯一残留的纯扫描是 `test_pacer_exposes_clear`（见文末注释）。
 
 def test_session_dispatches_flush_on_barge_in() -> None:
     s = (ROOT / "backend" / "rtc_bridge" / "session.py").read_text(encoding="utf-8")
@@ -117,11 +133,69 @@ def test_session_dispatches_flush_on_barge_in() -> None:
 
 
 def test_sidecar_executes_flush_on_pacer() -> None:
-    s = (ROOT / "sidecar" / "rtc.js").read_text(encoding="utf-8")
-    assert "flush_downlink" in s, "sidecar 必须响应 flush_downlink"
-    assert "pacer.clear()" in s, "响应里必须真的清空节拍器队列"
+    """sidecar 侧的执行必须是**行为断言**，且必须真的在门禁里跑。
+
+    为什么删掉了原来的源码字符串扫描（2026-09-16）
+    ----------------------------------------------
+    旧实现是：
+
+        assert "flush_downlink" in src
+        assert "pacer.clear()" in src
+
+    把 rtc.js 的 `if (action === 'flush_downlink')` 改成 `... && false` 之后，
+    这两个字符串依然都在 ⇒ **测试照样绿**，而线上打断冲刷已彻底失效（被打断的旧回复
+    会把节拍器里最多 1 秒的积压播完，正是实测打断延迟 1.75s 的主要来源）。
+    字符串扫描看见的是「源码里存在这句话」，要守的却是「收到 ctrl 时它真的执行了」。
+
+    现在的行为断言在 `sidecar/test/barge-in-flush-exec.test.js`：用 vm 加载**真实**
+    rtc.js，只把边界端口换成记录型替身，然后驱动真实的 ctrl 回调，断言节拍器队列
+    真的从 30 帧变 0 帧。
+
+    本用例守两段（缺一不可）
+    ------------------------
+      1. 那份行为用例存在，且**没有被 sidecar 门禁排除**——门禁用排除法，
+         被排除等于永远不执行，写了也白写；
+      2. 真的用 node 执行它并要求全绿。
+
+    为什么这里不 skip：CI 的 `Pre-deploy gate - sidecar node tests` 与 backend 契约
+    套件在**同一个 job** 里跑，node 是硬前提。缺失时静默跳过会让这条契约彻底消失，
+    正是本仓反复出现的「未测到 ≡ 通过」假绿形态。
+    """
+    assert _SIDECAR_FLUSH_CASE.is_file(), (
+        f"缺少 sidecar 打断冲刷的行为断言文件：{_SIDECAR_FLUSH_CASE.name}"
+    )
+
+    # 1) 必须落在门禁的「可跑」一侧。
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    assert "node --test" in workflow, "sidecar 门禁必须真的跑 node --test"
+    m = re.search(r"exclude='([^']*)'", workflow)
+    assert m, "sidecar 门禁的排除清单不见了（结构变了，请同步本用例）"
+    assert "barge-in-flush-exec" not in m.group(1), (
+        "新行为用例被 sidecar 门禁排除 ⇒ CI 永远不会执行它（等于没写）"
+    )
+
+    # 2) 真的执行它。
+    assert _NODE, (
+        "未找到 node：CI 的 sidecar 门禁与 backend 契约套件在同一个 job 里跑，"
+        "node 是硬前提；请安装 node 或修正 PATH（不跳过——跳过等于让这条契约消失）"
+    )
+    proc = subprocess.run(
+        [_NODE, "--test", str(_SIDECAR_FLUSH_CASE)],
+        cwd=str(ROOT / "sidecar"),
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=180,
+    )
+    assert proc.returncode == 0, (
+        "sidecar 打断冲刷行为断言未通过\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
 
 
 def test_pacer_exposes_clear() -> None:
+    """残留的源码扫描：其**行为**覆盖在 `sidecar/test/downlink_pacer.test.js`
+    （`clear() 立即丢弃全部待发帧，并计入 dropped（但不动 sent）`），本用例只做存在性兜底。
+    """
     s = (ROOT / "sidecar" / "downlink_pacer.js").read_text(encoding="utf-8")
     assert "clear()" in s and "_queue.length = 0" in s, "clear() 必须真正清空队列"
