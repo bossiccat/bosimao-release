@@ -23,6 +23,20 @@ android {
         // 注入实验变体；默认无 -P 时为 MIC，与生产行为完全一致。
         resValue("string", "jax_capture_source",
             (project.findProperty("jaxCaptureSource") as String? ?: "MIC").trim().uppercase())
+
+        // 采集音效 A/B（2026-09-16 真机排查 S26U/Android16 "说话无反应"）：
+        // gradle -PjaxCaptureEffects=NONE 注入「不挂平台 AEC/NS/AGC」的对照包，
+        // 用于判定"采集恒零"是否由音效挂载造成。默认 AEC_NS = 生产行为**完全不变**。
+        // 背景：代码注释本机有前科（CaptureGainStage.kt:48「VOICE_COMMUNICATION 源送全零，是死路」），
+        // 且"有声"的 MicRecorder 路径并不挂音效，而"读 0"的这条挂了。
+        resValue("string", "jax_capture_effects",
+            (project.findProperty("jaxCaptureEffects") as String? ?: "AEC_NS").trim().uppercase())
+
+        // 采集音频模式 A/B（2026-09-16，根因：本机在 AUDIOCALL 通话形态下向自采返回全零）：
+        // -PjaxCaptureMode=NORMAL ⇒ 建自采 AudioRecord 那一刻把 AudioManager.mode 置 MODE_NORMAL，
+        // 建完恢复。默认 KEEP = 生产行为完全不变。
+        resValue("string", "jax_capture_mode",
+            (project.findProperty("jaxCaptureMode") as String? ?: "KEEP").trim().uppercase())
     }
 
     buildTypes {

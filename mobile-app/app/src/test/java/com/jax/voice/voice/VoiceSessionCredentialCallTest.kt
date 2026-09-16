@@ -50,7 +50,7 @@ class VoiceSessionCredentialCallTest {
         )
         try {
             val service = VoiceForegroundService()
-            setPrivateField(service, "micRecorder", MicRecorder { })
+            setPrivateField(service, "micRecorder", MicRecorder(onFrame = { _ -> }))
             setPrivateField(service, "coordinator", coordinator)
 
             invokeTriggerWake(service, "persian-cat")

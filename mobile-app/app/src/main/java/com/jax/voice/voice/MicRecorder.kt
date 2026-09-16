@@ -101,13 +101,29 @@ class MicRecorder(
         val floatBuf = FloatArray(FRAME_SAMPLES)
         var consecutiveErrors = 0
         var lastFrameTs = SystemClock.elapsedRealtime()
+        var lvlFrames = 0L   // 电平日志计数（2026-09-16 埋点）
         var died: Throwable? = null
         try {
             record.startRecording()
+            // 2026-09-16 真机取证埋点（纯观测，不改行为）：多麦机型上"绑到哪个输入设备"必须看得见，
+            // 否则"读到全零"无法区分"没声音"与"绑到了被遮住的麦/无信号路径"。
+            runCatching {
+                val rd = record.routedDevice
+                Log.i(TAG, "routedDevice type=${rd?.type} id=${rd?.id} product=${rd?.productName} addr=${rd?.address}")
+            }.onFailure { Log.w(TAG, "routedDevice read failed: ${it.message}") }
             while (running) {
                 val n = record.read(pcm, 0, FRAME_SAMPLES)
                 if (n > 0) {
                     lastFrameTs = SystemClock.elapsedRealtime()
+                    // 每 12 帧（40ms/帧 ⇒ ~500ms）落一条原始电平：KWS 这条路径此前**没有任何电平日志**，
+                    // 只能靠"唤醒次数"间接判断，是本次排查里最钝的一把尺。
+                    if (++lvlFrames % 12L == 0L) {
+                        var acc = 0.0
+                        for (i in 0 until n) acc += pcm[i].toDouble() * pcm[i].toDouble()
+                        val rms = kotlin.math.sqrt(acc / n)
+                        Log.i(TAG, "lvl raw=" + rms.toInt() + " n=" + n +
+                            " routedType=" + runCatching { record.routedDevice?.type }.getOrNull())
+                    }
                     try {
                         for (i in 0 until n) floatBuf[i] = pcm[i] / 32768.0f
                         onFrame(floatBuf.copyOf(n))

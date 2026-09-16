@@ -8,6 +8,7 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.util.Log
+import com.jax.voice.util.DiagLog
 import com.tencent.trtc.TRTCCloud
 import com.tencent.trtc.TRTCCloudDef
 import java.util.Locale
@@ -77,6 +78,52 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
             }
         }
 
+        /**
+         * 采集音效 A/B 开关（2026-09-16 真机排查）：由 gradle resValue `jax_capture_effects` 注入。
+         * 返回 true 表示挂平台 AEC/NS/AGC（生产默认）；false 表示**不挂**（对照变体）。
+         * 反射失败/资源缺失一律回退 true —— 与生产行为一致，绝不因读不到就悄悄改变产品行为。
+         */
+        fun resolveCaptureEffectsEnabled(): Boolean {
+            return try {
+                val at = Class.forName("android.app.ActivityThread")
+                val ctx = at.getDeclaredMethod("currentApplication").invoke(null)
+                    as? android.content.Context ?: return true
+                val resId = ctx.resources.getIdentifier("jax_capture_effects", "string", ctx.packageName)
+                val name = if (resId != 0) ctx.getString(resId) else "AEC_NS"
+                Log.i(TAG, "jax_capture_effects=$name")
+                name.trim().uppercase() != "NONE"
+            } catch (t: Throwable) {
+                Log.w(TAG, "resolveCaptureEffects fallback AEC_NS: ${t.message}")
+                true
+            }
+        }
+
+        /**
+         * 采集音频模式 A/B（2026-09-16 根因彻查）。
+         *
+         * 根因：自采 AudioRecord 是在 `enterRoom(TRTC_APP_SCENE_AUDIOCALL)` **之后**创建的，
+         * 此时设备处于通话音频形态（`MODE_IN_COMMUNICATION`；HAL 侧 aec/ns、输入 2ch），
+         * 而本机（Samsung S26U / AGM-LPI 路径）在该形态下**向应用自采返回全零**
+         * （同机同麦的 MicRecorder 走 `dev=1ch` 无音效形态 ⇒ 电平 39~72 正常）。
+         *
+         * 本开关只影响**建 AudioRecord 那一瞬**：NORMAL = 临时置 MODE_NORMAL 并在建完后恢复；
+         * KEEP = 什么都不做（**生产默认**）。读不到资源一律回退 KEEP。
+         */
+        fun resolveCaptureModeNormal(): Boolean {
+            return try {
+                val at = Class.forName("android.app.ActivityThread")
+                val ctx = at.getDeclaredMethod("currentApplication").invoke(null)
+                    as? android.content.Context ?: return false
+                val resId = ctx.resources.getIdentifier("jax_capture_mode", "string", ctx.packageName)
+                val name = if (resId != 0) ctx.getString(resId) else "KEEP"
+                Log.i(TAG, "jax_capture_mode=$name")
+                name.trim().uppercase() == "NORMAL"
+            } catch (t: Throwable) {
+                Log.w(TAG, "resolveCaptureMode fallback KEEP: ${t.message}")
+                false
+            }
+        }
+
         fun sourceName(src: Int): String = when (src) {
             MediaRecorder.AudioSource.MIC -> "MIC"
             MediaRecorder.AudioSource.VOICE_COMMUNICATION -> "VOICE_COMMUNICATION"
@@ -128,6 +175,22 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
         }
         // M0 A/B：每次 start 重新解析 resValue 注入的采集源（默认/异常=MIC 与生产一致）
         val captureSource = resolveCaptureSource()
+        // 2026-09-16 A/B：仅在建 AudioRecord 这一瞬临时切 MODE_NORMAL（默认 KEEP 不动）
+        val forceNormal = resolveCaptureModeNormal()
+        val am = if (forceNormal) {
+            runCatching {
+                (Class.forName("android.app.ActivityThread")
+                    .getDeclaredMethod("currentApplication").invoke(null)
+                    as android.content.Context)
+                    .getSystemService(android.content.Context.AUDIO_SERVICE)
+                    as? android.media.AudioManager
+            }.getOrNull()
+        } else null
+        val prevMode = am?.mode
+        if (forceNormal && am != null) {
+            runCatching { am.mode = android.media.AudioManager.MODE_NORMAL }
+            Log.w(TAG, "capture mode forced NORMAL (was=$prevMode) for AudioRecord creation")
+        }
         val record = AudioRecord(
             captureSource,
             RtcCustomAudioPcm.SAMPLE_RATE,
@@ -135,6 +198,10 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
             AudioFormat.ENCODING_PCM_16BIT,
             maxOf(minBuf * 2, FRAME_SAMPLES * 2 * 4)
         )
+        if (forceNormal && am != null && prevMode != null) {
+            runCatching { am.mode = prevMode }
+            Log.i(TAG, "capture mode restored to $prevMode")
+        }
         if (record.state != AudioRecord.STATE_INITIALIZED) {
             Log.e(TAG, "AudioRecord init failed")
             record.release()
@@ -144,20 +211,26 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
         // 平台 AEC/NS/AGC：回音根治核心。isAvailable=false 不阻断（真机日志留痕，降级为无特效上行）。
         // M0 G0 关键判据：enabled 回读 + created 状态留痕——若 VC 变体下 AEC created 但实测
         // 空操作（回声耦合比无改善），G0 判 M1 而非 M2。
+        val effectsEnabled = resolveCaptureEffectsEnabled()
+        if (!effectsEnabled) {
+            Log.w(TAG, "capture effects DISABLED (jax_capture_effects=NONE) —— 对照变体，不挂 AEC/NS/AGC")
+        }
         try {
-            if (AcousticEchoCanceler.isAvailable()) {
+            if (!effectsEnabled) {
+                // 对照变体：刻意不挂任何平台音效，用于判定"采集恒零"是否由挂载造成
+            } else if (AcousticEchoCanceler.isAvailable()) {
                 aec = AcousticEchoCanceler.create(record.audioSessionId)?.also {
                     it.enabled = true
                     Log.i(TAG, "AEC created (session=${record.audioSessionId}) enabled=${it.enabled}")
                 }
             } else Log.w(TAG, "AEC not available on this device")
-            if (NoiseSuppressor.isAvailable()) {
+            if (effectsEnabled && NoiseSuppressor.isAvailable()) {
                 ns = NoiseSuppressor.create(record.audioSessionId)?.also {
                     it.enabled = true
                     Log.i(TAG, "NS created enabled=${it.enabled}")
                 }
             }
-            if (AutomaticGainControl.isAvailable()) {
+            if (effectsEnabled && AutomaticGainControl.isAvailable()) {
                 agc = AutomaticGainControl.create(record.audioSessionId)?.also {
                     it.enabled = true
                     Log.i(TAG, "AGC created enabled=${it.enabled}")
@@ -170,12 +243,19 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
         thread = Thread({ loop(record, cloud) }, CAPTURE_THREAD_NAME).apply { start() }
         Log.i(
             TAG,
-            "custom capture started (16k/mono/20ms) source=${sourceName(captureSource)} inst=${instId()} captureThreads=${captureThreadCount()}"
+            "custom capture started (16k/mono/20ms) source=${sourceName(captureSource)} effects=${if (effectsEnabled) "AEC_NS" else "NONE"} inst=${instId()} captureThreads=${captureThreadCount()}"
         )
         return true
     }
 
     private fun instId(): String = Integer.toHexString(System.identityHashCode(this))
+
+    private val silentWatchdog = SilentInputWatchdog(
+        maxZeroFrames = 250,                       // 20ms/帧 × 250 = 5 秒
+        onSilent = { frames ->
+            Log.e(TAG, "capture silent: $frames consecutive zero-RMS frames (5s)")
+        },
+    )
 
     private fun loop(record: AudioRecord, cloud: TRTCCloud) {
         val pcm = ShortArray(FRAME_SAMPLES)
@@ -183,6 +263,13 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
         var frameSeq = 0L
         try {
             record.startRecording()
+            // 2026-09-16 真机取证埋点（纯观测）：与 MicRecorder 同口径，看**进会话后**绑到哪个输入设备。
+            // 对照事实：会话外那条路径实测 routedDevice=BUILTIN_MIC/addr=bottom 且 lvl raw=39~72；
+            // 本条路径在同一台机器上恒 0 ⇒ 必须看清"绑错了麦"还是"TRTC 抢麦"。
+            runCatching {
+                val rd = record.routedDevice
+                Log.i(TAG, "routedDevice type=${rd?.type} id=${rd?.id} product=${rd?.productName} addr=${rd?.address}")
+            }.onFailure { Log.w(TAG, "routedDevice read failed: ${it.message}") }
             while (running.get()) {
                 val n = record.read(pcm, 0, FRAME_SAMPLES)
                 if (n > 0) {
@@ -193,6 +280,13 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
                     // 的唯一客观依据，缺了它只能凭「听起来行不行」猜。
                     // floor= 噪声底 / adp= 本帧是否参与收敛 —— 用来区分「在收敛」与「被底噪门槛挡住」，
                     // 没有这两个字段就无法在真机上区分 D1 runaway 与正常收敛。
+                    // C4 fail-loud（2026-09-16）：连续 5 秒精确零电平 ⇒ 主动报错。
+                    // 本轮真机事故：上行恒零时应用照旧宣称 IN_ROOM、不报任何错，
+                    // 用户只能靠"说话没反应"发现。看门狗把静音变成显式事件（DiagLog 可导出）。
+                    if (silentWatchdog.feed(gainStage.lastRawRms)) {
+                        Log.e(TAG, "上行连续 5s 精确零电平 ⇒ 麦克风无输入（C4 fail-loud）")
+                        DiagLog.log(TAG, "capture silent 5s: mic delivers zeros (uplink unusable)")
+                    }
                     if (++frameSeq % LEVEL_LOG_FRAMES == 0L) {
                         Log.i(
                             TAG,
