@@ -214,6 +214,94 @@ def _pactl_info(*, env: dict[str, str], which=shutil.which,
     return done.stdout or ""
 
 
+def _pactl_list(kind: str, *, env: dict[str, str], which=shutil.which,
+                run=subprocess.run) -> str | None:
+    """`pactl list <kind>`（**长**格式）的文本；不可用或调用失败返回 None。"""
+    pactl = which(PACTL) or ""
+    if not pactl:
+        return None
+    try:
+        done = run([pactl, "list", kind], capture_output=True, text=True,
+                   env=env, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return done.stdout or ""
+
+
+_DEVICE_BLOCK_RE = re.compile(r"^(Sink|Source) #\d+")
+# 端口行：恰好两个制表符 + 端口名 + 冒号。真实输出里端口下面还会嵌一层
+# `\t\t\tproperties:` / `\t\t\t\tdevice.icon_name = …`，所以层级必须**钉死两格**，
+# 否则端口下的属性会污染属性键清单（那正是本项观测要看的两个值之一）。
+_PORT_LINE_RE = re.compile(r"^\t\t(?P<port>[^\t\s:]+):")
+# 属性键：恰好两个制表符 + key = value。
+_PROP_LINE_RE = re.compile(r"^\t\t(?P<key>[^\t=]+?)\s*=")
+
+
+def parse_device_details(text: str | None) -> list[dict] | None:
+    """从 `pactl list sinks|sources`（长格式）里取每个设备的名称/端口/属性键/标志。
+
+    为什么非要看**端口**和**属性键**：TRTC 的 Linux ADM 在 `pulse_audio_context.cc`
+    里枚举设备（原生字符串 `device.form_factor` / `device.description` /
+    `GetDevicesList` / `RefreshPlayerDevices`），并且有按端口判定的分支
+    （原生字符串 `sink device port is not same, but the active port and sink name
+    is same`）。而我们用 `module-null-sink` 造出来的 sink 与真实声卡**不对称**：
+    端口可能一个都没有，属性表里我们只显式写进了 `device.description`（可能还被 PA
+    补上 `device.class = "abstract"`）。到底是被"没有端口"筛掉、还是被
+    `device.class`/`device.form_factor` 筛掉，**只能靠把这份观测拿到线上看一次** ——
+    本函数的作用就是把这份不对称摊平，而不是替它下结论。
+
+    容器里没有 shell，`/status` 是唯一窗口 —— 所以这一项**只能**由这里接出来。
+    `None`（没清点成）与 `[]`（清点了但一个设备都没有）照例严格区分。
+    """
+    if text is None:
+        return None
+    out: list[dict] = []
+    cur: dict | None = None
+    section = ""
+    for raw in text.splitlines():
+        if _DEVICE_BLOCK_RE.match(raw):
+            cur = {"name": "", "ports": [], "props": [], "flags": []}
+            out.append(cur)
+            section = ""
+            continue
+        if cur is None:
+            continue
+        line = raw.rstrip()
+        if re.match(r"^\tPorts:\s*$", line):
+            section = "ports"
+            continue
+        if re.match(r"^\tProperties:\s*$", line):
+            section = "props"
+            continue
+        if re.match(r"^\t(Formats|Volume|Channel Map|Sample Specification):", line):
+            section = ""
+        if section == "ports":
+            m = _PORT_LINE_RE.match(line)
+            if m:
+                cur["ports"].append(m.group("port"))
+                continue
+        if section == "props":
+            m = _PROP_LINE_RE.match(line)
+            if m:
+                cur["props"].append(m.group("key").strip())
+                continue
+        m = re.match(r"^\tName:\s*(\S+)\s*$", line)
+        if m:
+            cur["name"] = m.group(1)
+            section = ""
+            continue
+        m = re.match(r"^\tFlags:\s*(.*?)\s*$", line)
+        if m:
+            cur["flags"] = m.group(1).split()
+            section = ""
+            continue
+        if line and not line.startswith("\t"):
+            section = ""
+    return out
+
+
 _DEFAULT_SINK_RE = re.compile(r"^\s*Default Sink:\s*(\S+)\s*$", re.MULTILINE)
 _DEFAULT_SOURCE_RE = re.compile(r"^\s*Default Source:\s*(\S+)\s*$", re.MULTILINE)
 
@@ -270,6 +358,11 @@ def inspect_devices(*, env: dict[str, str], sink: str,
     sources = _pactl_lines("sources", env=env, which=which, run=run)
     clients = _pactl_lines("clients", env=env, which=which, run=run)
     defaults = parse_server_defaults(_pactl_info(env=env, which=which, run=run))
+    # 长格式：每个 sink/source 的端口与属性键。这是「SDK 为什么筛掉它」的唯一可判据。
+    sink_details = parse_device_details(
+        _pactl_list("sinks", env=env, which=which, run=run))
+    source_details = parse_device_details(
+        _pactl_list("sources", env=env, which=which, run=run))
     return {
         "pactl": (which(PACTL) or "") != "",
         "probed": sinks is not None and sources is not None,
@@ -281,6 +374,8 @@ def inspect_devices(*, env: dict[str, str], sink: str,
         "source_present": bool(sources) and any(sink in line for line in sources),
         "default_sink": defaults["default_sink"],
         "default_source": defaults["default_source"],
+        "sink_details": sink_details,
+        "source_details": source_details,
     }
 
 
@@ -292,12 +387,17 @@ def summarize_devices(report: dict | None, *, error: str = "") -> dict:
       * False —— 清点成功但 PA 里一个 sink 都没有：TRTC 的播放设备枚举必然为空，
                  远端音频帧不会回调、上行恒为 0（2026-09-16 事故的直接条件）；
       * None  —— 没清点成（pactl 缺失/失败）：**不知道**，不得当成 False，也不得当成 True。
+
+    `sink_details` 是给"PA 有 sink 但 TRTC 说设备列表为空"这个分支用的：它把每个
+    sink 的端口与属性键摊开，用于判定 SDK 是筛掉了"没有端口的 null-sink"
+    还是筛掉了 `device.class`/`device.form_factor` 不达标的设备。
     """
     if not isinstance(report, dict):
         return {
             "probed": False, "sink_count": None, "source_count": None,
             "client_count": None, "client_names": None, "sink_present": False,
             "source_present": False, "default_sink": None, "default_source": None,
+            "sink_details": None, "source_details": None,
             "playout_ok": None, "error": error,
         }
     sinks = report.get("sinks")
@@ -315,6 +415,8 @@ def summarize_devices(report: dict | None, *, error: str = "") -> dict:
         "source_present": bool(report.get("source_present")),
         "default_sink": report.get("default_sink"),
         "default_source": report.get("default_source"),
+        "sink_details": report.get("sink_details"),
+        "source_details": report.get("source_details"),
         "playout_ok": playout_ok,
         "error": error,
     }

@@ -88,13 +88,113 @@ def test_parse_client_names_keeps_unknown_separate_from_empty() -> None:
     assert audio_env.parse_client_names([]) == []
 
 
+# --- 1b. 长格式清点：null-sink 与真实声卡的**不对称**是"被筛掉什么"的唯一判据 ---
+
+# `pactl list sinks` 里 null-sink 的**观测形态样本**：没有 Ports 段，属性表里只有我们
+# 显式写进去的 device.description（见 audio_env 里 module-null-sink 的 sink_properties）。
+# 注意：样本只钉**解析器行为**——线上那个 sink 到底有没有端口、带不带 device.class，
+# 正是要拿这份观测去问的问题，不能在这里替它作答。
+PACTL_LIST_SINKS_NULL = (
+    "Sink #0\n"
+    "\tState: SUSPENDED\n"
+    "\tName: jax_null\n"
+    "\tDescription: JaxNullSink\n"
+    "\tDriver: module-null-sink.c\n"
+    "\tSample Specification: s16le 2ch 44100Hz\n"
+    "\tChannel Map: front-left,front-right\n"
+    "\tOwner Module: 25\n"
+    "\tMute: no\n"
+    "\tVolume: front-left: 65536 / 100% / 0.00 dB,   front-right: 65536 / 100% / 0.00 dB\n"
+    "\t        balance 0.00\n"
+    "\tBase Volume: 65536 / 100% / 0.00 dB\n"
+    "\tMonitor Source: jax_null.monitor\n"
+    "\tLatency: 0 usec, configured 0 usec\n"
+    "\tFlags: DECIBEL_VOLUME LATENCY SET_FORMATS \n"
+    "\tProperties:\n"
+    '\t\tdevice.description = "JaxNullSink"\n'
+    "\tFormats:\n"
+    "\t\tpcm\n"
+)
+
+# 对照：真实声卡（用来证明解析器不是"总会报空"）。
+PACTL_LIST_SINKS_HW = (
+    "Sink #1\n"
+    "\tName: alsa_output.pci-0000_00_1f.3.analog-stereo\n"
+    "\tDescription: Built-in Audio Analog Stereo\n"
+    "\tFlags: HARDWARE HW_MUTE_CTRL DECIBEL_VOLUME LATENCY \n"
+    "\tProperties:\n"
+    '\t\talsa.card = "0"\n'
+    '\t\tdevice.description = "Built-in Audio Analog Stereo"\n'
+    '\t\tdevice.form_factor = "internal"\n'
+    '\t\tdevice.class = "sound"\n'
+    "\tPorts:\n"
+    "\t\tanalog-output-speaker: Speakers (priority 10000, latency offset 0 usec, available: unknown)\n"
+    "\t\t\tproperties:\n"
+    '\t\t\t\tdevice.icon_name = "audio-speakers"\n'
+    "\t\tanalog-output-headphones: Headphones (priority 9900, latency offset 0 usec, available: no)\n"
+    "\tActive Port: analog-output-speaker\n"
+    "\tFormats:\n"
+    "\t\tpcm\n"
+)
+
+
+def test_parse_device_details_reports_ports_and_prop_keys_of_our_own_sink() -> None:
+    """端口与属性键必须被摊平报出来 —— 这是"SDK 为什么筛掉它"的唯一线上判据。"""
+    details = audio_env.parse_device_details(PACTL_LIST_SINKS_NULL)
+    assert details is not None and len(details) == 1
+    d = details[0]
+    assert d["name"] == "jax_null"
+    assert d["ports"] == [], "没有 Ports 段 ⇒ 空端口（不是解析失败，也不是'不知道'）"
+    assert d["props"] == ["device.description"], "属性键里没有 device.class / device.form_factor"
+    assert isinstance(d["flags"], list) and d["flags"], "Flags 必须被解析出来（线上要判 HARDWARE）"
+    assert "DECIBEL_VOLUME" in d["flags"]
+
+
+def test_parse_device_details_reads_real_ports_and_props() -> None:
+    """真实声卡必须解析出端口与 form_factor/class —— 否则上面那条空端口断言是假绿。"""
+    d = audio_env.parse_device_details(PACTL_LIST_SINKS_HW)[0]
+    assert d["name"] == "alsa_output.pci-0000_00_1f.3.analog-stereo"
+    assert d["ports"] == ["analog-output-speaker", "analog-output-headphones"]
+    assert "device.form_factor" in d["props"] and "device.class" in d["props"]
+    assert "HARDWARE" in d["flags"]
+    # 端口**内部**那层 properties 不得污染属性键清单（层级必须钉死两格）。
+    assert "device.icon_name" not in d["props"]
+
+
+def test_parse_device_details_keeps_unknown_separate_from_empty() -> None:
+    assert audio_env.parse_device_details(None) is None, "没清点成 ≠ 没有设备"
+    assert audio_env.parse_device_details("") == []
+
+
+def test_inspect_devices_carries_long_format_details() -> None:
+    """`pactl list sinks`（长）与 `pactl list short sinks`（短）末参同名，键必须区分。"""
+    report = audio_env.inspect_devices(
+        env={}, sink=audio_env.SINK_NAME, which=lambda name: f"/usr/bin/{name}",
+        run=_run_by_subcommand({
+            "list short sinks": "0\tjax_null\tmodule-null-sink\ts16le 2ch 44100Hz\tSUSPENDED\n",
+            "list short sources": "1\tjax_null.mic\tmodule-virtual-source\ts16le 2ch 44100Hz\n",
+            "list short clients": "12\tliteav\tmodule-native-protocol-unix\ts16le 2ch 48000Hz\tRUNNING\n",
+            "list sinks": PACTL_LIST_SINKS_NULL,
+            "list sources": "Source #1\n\tName: jax_null.mic\n\tPorts:\n",
+            "info": PACTL_INFO,
+        }),
+    )
+    assert report["sink_details"][0]["name"] == "jax_null"
+    assert report["sink_details"][0]["ports"] == []
+    assert report["source_details"][0]["name"] == "jax_null.mic"
+
+
 # --- 2. inspect_devices：probed 与"设备为空"是两件不同的事 -------------------
 
 
 def _run_by_subcommand(answers: dict[str, str], *, returncode: int = 0):
     def _run(cmd, **kwargs):  # noqa: ARG001
-        # `pactl list short <kind>` / `pactl info` —— 最后一个参数就是检索键。
-        return subprocess.CompletedProcess(cmd, returncode, answers.get(cmd[-1], ""), "")
+        # 先按完整子命令（`list short sinks` / `list sinks` / `info`）查，
+        # 再退回最后一个参数（`sinks`）——长短两种格式的**末参相同**，
+        # 不区分就会把 short 格式喂给长格式解析器（那是这版最容易犯的错）。
+        key = " ".join(cmd[1:])
+        out = answers.get(key, answers.get(cmd[-1], ""))
+        return subprocess.CompletedProcess(cmd, returncode, out, "")
     return _run
 
 
@@ -167,6 +267,21 @@ def test_summarize_devices_playout_ok_none_when_not_probed() -> None:
     assert summary["probed"] is False
     assert summary["sink_count"] is None
     assert "boom" in summary["error"]
+
+
+def test_summarize_devices_passes_the_asymmetry_through_to_status() -> None:
+    """`playout_ok=True` 但 SDK 仍说设备列表为空时，端口/属性键必须已经在 /status 里。"""
+    details = audio_env.parse_device_details(PACTL_LIST_SINKS_NULL)
+    summary = audio_env.summarize_devices({
+        "probed": True, "sinks": ["0\tjax_null\t…"], "sources": ["1\tjax_null.mic\t…"],
+        "clients": ["liteav"], "sink_present": True, "source_present": True,
+        "default_sink": "jax_null", "default_source": "jax_null.monitor",
+        "sink_details": details, "source_details": [],
+    })
+    assert summary["playout_ok"] is True
+    assert summary["sink_details"][0]["ports"] == []
+    assert summary["sink_details"][0]["props"] == ["device.description"]
+    assert summary["source_details"] == []
 
 
 # --- 4. supervisor：运行期实测进 /status，且不影响启动语义 ---------------------
