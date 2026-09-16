@@ -79,7 +79,45 @@ ENV NODE_EXTRA_CA_CERTS=/srv/certs/cloud-control-plane-issuer.pem
 # 所以下面必须显式校验（见紧接其后的 fail-closed 段）。
 # --foreground-scripts：让 install 脚本的输出进构建日志（默认被 npm 吞掉，
 # 这正是「下载失败却构建成功」长期看不见的原因之一）。
-RUN cd sidecar && npm install --no-audit --no-fund --foreground-scripts
+#
+# TRTC SDK 版本 pin（2026-09-16 事故沉淀，发布阻断级）
+# ---------------------------------------------------------------------------
+# **容器里的 sidecar 必须用 12.5.705-beta.0，不能跟桌面端一样用 13.4.802-beta.3。**
+# 桌面端（Windows）继续由 sidecar/package.json pin 13.4.802-beta.3 —— 那是 **win64**，产物存在，
+# 所以**不要**为了"统一版本"去改 sidecar/package.json。
+#
+# 选版本要过**两道**筛，缺一不可（2026-09-16 实测；URL 模板出自 sdk 自身
+# scripts/download.js:61，平台标签出自 scripts/constant.js）：
+#   筛 1「linux-x64 的 zip 存在」：对 111 个 12.x/13.x 版本逐个 HEAD 官方 CDN，
+#        只有 24 个版本有 linux-x64 产物；**任何 13.x 都没有**——实测
+#        .../13.4.802-beta.3/trtc-electron-sdk-linux-x64-13.4.802-beta.3.zip → HTTP 404，
+#        这正是 DeployId 014 构建失败的确切原因。（win64 则从 12.2.703 到 13.3.801 全部 200。）
+#   筛 2「zip 里真有 Node 原生绑定 `build/Release/trtc_electron_sdk.node`」：
+#        **光有 zip 远远不够。** 逐版本用 HTTP Range 读 zip 中央目录列出真实产物后发现，
+#        那 24 个里只有 **12 个**含该 .node；断点精确落在 12.5.705-beta.0 与 12.6.706-beta.0 之间：
+#          · 带 .node：12.2.115-beta.{0,1,2,3,5,6,12} / 12.3.705-beta.{2,3} /
+#                      12.4.705-alpha.0 / 12.5.705-alpha.1 / **12.5.705-beta.0**
+#          · 不带：    12.6.706-beta.0 起，含 **12.7.706**（8.28 MB 却只有 libliteavsdk.so /
+#                      libtxffmpeg.so / libuser_sig_gen.so 三个 .so）与 12.8.707-alpha.*
+#        而 `liteav/trtc.js:41` 正是 `require('../build/Release/trtc_electron_sdk.node')`，
+#        所以 12.7.706 在 Linux 上**必然在模块加载期抛 Cannot find module**——
+#        与本次线上事故同一个死法，只是触发点从"下载 404"变成"包内缺件"。
+#        两代版本的 scripts/download.js 做 diff 后**完全一致**（Linux 分支同样是先平铺拷
+#        build/Release、再拷一份到 Release/x64），所以不是脚本变了，是 CDN 上 12.6+ 的包本身缺件。
+# 结论：容器只能停在 **12.5.705-beta.0**（"带 .node"集合里最新的一个；该集合中不存在非预发布版本）。
+#   白名单（含每版的产物清单与是否带 .node）见 cloudbridge/trtc-electron-sdk-linux-versions.json，
+#   由 backend/tests/contract/test_trtc_linux_sdk_version_pin_contract.py 守护。
+#
+# 为什么"主 install + 显式装指定版本"两步：package.json 是桌面端的 pin（禁改），
+# 主 install 会先按它装 13.4.802-beta.3（其 linux addon 下载会 404 并被脚本静默吞掉，
+# 下面的 fail-closed 校验会拦下这种状态）；随后用 --no-save 显式把 JS 包换成
+# linux 真的可用的版本，并触发该版本自己的 `install`→`download`，
+# 使 **node_modules 里的 JS 包与原生 addon 同版本成对**。
+ARG TRTC_ELECTRON_SDK_VERSION=12.5.705-beta.0
+
+RUN cd sidecar && npm install --no-audit --no-fund --foreground-scripts \
+    && npm install --no-save --no-audit --no-fund --foreground-scripts \
+         "trtc-electron-sdk@${TRTC_ELECTRON_SDK_VERSION}"
 
 # 原生 addon **fail-closed 校验**（2026-09-12 事故沉淀）
 # ---------------------------------------------------------------------------
@@ -90,20 +128,38 @@ RUN cd sidecar && npm install --no-audit --no-fund --foreground-scripts
 # 渲染进程 require('trtc-electron-sdk') 抛
 #   Cannot find module '../build/Release/trtc_electron_sdk.node'
 # 而这条错误在无头容器里既不进 stdout 也不落日志文件，藏了很久。
-# 这里做两件事：① 缺失则显式重下（有界重试，仅用于抵消网络抖动）；
-#              ② 仍缺失就让**构建失败**——宁可构建不过，也不产出坏镜像。
+# 这里做三件事（**全部 fail-closed，任何一条不满足即 exit 1**）：
+#   ① 缺失则显式重下（有界重试，仅用于抵消网络抖动）；
+#   ② 仍缺失、或存在但**为 0 字节**，都让**构建失败**——宁可构建不过，也不产出坏镜像；
+#   ③ 断言 node_modules 里 JS 包的 version **等于** $TRTC_ELECTRON_SDK_VERSION。
+#      ①② 同时也是上面"筛 2"的构建期执行者：CDN 上 zip 存在≠包内有 .node，
+#      这条校验是唯一能在构建期抓住"包内缺件"的关卡（DeployId 014 那版就是在这里会失败）。
+#      addon 的下载 URL 由该包自身 package.json 的 version 拼出（scripts/download.js），
+#      所以"JS 版本一致"是"addon 版本一致"的可验证代理；这条专门防 2026-09-16 那类
+#      「JS 包被换成 13.x、addon 却是 12.x（或干脆没有）」的漂移。
+#      同时把字节数与 sha256 打进构建日志，便于与线上产物逐次对账。
 RUN set -eu; cd sidecar; \
     ADDON=node_modules/trtc-electron-sdk/build/Release/trtc_electron_sdk.node; \
+    EXPECTED="${TRTC_ELECTRON_SDK_VERSION}"; \
     for attempt in 1 2 3; do \
-      if [ -f "$ADDON" ]; then break; fi; \
-      echo "[trtc-addon] missing; download attempt ${attempt}/3"; \
+      if [ -s "$ADDON" ]; then break; fi; \
+      echo "[trtc-addon] missing or empty; download attempt ${attempt}/3"; \
       ( cd node_modules/trtc-electron-sdk && npm run download ) || true; \
     done; \
-    if [ ! -f "$ADDON" ]; then \
-      echo "[trtc-addon] FATAL: 原生 addon 仍缺失（${ADDON}）；拒绝构建 TRTC 不可用的镜像"; \
+    if [ ! -s "$ADDON" ]; then \
+      echo "[trtc-addon] FATAL: 原生 addon 仍缺失或为 0 字节（${ADDON}）；拒绝构建 TRTC 不可用的镜像"; \
       exit 1; \
     fi; \
-    echo "[trtc-addon] OK: $(wc -c < "$ADDON") bytes"
+    ADDON_BYTES="$(wc -c < "$ADDON")"; \
+    ADDON_SHA="$(sha256sum "$ADDON" | cut -d' ' -f1)"; \
+    echo "[trtc-addon] OK: bytes=${ADDON_BYTES} sha256=${ADDON_SHA} path=${ADDON}"; \
+    INSTALLED="$(node -p 'require("./node_modules/trtc-electron-sdk/package.json").version')"; \
+    echo "[trtc-addon] JS package version=${INSTALLED} expected=${EXPECTED}"; \
+    if [ "$INSTALLED" != "$EXPECTED" ]; then \
+      echo "[trtc-addon] FATAL: node_modules 里 JS 包版本（${INSTALLED}）!= ARG TRTC_ELECTRON_SDK_VERSION（${EXPECTED}）；JS 与原生 addon 版本漂移，拒绝构建"; \
+      exit 1; \
+    fi; \
+    echo "[trtc-addon] fail-closed 校验通过（存在 + 非零字节 + 版本一致）"
 
 COPY cloudbridge ./cloudbridge
 
