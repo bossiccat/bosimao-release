@@ -1,66 +1,67 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  设计 Token — 深色冻结主题（Task 12 / DESIGN-DETAIL §7.1）
-  唯一来源：pet-ui/src/styles/design-tokens.json（bg #0B1118 / surface #121B24 / fg #F3F7FA /
-  accent #2BA8E0 / success #2FBF8F / warning #E3A93B / danger #E05A62）。
+  设计 Token — 商业化浅色主题（白底 + 绿色品牌色）
+  品牌绿 #16A34A / 浅绿底 #DCFCE7 / 深字 #052E16 / 错误红 #DC2626 / 背景白 #FFFFFF。
   业务布局与 Drawable 只能引用资源名，禁止写颜色字面量。
-  jax_color_* 为 DESIGN-DETAIL §7.1 语义名；jax_*/state_*/conn_* 为存量兼容别名（指向同一 token 值）。
+  jax_color_* 为语义名；jax_*/state_*/conn_* 为存量兼容别名（指向同一 token 值，
+  资源名保持不变，MainActivity / WaveformView / FloatingOverlay 等引用零改动）。
 -->
 <resources>
-    <!-- DESIGN-DETAIL §7.1 语义名（对应 design-tokens.json） -->
-    <color name="jax_color_bg">#0B1118</color>              <!-- color.identity.bg -->
-    <color name="jax_color_surface">#121B24</color>          <!-- color.identity.surface -->
-    <color name="jax_color_surface_raised">#182530</color>   <!-- color.identity.surfaceRaised -->
-    <color name="jax_color_surface_subtle">#0F1820</color>   <!-- color.slot.surfaceSubtle -->
-    <color name="jax_color_on_surface">#F3F7FA</color>       <!-- color.identity.fg -->
-    <color name="jax_color_on_surface_muted">#9EB0BE</color> <!-- color.identity.muted -->
-    <color name="jax_color_on_accent">#061117</color>        <!-- color.slot.fgOnAccent -->
-    <color name="jax_color_accent">#2BA8E0</color>           <!-- color.identity.accent -->
-    <color name="jax_color_accent_hover">#43B5E5</color>     <!-- color.slot.accentHover -->
-    <color name="jax_color_accent_active">#2295C8</color>    <!-- color.slot.accentActive -->
-    <color name="jax_color_border">#2A3B48</color>           <!-- color.identity.border -->
-    <color name="jax_color_border_soft">#20303C</color>      <!-- color.slot.borderSoft -->
-    <color name="jax_color_border_strong">#3A5161</color>    <!-- color.slot.borderStrong -->
-    <color name="jax_color_success">#2FBF8F</color>          <!-- color.semantic.success -->
-    <color name="jax_color_warning">#E3A93B</color>          <!-- color.semantic.warning（interrupted） -->
-    <color name="jax_color_error">#E05A62</color>            <!-- color.semantic.danger -->
-    <color name="jax_color_info">#6EC7ED</color>             <!-- color.semantic.info（connecting/recovering） -->
-    <color name="jax_color_focus">#78D3F5</color>            <!-- color.semantic.focus -->
-    <color name="jax_color_disabled_bg">#18222B</color>      <!-- color.slot.disabledBg -->
-    <color name="jax_color_disabled_fg">#6F808D</color>      <!-- color.slot.disabledFg -->
+    <!-- 语义名：白底 + 绿色品牌 -->
+    <color name="jax_color_bg">#FFFFFF</color>               <!-- 背景 -->
+    <color name="jax_color_surface">#FFFFFF</color>          <!-- 卡片面 -->
+    <color name="jax_color_surface_raised">#F0FDF4</color>   <!-- 卡内浮起面（浅绿） -->
+    <color name="jax_color_surface_subtle">#F8FAFC</color>   <!-- 细微底 -->
+    <color name="jax_color_on_surface">#052E16</color>       <!-- 深字 -->
+    <color name="jax_color_on_surface_muted">#64748B</color> <!-- 弱化字 -->
+    <color name="jax_color_on_accent">#FFFFFF</color>        <!-- 绿底上的白字 -->
+    <color name="jax_color_accent">#16A34A</color>           <!-- 品牌绿 -->
+    <color name="jax_color_accent_hover">#15803D</color>
+    <color name="jax_color_accent_active">#166534</color>
+    <color name="jax_color_accent_soft">#DCFCE7</color>      <!-- 浅绿底（徽章/波形底） -->
+    <color name="jax_color_border">#E2E8F0</color>           <!-- 卡片描边 -->
+    <color name="jax_color_border_soft">#EEF2F6</color>
+    <color name="jax_color_border_strong">#CBD5E1</color>
+    <color name="jax_color_success">#16A34A</color>
+    <color name="jax_color_warning">#94A3B8</color>          <!-- 中间态一律灰 -->
+    <color name="jax_color_error">#DC2626</color>            <!-- 错误红 -->
+    <color name="jax_color_info">#94A3B8</color>
+    <color name="jax_color_focus">#16A34A</color>
+    <color name="jax_color_disabled_bg">#F1F5F9</color>
+    <color name="jax_color_disabled_fg">#94A3B8</color>
     <color name="jax_color_overlay_stroke">#33000000</color>  <!-- overlay ball outline token -->
 
-    <!-- C extension：语音体验状态色（Task 8 十态） -->
-    <color name="jax_color_voice_idle">#9EB0BE</color>       <!-- voiceIdle = muted -->
-    <color name="jax_color_voice_connecting">#6EC7ED</color> <!-- voiceConnecting = info -->
-    <color name="jax_color_voice_listening">#2BA8E0</color>  <!-- voiceListening = accent -->
-    <color name="jax_color_voice_endpointing">#60B6DA</color>
-    <color name="jax_color_voice_thinking">#79A9D7</color>
-    <color name="jax_color_voice_speaking">#2FBF8F</color>   <!-- voiceSpeaking = success -->
-    <color name="jax_color_voice_interrupted">#E3A93B</color><!-- voiceInterrupted = warning -->
-    <color name="jax_color_voice_recovering">#6EC7ED</color> <!-- voiceRecovering = info -->
-    <color name="jax_color_voice_error">#E05A62</color>      <!-- voiceError = danger -->
+    <!-- 语音体验状态色（绿=正常、灰=空闲/中间态、红=错误） -->
+    <color name="jax_color_voice_idle">#94A3B8</color>
+    <color name="jax_color_voice_connecting">#94A3B8</color>
+    <color name="jax_color_voice_listening">#16A34A</color>
+    <color name="jax_color_voice_endpointing">#16A34A</color>
+    <color name="jax_color_voice_thinking">#16A34A</color>
+    <color name="jax_color_voice_speaking">#16A34A</color>
+    <color name="jax_color_voice_interrupted">#94A3B8</color>
+    <color name="jax_color_voice_recovering">#94A3B8</color>
+    <color name="jax_color_voice_error">#DC2626</color>
 
-    <!-- 存量兼容别名（Java/布局现有引用；值 = 上方对应 token，深色冻结） -->
-    <color name="jax_accent">#2BA8E0</color>
-    <color name="jax_muted">#9EB0BE</color>
-    <color name="jax_bg">#0B1118</color>
-    <color name="jax_surface">#121B24</color>
-    <color name="jax_surface2">#182530</color>
-    <color name="jax_fg">#F3F7FA</color>
-    <color name="jax_fg2">#9EB0BE</color>
-    <color name="jax_border">#2A3B48</color>
+    <!-- 存量兼容别名（Java/布局现有引用；值 = 上方对应 token） -->
+    <color name="jax_accent">#16A34A</color>
+    <color name="jax_muted">#64748B</color>
+    <color name="jax_bg">#FFFFFF</color>
+    <color name="jax_surface">#FFFFFF</color>
+    <color name="jax_surface2">#F0FDF4</color>
+    <color name="jax_fg">#052E16</color>
+    <color name="jax_fg2">#334155</color>
+    <color name="jax_border">#E2E8F0</color>
 
-    <!-- 语音状态色（MainActivity 六态显示；深色冻结语义映射） -->
-    <color name="state_idle">#9EB0BE</color>
-    <color name="state_monitoring">#2FBF8F</color>
-    <color name="state_listening">#2BA8E0</color>
-    <color name="state_thinking">#79A9D7</color>
-    <color name="state_speaking">#2FBF8F</color>
-    <color name="state_alerting">#E05A62</color>
+    <!-- 语音状态色（MainActivity 六态显示） -->
+    <color name="state_idle">#94A3B8</color>
+    <color name="state_monitoring">#16A34A</color>
+    <color name="state_listening">#16A34A</color>
+    <color name="state_thinking">#16A34A</color>
+    <color name="state_speaking">#16A34A</color>
+    <color name="state_alerting">#DC2626</color>
 
     <!-- 连接状态 -->
-    <color name="conn_connected">#2FBF8F</color>
-    <color name="conn_connecting">#E3A93B</color>
-    <color name="conn_disconnected">#9EB0BE</color>
+    <color name="conn_connected">#16A34A</color>
+    <color name="conn_connecting">#94A3B8</color>
+    <color name="conn_disconnected">#94A3B8</color>
 </resources>
