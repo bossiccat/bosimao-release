@@ -7,7 +7,7 @@
       connect -> reverse tunnel -> clock sync -> silent baseline
       -> session establish -> N-second capture -> gain recompute -> export logs
 
-    Manual equivalent: outputs/device-capture-sop-2026-09-07.md
+    Manual equivalent: docs/reports/device-capture-sop-2026-09-07.md
 
     Windows PowerShell 5.1 compatible:
       - no '??' operator, no ternary '?:'  (both are PS7+ only)
@@ -406,7 +406,7 @@ if (-not $script:Aborted) {
         Write-Ok ("电平样本 {0} 条，gate 开放率 {1}%，out 中位 {2} / 最大 {3}" -f $lvl.Count, $rate, $outMed, $outMax)
         if ($outMax -gt 5000) { Write-Warn "out 超过 5000（上界）：存在削波，增益仍需下调" }
         if ($rate -gt 50)     { Write-Warn "gate 开放率 > 50%：疑噪声门常开（历史故障值 98.8%），检查静默基线" }
-        Write-Info "详细判据见 outputs/device-capture-sop-2026-09-07.md §6.4"
+        Write-Info "详细判据见 docs/reports/device-capture-sop-2026-09-07.md §6.4"
     }
 }
 
@@ -463,5 +463,5 @@ if ($script:Aborted) {
     exit 1
 }
 Write-Host ""
-Write-Host "证据包完整。按 outputs/device-capture-sop-2026-09-07.md §8 做交付前自检。" -ForegroundColor Green
+Write-Host "证据包完整。按 docs/reports/device-capture-sop-2026-09-07.md §8 做交付前自检。" -ForegroundColor Green
 exit 0

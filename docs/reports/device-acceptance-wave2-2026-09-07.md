@@ -14,7 +14,7 @@
 
 三条判定依据：
 
-1. 商用门禁不可判 —— TTFP / TTS TTFB / barge-in 三条**全部无实测样本**（逐项状态见 `outputs/commercial-metrics-baseline-2026-09-07.md`）。
+1. 商用门禁不可判 —— TTFP / TTS TTFB / barge-in 三条**全部无实测样本**（逐项状态见 `docs/reports/commercial-metrics-baseline-2026-09-07.md`）。
 2. 真机证据缺失 —— 09-07 当天 `adb connect 100.75.48.99:46813` → `10061 主动拒绝`（手机无线调试未开），PCM、声学、逐帧对账全部取不到。
 3. 10.1s 首包无法拆分归因 —— 「response.created → 手机 firstAudioFrame 10.1s」已由 09-06 会话实锤，但**本地侧各跳耗时尚无可引用的实测数据**，因此拆不出各段占比；直接缺口是 Android 侧 L5（`onFirstAudioFrame`）未接入 F6/F7 trace。补齐 L5 后可一轮定位。
 
@@ -89,7 +89,7 @@
 - **影响**：C1/C4 的增益修复**没有任何真机样本**证明 out RMS 落在 2000~5000 目标区间。
 - **已就绪**：`1b0e6f5` 的 `JAX_DOWN_PCM_DUMP=logs/dump/p0test-2306` 已写进根 `.env`（Load-Env 统一注入，watchdog 拉起的任何实例都自带开关）。
 - **未修部分**：**零真实 PCM**。且固定前缀会被后续会话覆盖，取证后必须立刻收、收完从 `.env` 移除开关。
-- **修复方向**：adb 通后按 `outputs/device-capture-sop-2026-09-07.md` 采一轮，会话结束立刻收 `.pcm` / `.up.pcm` / `.meta.json`。
+- **修复方向**：adb 通后按 `docs/reports/device-capture-sop-2026-09-07.md` 采一轮，会话结束立刻收 `.pcm` / `.up.pcm` / `.meta.json`。
 - **本轮不修的原因**：纯环境依赖，无代码动作可做。
 
 ---
@@ -167,10 +167,10 @@
 
 | 文件 | 内容 |
 |------|------|
-| `outputs/device-acceptance-wave2-2026-09-07.md` | 本文（主报告） |
-| `outputs/device-capture-sop-2026-09-07.md` | 真机取证 SOP（adb 恢复后照做） |
-| `outputs/commercial-metrics-baseline-2026-09-07.md` | GPT-Live 门禁 vs 实测，逐项标差距 |
-| `outputs/internal-latency-budget-2026-09-07.md` | 延迟预算增补页（基线页为 `-2026-09-06`） |
+| `docs/reports/device-acceptance-wave2-2026-09-07.md` | 本文（主报告） |
+| `docs/reports/device-capture-sop-2026-09-07.md` | 真机取证 SOP（adb 恢复后照做） |
+| `docs/reports/commercial-metrics-baseline-2026-09-07.md` | GPT-Live 门禁 vs 实测，逐项标差距 |
+| `docs/reports/internal-latency-budget-2026-09-07.md` | 延迟预算增补页（基线页为 `-2026-09-06`） |
 | `outputs/f6f7-downlink-trace-2026-09-07.md` | F6/F7 实施与验证 |
 | `outputs/market-benchmark-realtime-voice-2026-09-06.md` | 外部基准 |
 | `scripts/device-acceptance-capture.ps1` | 取证一键脚本（PS 5.1，已通过语法解析 + 失败路径冒烟） |

@@ -107,7 +107,9 @@ backend/data/*.sqlite3-wal
 backend/data/*.sqlite3-shm
 
 # QA/任务临时输出（一次性产物，禁止提交）
-qa-*/
+# ⚠️ 必须锚定到根：不锚定会吞掉 sidecar-smoke/qa-phone/（3 个**已入库**的冒烟测试源码）。
+# 根级确有 14 个 qa-task*/qa-cargo-probe* 一次性目录，锚定后原意不变。
+/qa-*/
 qa_*.txt
 qa_*.py
 qa_*.bat
