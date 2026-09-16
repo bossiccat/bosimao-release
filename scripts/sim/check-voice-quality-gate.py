@@ -39,6 +39,21 @@ MIN_RATIO_SPEECH = 0.85
 REQUIRE_DOWNLINK_DROPS_ZERO = True
 REQUIRE_BARGE_EMIT_MS = True
 
+# ---- 缺席语义：**唯一一处定义，所有站点共用** ----
+# 受门禁约束的项「没测到」一律判 FAIL。依据是同文件早就写下的原文：
+# `ratio_speech` 那条缺席判 FAIL 时的措辞「不接受缺席，宁可不报」。
+# 为什么必须统一：此前五处站点出现过**三种口径**（FAIL / 仅告警 / 静默通过），
+# 其中 `_check_clean([])` 判 FAIL 而 `_check_barge([])` 只告警 —— **同一个条件两种判决**，
+# 而规则从未被写下来过（全靠夹具隐式表达）。后果是 `queue_drops_down` 的缺席被静默放行，
+# 成了零前置条件的假绿通道（一次 5s 桥指标读超时即可触发）。
+ABSENCE_RULE = "不接受缺席，宁可不报"
+
+
+def _absent(subject: str, detail: str = "") -> str:
+    """受门禁约束的项「没测到」时的**统一**判据（所有站点都走这里）。"""
+    sep = "" if subject and "\u4e00" <= subject[-1] <= "\u9fff" else " "
+    return f"{subject}{sep}不可得{detail} —— {ABSENCE_RULE}"
+
 
 class GateRefusal(RuntimeError):
     """门禁前置条件不满足 —— 拒绝出数，绝不用「跳过」冒充「通过」。"""
@@ -85,7 +100,7 @@ def _run_repeat(rounds: int, *, barge: bool) -> list[dict]:
 def _check_clean(rows: list[dict]) -> tuple[list[str], list[str]]:
     fails, warns = [], []
     if not rows:
-        fails.append("clean 轮次为空")
+        fails.append(_absent("clean 轮次"))
         return fails, warns
     for r in rows:
         tag = f"轮 {r.get('run')}"
@@ -94,7 +109,7 @@ def _check_clean(rows: list[dict]) -> tuple[list[str], list[str]]:
             continue
         ratio = r.get("ratio_speech")
         if ratio is None:
-            fails.append(f"{tag}: 语速比不可得（文本提取或参照不可用）—— 不接受缺席，宁可不报")
+            fails.append(f"{tag}: " + _absent("语速比", "（文本提取或参照不可用）"))
         elif ratio < MIN_RATIO_SPEECH:
             fails.append(f"{tag}: 语速比 {ratio} < {MIN_RATIO_SPEECH} ⇒ **下行丢了音频**（不是模型说得快）")
         # ⚠️ 缺席（None / 键不存在）必须判 FAIL，与上面 `ratio_speech is None` 的缺席语义
@@ -105,7 +120,7 @@ def _check_clean(rows: list[dict]) -> tuple[list[str], list[str]]:
         # 取默认 ⇒ 字段整体缺失，而那一轮可能真的跑成功了。
         drops_down = r.get("queue_drops_down")
         if REQUIRE_DOWNLINK_DROPS_ZERO and drops_down is None:
-            fails.append(f"{tag}: queue_drops_down 不可得（桥指标未取到）—— 不接受缺席，宁可不报")
+            fails.append(f"{tag}: " + _absent("queue_drops_down", "（桥指标未取到）"))
         elif drops_down:
             fails.append(f"{tag}: queue_drops_down={drops_down} ≠ 0")
         down_age = [l for l in (r.get("age_drop_lines") or []) if "[down]" in l]
@@ -120,7 +135,7 @@ def _check_clean(rows: list[dict]) -> tuple[list[str], list[str]]:
 def _check_barge(rows: list[dict]) -> tuple[list[str], list[str]]:
     fails, warns = [], []
     if not rows:
-        warns.append("未跑打断轮次")
+        fails.append(_absent("打断轮次（未跑）"))
         return fails, warns
     for r in rows:
         tag = f"打断轮 {r.get('run')}"

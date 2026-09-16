@@ -157,3 +157,33 @@ def test_barge_without_bridge_log_is_a_failure() -> None:
         "run": 1, "barge_in_attempted": True,
         "barge_stop": ["barge_in stop old_reply=x:1 frames=61 stop_ms=0 residual=158 reason=down_silent"]}])
     assert any("emit_stop_ms" in f for f in fails2), "裸 stop_ms= 是已废弃的错口径，必须判 FAIL"
+
+def test_absence_semantics_is_uniform_across_the_gate() -> None:
+    """**缺席语义必须统一** —— 同一个条件不能有两种判决。
+
+    2026-09-16 实测：门禁对「这一项根本没测到」共有**三种**口径
+    （`ratio_speech`=FAIL / `queue_drops_down`=静默通过 / 空轮次=FAIL 或告警），
+    其中 `_check_clean([])` 判 FAIL 而 `_check_barge([])` 只告警 ——
+    **同一个条件、同一份文件、两种相反判决**，而规则从未被写下来过。
+    后果之一是 `queue_drops_down` 的缺席被静默放行，成了零前置条件的假绿通道。
+
+    这条用例钉住"统一"本身：两个检查的空轮次必须**同为 FAIL**。
+    它比"逐站点补断言"更能防复发 —— 后者挡不住下一个字段又漂出去。
+    """
+    gate = _load_gate()
+    fails_clean, _ = gate._check_clean([])
+    fails_barge, _ = gate._check_barge([])
+    assert fails_clean, "_check_clean([]) 必须判 FAIL（缺席 ≠ 合格）"
+    assert fails_barge, (
+        "_check_barge([]) 必须与 _check_clean([]) 同类判决（同为 FAIL）；"
+        f"实测只告警：{fails_barge!r}"
+    )
+
+
+def test_all_absence_messages_share_one_rule() -> None:
+    """缺席消息必须由同一处规则生成（避免措辞各自漂移）。"""
+    gate = _load_gate()
+    for fails in (gate._check_clean([])[0], gate._check_barge([])[0]):
+        assert any(gate.ABSENCE_RULE in f for f in fails), (
+            f"缺席消息未走统一规则：{fails}（期望含 {gate.ABSENCE_RULE!r}）"
+        )
