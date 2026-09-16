@@ -67,9 +67,86 @@ _SIM_LOG_FILES = ("sidecar-phone.log", "sidecar-main-diag.log")
 # 有效信息（容器里没有 system bus）。不过滤掉会把真正的死因挤出尾部窗口。
 _NOISE_RE = re.compile(r"bus\.cc\(\d+\)|Failed to connect to the bus")
 
+# ---------------------------------------------------------------------------
+# 事件环（按标记过滤）——为什么必须有第二个环
+# ---------------------------------------------------------------------------
+# `output_tail` 是「最近 N 行」的**无差别**环，它的容量对齐的是「崩溃现场的全部上下文」。
+# 但真实 sidecar 打开 --enable-logging=stderr 后，TRTC 音量回调**每 500ms** 打一条
+# `[VOL] [:0] total=0`（实测：sidecar/logs/sidecar-sidecar.log），300 行只够盖约
+# 2 分钟 ⇒ `[ROOM] 进房成功（elapsed=…）/ 进房失败 errCode=…`、`[SIG] 意图轮询`、
+# `[PEER] 远端加入`、`[BOOT] role=sidecar` 这些「一行定生死」的行全被挤出窗口。
+# 而本 CloudRun 的 CLS 主题只支持 queryString="*" 全量检索，关键词过滤返回 null
+# （已实测）——外部**没有任何手段**能把那一刻的行捞回来。
+# ⇒ 判据必须由 `/status` 自己带出来：这里再维护一个**只装可判定事件**的环，
+#    条数按「事件」计，因此它覆盖的时间尺度比 output_tail 大一个量级。
+EVENT_TAIL_LINES = 200
+
+# 事件标记集合（大小写不敏感的**子串**匹配）。
+#
+# **为什么明确排除 `[VOL]`**：TRTC 音量回调每 500ms 一条，只贡献体积、不贡献信息，
+# 正是它把 300 行的 output_tail 压到约 2 分钟；放进事件环等于把进房/信令事件再挤出去
+# 一次。音量曲线若真需要，应另开一条带采样的专用通道，而不是污染事件账本。
+# （判定顺序也由此固定：先挡噪声，再看标记——见 is_event_line。）
+EVENT_MARKERS = (
+    "BOOT", "SIG", "ROOM", "PEER", "PCM", "UPRMS", "STAT",
+    "ERR", "WARN", "error", "Error", "FATAL",
+    "失败", "进房", "errCode", "hello-redeem", "rtc session", "ws connected",
+    "Cannot find module",
+)
+
+# 不进事件环的高频噪声行。`[VOL]` 独立成条：即使某条音量行里偶然带了别的标记词，
+# 也不得因此漏进事件环（「每 500ms 一条」的噪声一旦漏进来就重演今天的问题）。
+_EVENT_NOISE_RE = re.compile(r"\[VOL\]", re.IGNORECASE)
+
+_LOWERED_EVENT_MARKERS = tuple(marker.lower() for marker in EVENT_MARKERS)
+
+# 进房结果行的判据与取值（`/status.sidecar.last_join` 的唯一来源）。
+# 真实格式（sidecar/rtc.js:207 / :221）：
+#   `[ROOM] 进房成功（elapsed=348ms）` / `[ROOM] 进房失败 errCode=-1001`
+_JOIN_SUCCESS_MARK = "进房成功"
+_JOIN_FAILURE_MARK = "进房失败"
+_JOIN_ELAPSED_RE = re.compile(r"(\d+)\s*ms", re.IGNORECASE)
+_JOIN_ERRCODE_RE = re.compile(r"errCode\s*[:=]\s*(-?\d+)", re.IGNORECASE)
+
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
+
+def is_event_line(line: str) -> bool:
+    """这一行是否值得进事件环：先挡高频噪声，再看是否命中任一标记。
+
+    噪声判定**优先于**标记匹配：音量行里若偶然出现标记词，也不得漏进来。
+    """
+    if _EVENT_NOISE_RE.search(line):
+        return False
+    lowered = line.lower()
+    return any(marker in lowered for marker in _LOWERED_EVENT_MARKERS)
+
+
+def extract_last_join(events: list[str]) -> dict | None:
+    """从事件环里取**最后一次**进房结果，让一条 GET /status 直接回答「进房了没有」。
+
+    为什么单拎成一个字段：读的人不该去 200 行里翻行序，也不该依赖窗口还剩多少——
+    2026-09-16 的误判正是这么发生的（掐秒抓日志、还抓错了一次）。
+
+    - 最后一次为准：失败那次必须盖掉成功那次，否则「上一轮成功、这一轮失败」会被
+      读成一切正常。
+    - 解析不出 elapsed/errCode 时对应字段为 `None`，**原文始终原样保留**（至少还能看）。
+    - 从未出现过进房行 ⇒ 返回 `None`；这与「尝试过但失败」是两件不同的事。
+    """
+    for line in reversed(events):
+        if _JOIN_SUCCESS_MARK not in line and _JOIN_FAILURE_MARK not in line:
+            continue
+        elapsed = _JOIN_ELAPSED_RE.search(line)
+        errcode = _JOIN_ERRCODE_RE.search(line)
+        return {
+            "outcome": "failure" if _JOIN_FAILURE_MARK in line else "success",
+            "line": line,
+            "elapsed_ms": int(elapsed.group(1)) if elapsed else None,
+            "err_code": int(errcode.group(1)) if errcode else None,
+        }
+    return None
 
 
 class Child:
@@ -78,9 +155,17 @@ class Child:
     为什么要保留输出尾部：容器崩溃后由平台重启，**上一次的 stdout 会随容器消失**
     且该服务的输出不进入可检索日志（实测 CLS 只有网关访问日志）。若不在进程内留住
     证据，就只能靠猜。状态端点会把这些尾部回报出来——崩溃自我解释，不依赖平台日志。
+
+    这里维护**两个**环（并列，互不改写）：
+      - `output_tail`：最近 N 行，无差别，回答「最后发生了什么」；
+      - `events`：只装命中标记的可判定事件（见 EVENT_MARKERS），回答「关键事件发生过
+        什么」。它存在的理由与 `[VOL]` 噪声有关，详见本文件顶部的说明。
     """
 
     TAIL_LINES = 120
+    # 事件环容量（为什么是「按事件计」而不是「按行计」，见 EVENT_TAIL_LINES 说明）。
+    # 设为类属性，便于替身与测试覆盖而不必改构造签名。
+    EVENT_LINES = EVENT_TAIL_LINES
 
     def __init__(self, name: str, argv: list[str], cwd: Path, extra_env: dict[str, str],
                  *, liveness: bool = True, tail_lines: int | None = None) -> None:
@@ -97,11 +182,29 @@ class Child:
         self.exit_code: int | None = None
         self.starts = 0
         self.tail: list[str] = []
+        self.events: list[str] = []
         self._lock = threading.Lock()
         env = dict(os.environ)
         env.update(extra_env)
         self._env = env
         self.proc: subprocess.Popen | None = None
+
+    def _ingest(self, line: str) -> None:
+        """把一行输出写进两个环：无差别的 `output_tail` 与按标记过滤的 `events`。
+
+        两个环都要：`output_tail` 是「崩溃现场的全部上下文」，**语义与容量保持不变**
+        （已有人在读它）；`events` 是事件账本，无论过多久都能被一条 GET 读到。
+        """
+        is_event = is_event_line(line)
+        with self._lock:
+            self.tail.append(line)
+            if len(self.tail) > self.tail_lines:
+                del self.tail[: len(self.tail) - self.tail_lines]
+            if not is_event:
+                return
+            self.events.append(line)
+            if len(self.events) > self.EVENT_LINES:
+                del self.events[: len(self.events) - self.EVENT_LINES]
 
     def _pump(self, stream) -> None:
         try:
@@ -113,10 +216,7 @@ class Child:
                 # 的信号挤出尾部窗口——实测正是它让「渲染器没起来」看起来毫无输出。
                 if _NOISE_RE.search(line):
                     continue
-                with self._lock:
-                    self.tail.append(line)
-                    if len(self.tail) > self.tail_lines:
-                        del self.tail[: len(self.tail) - self.tail_lines]
+                self._ingest(line)
                 logger.info("[%s] %s", self.name, line)
         except Exception:  # 读管道失败不应影响监督逻辑
             return
@@ -153,12 +253,22 @@ class Child:
     def describe(self) -> dict:
         with self._lock:
             tail = list(self.tail)
+            # 替身（`Child.__new__`，既有契约测试就是这么构造的）没有 events；
+            # 与 audio / _tls_material 的容错读法保持一致。
+            events = list(getattr(self, "events", []))
         return {
             "alive": self.alive(),
             "pid": None if self.proc is None else self.proc.pid,
             "starts": self.starts,
             "exit_code": self.exit_code,
             "output_tail": tail,
+            # events：只装可判定事件（进房/信令/对端/音频/错误…），滤掉 `[VOL]` 这类
+            # 高频噪声。它与 output_tail 并列：后者是「最近 N 行」，会被噪声按时间挤空；
+            # 前者按事件条数存活，因此窗口覆盖的时间尺度大一个量级。
+            "events": events,
+            # last_join：最近一次进房结果（成功/失败 + elapsed + errCode），
+            # 一次 GET /status 即可判定，不必再去翻尾巴。从未进房则为 null。
+            "last_join": extract_last_join(events),
         }
 
 
