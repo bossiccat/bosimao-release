@@ -1,13 +1,16 @@
-/* Source: commercial-upgrade-SPEC.md v1.1 + commercial-upgrade-DESIGN.md */
+/* Source: commercial-upgrade-SPEC.md v1.1 + commercial-upgrade-DESIGN.md
+   商业化改版 2026-09-16：白底 + 绿色品牌色（与移动端一致）
+   - 主色 #16A34A、浅 #DCFCE7、深字 #052E16、错误 #DC2626
+   - 浅色玻璃/白底卡片感，阴影克制 */
 :root {
   /* A1 identity */
-  --bg: #0b1118;
-  --surface: #121b24;
-  --surface-raised: #182530;
-  --fg: #f3f7fa;
-  --muted: #9eb0be;
-  --accent: #2ba8e0;
-  --border: #2a3b48;
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-raised: #f4faf5;
+  --fg: #052e16;
+  --muted: #4e6157;
+  --accent: #16a34a;
+  --border: #d7e3da;
   --font-display: "Noto Sans SC", "Segoe UI", sans-serif;
   --font-body: "Noto Sans SC", "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", "Consolas", monospace;
@@ -64,11 +67,11 @@
   --icon-standalone: 24px;
 
   /* A2 semantic */
-  --success: #2fbf8f;
-  --warn: #e3a93b;
-  --danger: #e05a62;
-  --info: #6ec7ed;
-  --focus: #78d3f5;
+  --success: #16a34a;
+  --warn: #d97706;
+  --danger: #dc2626;
+  --info: #0e7490;
+  --focus: #16a34a;
   --motion-instant: 80ms;
   --motion-fast: 150ms;
   --motion-base: 200ms;
@@ -79,21 +82,22 @@
 
   /* B slot */
   --fg-2: var(--muted);
-  --accent-on: #061117;
-  --surface-subtle: #0f1820;
+  --accent-on: #ffffff;
+  --accent-soft: #dcfce7;
+  --surface-subtle: #f0f7f2;
   --surface-interactive: var(--surface-raised);
-  --border-soft: #20303c;
-  --border-strong: #3a5161;
-  --accent-hover: #43b5e5;
-  --accent-active: #2295c8;
-  --disabled-bg: #18222b;
-  --disabled-fg: #6f808d;
-  --overlay: #071017cc;
+  --border-soft: #e8f0ea;
+  --border-strong: #b9ccc0;
+  --accent-hover: #15803d;
+  --accent-active: #166534;
+  --disabled-bg: #eef3ef;
+  --disabled-fg: #9aa8a0;
+  --overlay: #052e1673;
   --elev-flat: none;
   --elev-ring: 0 0 0 1px var(--border);
-  --elev-raised: 0 8px 24px #050a0f52;
-  --elev-modal: 0 16px 40px #050a0f73;
-  --focus-ring: 0 0 0 3px #78d3f559;
+  --elev-raised: 0 8px 24px #052e161a;
+  --elev-modal: 0 16px 40px #052e1624;
+  --focus-ring: 0 0 0 3px #16a34a59;
   --button-primary-bg: var(--accent);
   --button-primary-fg: var(--accent-on);
   --button-primary-hover: var(--accent-hover);
@@ -111,13 +115,14 @@
   --panel-radius: var(--radius-lg);
   --panel-padding: var(--space-5);
 
-  /* C extension: product-specific voice status */
-  --voice-idle: var(--muted);
-  --voice-connecting: var(--info);
-  --voice-listening: var(--accent);
-  --voice-endpointing: #60b6da;
-  --voice-thinking: #79a9d7;
-  --voice-speaking: var(--success);
+  /* C extension: product-specific voice status
+     状态色环契约（商业化 2026-09-16）：空闲=灰绿、聆听=绿、通话=深绿、错误=红 */
+  --voice-idle: #8fa69a;
+  --voice-connecting: #4ade80;
+  --voice-listening: #16a34a;
+  --voice-endpointing: #22c55e;
+  --voice-thinking: #15803d;
+  --voice-speaking: #166534;
   --voice-interrupted: var(--warn);
   --voice-recovering: var(--info);
   --voice-error: var(--danger);
