@@ -15,11 +15,16 @@
 
 指标口径（必须写清，否则数字会被误读）
 --------------------------------------
-- `utterance_ms`：上行帧数 × 20ms —— 含 phone.js 固定补的 2s 尾部静音；
-- `speech_ms`：`utterance_ms - 尾部静音`；
+- `utterance_ms`：上行帧数 × 20ms —— **就是被推上去的 wav 时长本身**。
+  phone.js:114 的 `stats.upFrames += 1` 只在 wav 分帧循环里；:123-129 后补的
+  2s 尾部静音**一帧都不计**。实测自洽：wav=99840B ⇒ 3.12s，日志同时报
+  `wav 推完（156帧）` 与 `上行 156帧`，156 × 20ms = 3120ms 恰等于 wav 时长；
+- `speech_ms`：与 `utterance_ms` 同值 —— 已计入的帧全是 wav 帧，没有静音帧可减
+  （旧实现减掉一个固定 2000ms，把 3.12s 报成 1.12s）；
 - `first_reply_ms`：手机模拟器自报的「自上行开始到首个回复帧」；
-- `reply_after_speech_ms`：`first_reply_ms - speech_ms` —— **这才是与「用户说完到听见」
-  可比的量**，商业化目标区间见 docs/audits 里的 TTFB 口径（p95 < 700ms）。
+- `reply_after_speech_ms`：`first_reply_ms - utterance_ms` —— **这才是与「用户说完到听见」
+  可比的量**（用户说完 == wav 推完 == utterance_ms），商业化目标区间见 docs/audits 里的
+  TTFB 口径（p95 < 700ms）。
 """
 from __future__ import annotations
 
@@ -30,8 +35,6 @@ import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# phone.js 固定补的尾部静音（对齐模型 VAD 的"说完"判定）
-TAIL_SILENCE_MS = 2000
 FRAME_MS = 20
 
 # 有效能量门限：**必须**与 sidecar/phone.js:272 的 SPEECH_RMS 一致，否则两端口径不同。
@@ -51,13 +54,17 @@ _NO_REPLY = re.compile(r"hold=(\d+)s 内未收到回复")
 _ENTER = re.compile(r"进房成功 (\d+)ms")
 _ENTER_FAIL = re.compile(r"进房失败 (-?\d+)")
 _SIGN_FAIL = re.compile(r"PHONE_SESSION_SIGN_FAILED")
+# `[PHONE] ` 这种带方括号的前缀是**真实落盘形态**：sidecar/logger.js:19 统一拼成
+# `[ISO时间] [scope] msg`。裸 `PHONE ` 只出现在历史日志与部分合成夹具里，两种都要认，
+# 否则解析恒为 None（实测 e2e-summary.json 的 remote_ready_ms 就是这样变 null 的）。
+_PHONE_TAG = r"\[?PHONE\]?"
 # 带业务码的签发失败：phone.js 在 /session 被拒时打印服务端错误码（可能为负）。
-_SIGN_FAIL_CODE = re.compile(r"PHONE 签发失败 code=(-?\d+)")
+_SIGN_FAIL_CODE = re.compile(rf"{_PHONE_TAG} 签发失败 code=(-?\d+)")
 _RUNTIME_FATAL = re.compile(r"PHONE_RUNTIME_FATAL")
 _WAV_PUSHED = re.compile(r"wav=(\S+) (\d+)B")
 # 模拟器等待对端（sidecar）进房的握手：就绪则记录耗时，超时则继续上行并留一条 note。
-_REMOTE_READY = re.compile(r"PHONE 远端就绪 @(\d+)ms")
-_REMOTE_TIMEOUT = re.compile(r"PHONE 远端未就绪（(\d+)ms 超时，继续上行）")
+_REMOTE_READY = re.compile(rf"{_PHONE_TAG} 远端就绪 @(\d+)ms")
+_REMOTE_TIMEOUT = re.compile(rf"{_PHONE_TAG} 远端未就绪（(\d+)ms 超时，继续上行）")
 
 
 @dataclass
@@ -88,20 +95,38 @@ class PhoneSimMetrics:
 
     @property
     def utterance_ms(self) -> int:
+        """上行帧数 × 20ms —— 就是被推上去的 wav 时长，**不含** phone.js 补的 2s 尾部静音。
+
+        phone.js:114 的 `stats.upFrames += 1` 只在 wav 分帧循环里；:123-129 的 2s 静音
+        循环只发帧、不计数。156 帧 × 20ms = 3120ms 恰好等于该轮 wav 的 99840B ÷ 2 ÷ 16000。
+        """
         return self.up_frames * FRAME_MS
 
     @property
     def speech_ms(self) -> int:
-        return max(0, self.utterance_ms - TAIL_SILENCE_MS)
+        """与 `utterance_ms` 同值 —— 已计入的帧全是 wav 帧，没有静音帧可减。
+
+        ⚠️ 口径修正（2026-09-16，真实产物三方互证）：此前这里写
+        `max(0, utterance_ms - TAIL_SILENCE_MS)`，前提是「upFrames 含 phone.js 补的
+        2s 尾部静音」—— **该前提是错的**。实测 outputs/deploy-backup-20260911：
+        `sidecar-phone.log` 报 `wav 推完（156帧），补 2s 静音` 与 `上行 156帧`，
+        wav 自身 99840B ⇒ 3.12s = 156×20ms，而 e2e-summary.json 里
+        `utterance_ms=3120 / speech_ms=1120` —— 静音一帧未计，这个减法把 3.12s 报成 1.12s。
+        """
+        return self.utterance_ms
 
     @property
     def reply_after_speech_ms(self) -> int | None:
         """**用户说完 → 手机听到第一帧回复**（与商业 TTFB 口径可比）。
 
-        ⚠️ 口径修正（2026-09-12）：这里必须减掉 **utterance_ms**（即「说话 + 模拟器刻意
-        补的 2s 尾部静音」全部上行时长），而不是 speech_ms。原因：`first_reply_ms` 是从
-        **上行开始**计的，而模型必须先收到尾部静音才会触发 VAD「说完」判定；只减 speech_ms
-        会把那 2 秒噪声算成模型延迟 —— 实测因此把 1.86s 报成 3.86s（虚高一倍以上）。
+        口径：`first_reply_ms` 自**上行第一帧**起计（phone.js:108 的 `upStartTs`），
+        而用户说完的那一刻就是 wav 推完那一刻，即 `utterance_ms`。故这里减
+        `utterance_ms` 得到的就是「说完 → 听见」。实测 4577 - 3120 = 1457ms。
+
+        ⚠️ 旧注释把理由写成「必须减 utterance_ms 而不是 speech_ms，因为 utterance 含
+        刻意补的 2s 尾部静音把 2 秒算成模型延迟」—— 那个理由建立在**错误前提**上
+        （静音从未被计入 utterance_ms）。结论（减 utterance_ms）恰好仍然正确，
+        因为 utterance_ms 现在正是「用户说完」的时刻，而 speech_ms 与它同值。
         """
         if self.first_reply_ms is None:
             return None

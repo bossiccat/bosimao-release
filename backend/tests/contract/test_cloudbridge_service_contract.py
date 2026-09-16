@@ -325,34 +325,58 @@ def _load_sim_phone():
     return module
 
 
+# ⚠️ 这段是**逐行来自真实抓取**，不是手写合成。
+#   出处：outputs/deploy-backup-20260911/sidecar-logs-phone/sidecar-phone.log
+#         （2026-09-16T00:44 一轮真实 TRTC 端到端模拟），
+#         数字与 outputs/deploy-backup-20260911/e2e-summary.json 的 metrics 段三方互证
+#         （远端就绪 2331 / 进房 348 / 首包 4577 / 上行 156 / 回复 151 / 有效语音 64）。
+#   格式是 sidecar/logger.js:19 的 `[ISO] [scope] msg`，即**真机上带 `[PHONE] ` 前缀**。
+#   旧版本这里写的是凭空合成的「上行 350帧 / 首包 3120ms」——那不是任何一次真实抓取，
+#   而且它把「phone.js 补的 2s 尾部静音」当成计入了上行帧（据此算出 speech_ms=5000），
+#   前提是错的：phone.js:114 的 upFrames 只在 wav 分帧循环里加，:123-129 的静音循环不计帧。
 REAL_PHONE_LOG = [
-    "PHONE 进房 room=jax-sim-phone user=jax-sim-phone",
-    "PHONE 进房成功 120ms",
-    "PHONE wav=/srv/sim/prompt.wav 96000B（16k s16）",
-    "PHONE 首包回复 @3120ms（自上行开始）",
-    "PHONE 收到了回复 88帧/26KB，2s 后退出",
-    "PHONE 回复已保存: /srv/sim/reply.wav（56320B）",
-    "PHONE 上行 350帧 / 回复 88帧",
+    "[2026-09-16T00:44:20.815Z] [PHONE] 进房 room=jax-f068f119 user=f068f119",
+    "[2026-09-16T00:44:20.818Z] [PHONE] wav=/srv/sim/sim-prompt-run1.wav 99840B（16k s16）",
+    "[2026-09-16T00:44:21.182Z] [PHONE] 进房成功 348ms",
+    "[2026-09-16T00:44:23.105Z] [PHONE] 远端加入 jax-pc-sidecar",
+    "[2026-09-16T00:44:23.152Z] [PHONE] 远端就绪 @2331ms",
+    "[2026-09-16T00:44:26.439Z] [PHONE] wav 推完（156帧），补 2s 静音",
+    "[2026-09-16T00:44:27.730Z] [PHONE] 首包回复 @4577ms（自上行开始）",
+    "[2026-09-16T00:44:30.372Z] [PHONE] 回复结束 133帧/83KB（连续 1200ms 无新帧判定说完）",
+    "[2026-09-16T00:44:30.745Z] [PHONE] 回复已保存: /srv/sim/sim-reply.wav（96640B）",
+    "[2026-09-16T00:44:30.766Z] [PHONE] 有效语音 64帧/40960B（共收到 151帧/96640B，含静音帧）",
+    "[2026-09-16T00:44:30.768Z] [PHONE] 上行 156帧 / 回复 151帧",
 ]
 
 
 def test_phone_log_parsing_yields_comparable_latency() -> None:
-    """首包延迟必须换算成「用户说完→听见」的口径，否则数字会被误读。
+    """首包延迟必须换算成「用户说完 → 听见」的口径，否则数字会被误读。
 
-    phone.js 报的是「自上行开始」的延迟，其中包含它自己固定补的 2s 尾部静音；
-    上行 350 帧 = 7000ms，减去 2000ms = 说话 5000ms，故回复在说话结束后 3120-5000→0
-    之外的真实值应由本换算给出（此处 7000-2000=5000；3120 < 5000 说明回复早于静音尾结束）。
+    口径（2026-09-16 用真实产物三方互证后修正）
+    ------------------------------------------
+    `phone.js` 报的 `首包回复 @Nms` 自**上行第一帧**起计；`up_frames` 只在 wav 分帧
+    循环里 +1（phone.js:114），后补的 2s 尾部静音（phone.js:123-129）**一帧都不计**。
+    证据是自洽的：wav=99840B ⇒ 99840 ÷ 2 ÷ 16000 = **3.12s**，同一份日志同时报
+    `wav 推完（156帧）` 与 `上行 156帧`，156 × 20ms = **3120ms** 恰好等于 wav 时长。
+
+    故：`utterance_ms == speech_ms == 3120`（旧实现把 3.12s 报成 1.12s，少 2000ms），
+    `reply_after_speech_ms == 4577 - 3120 == 1457`（用户说完到听见首帧）。
     """
     metrics = _load_sim_phone().parse_phone_log(REAL_PHONE_LOG)
     assert metrics.state == "replied"
-    assert metrics.first_reply_ms == 3120
-    assert metrics.enter_room_ms == 120
-    assert metrics.up_frames == 350 and metrics.reply_frames == 88
-    assert metrics.reply_bytes == 56320
-    assert metrics.utterance_ms == 7000
-    assert metrics.speech_ms == 5000
-    # 回复早于「静音尾结束」→ 换算值夹到 0，绝不出现负数
-    assert metrics.reply_after_speech_ms == 0
+    assert metrics.first_reply_ms == 4577
+    assert metrics.enter_room_ms == 348
+    assert metrics.remote_ready_ms == 2331, (
+        "真实落盘是 `[PHONE] ` 前缀形态；正则要求裸 `PHONE ` 时这里恒为 None"
+    )
+    assert metrics.up_frames == 156 and metrics.reply_frames == 151
+    assert metrics.reply_bytes == 96640
+    assert metrics.speech_reply_frames == 64 and metrics.speech_reply_bytes == 40960
+    assert metrics.utterance_ms == 3120, "156 帧 × 20ms —— 就是被推上去的 wav 时长"
+    assert metrics.speech_ms == 3120, (
+        "尾部静音不计帧 ⇒ 不得再减 2000ms（旧实现实得 1120）"
+    )
+    assert metrics.reply_after_speech_ms == 4577 - 3120
     assert metrics.to_dict()["ok"] is True
 
 
@@ -417,7 +441,10 @@ def test_status_reports_simulation_when_enabled() -> None:
 
     payload = sup.status()
     assert payload["simulation"]["state"] == "replied"
-    assert payload["simulation"]["reply_bytes"] == 56320
+    assert payload["simulation"]["reply_bytes"] == 96640
+    # 对外报出的口径也要一起守住：状态端点是别人读数的唯一入口。
+    assert payload["simulation"]["utterance_ms"] == 3120
+    assert payload["simulation"]["speech_ms"] == 3120
 
 
 # --- 7. TLS 材料：PEM 走环境变量、启动时落受限临时文件（私钥绝不烘进镜像）------

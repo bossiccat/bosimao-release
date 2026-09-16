@@ -267,17 +267,28 @@ def test_resolve_without_any_credential_fails_config_stage() -> None:
 
 
 def test_phone_log_parses_sign_failure_code_remote_ready_and_timeout() -> None:
+    """⚠️ 夹具必须是**真实落盘形态**：`sidecar/logger.js:19` 拼的是
+    `[ISO时间] [scope] msg`，所以真机上这三行都带 `[PHONE] ` 前缀。
+
+    2026-09-16 审计发现：本用例原本三条夹具全写成裸 `PHONE …`（**生产上不存在的形态**），
+    于是它们在「正则要求裸 `PHONE `」这个缺陷下**照样通过** —— 有测试、看着覆盖了，
+    实际是假绿：真机上 `remote_ready_ms` 恒为 null（实测 e2e-summary.json），
+    而 `签到失败 code=` 解析不出业务码，`remote_not_ready` note 一条也不留。
+    现在夹具换真实形态，正则必须真的认 `[PHONE] ` 才可能绿。
+    """
     sim = _load_sim_phone()
 
-    failed = sim.parse_phone_log(["PHONE 签发失败 code=-1002"])
+    failed = sim.parse_phone_log(["[2026-09-16T00:44:20.298Z] [PHONE] 签发失败 code=-1002"])
     assert failed.state == "failed"
     assert failed.failure == "PHONE_SESSION_SIGN_FAILED:-1002"
 
-    ready = sim.parse_phone_log(["PHONE 远端就绪 @180ms"])
+    ready = sim.parse_phone_log(["[2026-09-16T00:44:23.152Z] [PHONE] 远端就绪 @180ms"])
     assert ready.remote_ready_ms == 180
     assert ready.to_dict()["remote_ready_ms"] == 180
 
-    timeout = sim.parse_phone_log(["PHONE 远端未就绪（5000ms 超时，继续上行）"])
+    timeout = sim.parse_phone_log(
+        ["[2026-09-16T00:44:23.152Z] [PHONE] 远端未就绪（5000ms 超时，继续上行）"]
+    )
     assert "remote_not_ready" in timeout.notes
 
     # 字段稳定：未就绪也输出 remote_ready_ms=None，下游无需判 key 是否存在
