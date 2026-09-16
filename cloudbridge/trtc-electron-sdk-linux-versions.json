@@ -1,0 +1,350 @@
+{
+  "_comment": "trtc-electron-sdk 在 Linux(x64) 平台**确实存在预编译原生 addon** 的版本白名单。cloudbridge/Dockerfile 的 ARG TRTC_ELECTRON_SDK_VERSION 只能取本文件 versions 里的值，否则构建期拿不到 addon、镜像里的 sidecar 渲染进程会在模块加载期就死掉（2026-09-16 线上事故）。白名单由 backend/tests/contract/test_trtc_linux_sdk_version_pin_contract.py 静态守护。",
+  "platform": "linux-x64",
+  "url_template": "https://{domain}/trtc/electron/download/trtc-electron-sdk/{version}/trtc-electron-sdk-{osLabel}-{version}.zip",
+  "url_template_source": "sidecar/node_modules/trtc-electron-sdk/scripts/download.js:61（URL 模板）；同一文件的 :31-35 是域名列表 web.sdk.qcloud.com / web.sdk.cloud.tencent.cn / web.sdk.tencent.cn；scripts/constant.js 定义 osLabel：LINUX_X64='linux-x64'、WINDOWS64='win64'",
+  "verified_at": "2026-09-16",
+  "verified_domains": [
+    "web.sdk.qcloud.com"
+  ],
+  "method": "对 npm 上 111 个 12.x/13.x 版本，按上述模板对每个域名发 HTTP HEAD，断言响应 200 且 Content-Length > 1MB 才计入白名单；404/4xx 或体积过小均剔除。原始扫描输出见 outputs/trtc-linux-addon-versions.txt。",
+  "key_fact": "13.x 从未发布过 linux-x64 产物（13.3.801/13.4.802-beta.3 实测 linux=404、win64=200）；而在有 linux-x64 产物的 24 个版本里，只有 12 个真正含 Node 原生绑定，断点在 12.5.705-beta.0（含）与 12.6.706-beta.0（不含，含 12.7.706）之间——12.6+ 的 linux 包只有 libliteavsdk.so / libtxffmpeg.so / libuser_sig_gen.so。因此容器侧只能停在 12.5.705-beta.0；桌面端（Windows）的 13.4.802-beta.3 pin 不能照搬到 Linux。",
+  "versions": {
+    "12.2.115-beta.0": {
+      "http_status": 200,
+      "size_bytes": 11422069,
+      "size_mb": 10.89,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so",
+        "trtc_electron_sdk.node"
+      ],
+      "has_node_binding": true,
+      "node_binding_bytes": 8475144
+    },
+    "12.2.115-beta.1": {
+      "http_status": 200,
+      "size_bytes": 11422069,
+      "size_mb": 10.89,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so",
+        "trtc_electron_sdk.node"
+      ],
+      "has_node_binding": true,
+      "node_binding_bytes": 8475144
+    },
+    "12.2.115-beta.2": {
+      "http_status": 200,
+      "size_bytes": 11422076,
+      "size_mb": 10.89,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so",
+        "trtc_electron_sdk.node"
+      ],
+      "has_node_binding": true,
+      "node_binding_bytes": 8475144
+    },
+    "12.2.115-beta.3": {
+      "http_status": 200,
+      "size_bytes": 11422076,
+      "size_mb": 10.89,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so",
+        "trtc_electron_sdk.node"
+      ],
+      "has_node_binding": true,
+      "node_binding_bytes": 8475144
+    },
+    "12.2.115-beta.5": {
+      "http_status": 200,
+      "size_bytes": 11422076,
+      "size_mb": 10.89,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so",
+        "trtc_electron_sdk.node"
+      ],
+      "has_node_binding": true,
+      "node_binding_bytes": 8475144
+    },
+    "12.2.115-beta.6": {
+      "http_status": 200,
+      "size_bytes": 11423628,
+      "size_mb": 10.89,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so",
+        "trtc_electron_sdk.node"
+      ],
+      "has_node_binding": true,
+      "node_binding_bytes": 8479808
+    },
+    "12.2.115-beta.12": {
+      "http_status": 200,
+      "size_bytes": 11423689,
+      "size_mb": 10.89,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so",
+        "trtc_electron_sdk.node"
+      ],
+      "has_node_binding": true,
+      "node_binding_bytes": 8479824
+    },
+    "12.3.705-beta.2": {
+      "http_status": 200,
+      "size_bytes": 11424188,
+      "size_mb": 10.89,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so",
+        "trtc_electron_sdk.node"
+      ],
+      "has_node_binding": true,
+      "node_binding_bytes": 8485128
+    },
+    "12.3.705-beta.3": {
+      "http_status": 200,
+      "size_bytes": 11423925,
+      "size_mb": 10.89,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so",
+        "trtc_electron_sdk.node"
+      ],
+      "has_node_binding": true,
+      "node_binding_bytes": 8479744
+    },
+    "12.4.705-alpha.0": {
+      "http_status": 200,
+      "size_bytes": 11423685,
+      "size_mb": 10.89,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so",
+        "trtc_electron_sdk.node"
+      ],
+      "has_node_binding": true,
+      "node_binding_bytes": 8479824
+    },
+    "12.5.705-alpha.1": {
+      "http_status": 200,
+      "size_bytes": 11423628,
+      "size_mb": 10.89,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so",
+        "trtc_electron_sdk.node"
+      ],
+      "has_node_binding": true,
+      "node_binding_bytes": 8479808
+    },
+    "12.5.705-beta.0": {
+      "http_status": 200,
+      "size_bytes": 11423628,
+      "size_mb": 10.89,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so",
+        "trtc_electron_sdk.node"
+      ],
+      "has_node_binding": true,
+      "node_binding_bytes": 8479808
+    },
+    "12.6.706-beta.0": {
+      "http_status": 200,
+      "size_bytes": 8684325,
+      "size_mb": 8.28,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so"
+      ],
+      "has_node_binding": false,
+      "node_binding_bytes": null
+    },
+    "12.7.706-beta.0": {
+      "http_status": 200,
+      "size_bytes": 8684325,
+      "size_mb": 8.28,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so"
+      ],
+      "has_node_binding": false,
+      "node_binding_bytes": null
+    },
+    "12.7.706-beta.1": {
+      "http_status": 200,
+      "size_bytes": 8684325,
+      "size_mb": 8.28,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so"
+      ],
+      "has_node_binding": false,
+      "node_binding_bytes": null
+    },
+    "12.7.706-beta.2": {
+      "http_status": 200,
+      "size_bytes": 8684325,
+      "size_mb": 8.28,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so"
+      ],
+      "has_node_binding": false,
+      "node_binding_bytes": null
+    },
+    "12.7.706-beta.3": {
+      "http_status": 200,
+      "size_bytes": 8684325,
+      "size_mb": 8.28,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so"
+      ],
+      "has_node_binding": false,
+      "node_binding_bytes": null
+    },
+    "12.7.706": {
+      "http_status": 200,
+      "size_bytes": 8684325,
+      "size_mb": 8.28,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so"
+      ],
+      "has_node_binding": false,
+      "node_binding_bytes": null
+    },
+    "12.8.707-alpha.0": {
+      "http_status": 200,
+      "size_bytes": 8684325,
+      "size_mb": 8.28,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so"
+      ],
+      "has_node_binding": false,
+      "node_binding_bytes": null
+    },
+    "12.8.707-alpha.1": {
+      "http_status": 200,
+      "size_bytes": 8684325,
+      "size_mb": 8.28,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so"
+      ],
+      "has_node_binding": false,
+      "node_binding_bytes": null
+    },
+    "12.8.707-alpha.2": {
+      "http_status": 200,
+      "size_bytes": 8684325,
+      "size_mb": 8.28,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so"
+      ],
+      "has_node_binding": false,
+      "node_binding_bytes": null
+    },
+    "12.8.707-alpha.3": {
+      "http_status": 200,
+      "size_bytes": 8684325,
+      "size_mb": 8.28,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so"
+      ],
+      "has_node_binding": false,
+      "node_binding_bytes": null
+    },
+    "12.8.707-alpha.4": {
+      "http_status": 200,
+      "size_bytes": 8684325,
+      "size_mb": 8.28,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so"
+      ],
+      "has_node_binding": false,
+      "node_binding_bytes": null
+    },
+    "12.8.707-alpha.13": {
+      "http_status": 200,
+      "size_bytes": 8684325,
+      "size_mb": 8.28,
+      "artifacts": [
+        "libliteavsdk.so",
+        "libtxffmpeg.so",
+        "libuser_sig_gen.so"
+      ],
+      "has_node_binding": false,
+      "node_binding_bytes": null
+    }
+  },
+  "negative_control": {
+    "_comment": "对照组：13.x 在 linux-x64 上 404（而 win64 存在），证明容器不能跟随桌面端 pin。",
+    "probes": {
+      "13.3.801": {
+        "linux-x64": 404,
+        "win64": 200
+      },
+      "13.4.802-beta.3": {
+        "linux-x64": 404,
+        "win64": 200
+      }
+    }
+  },
+  "usable_versions": [
+    "12.2.115-beta.0",
+    "12.2.115-beta.1",
+    "12.2.115-beta.12",
+    "12.2.115-beta.2",
+    "12.2.115-beta.3",
+    "12.2.115-beta.5",
+    "12.2.115-beta.6",
+    "12.3.705-beta.2",
+    "12.3.705-beta.3",
+    "12.4.705-alpha.0",
+    "12.5.705-alpha.1",
+    "12.5.705-beta.0"
+  ],
+  "latest_usable": "12.5.705-beta.0",
+  "usable_criterion": "usable = HTTP 200（zip 存在）**且** zip 内存在 `build/Release/trtc_electron_sdk.node`。只满足前者不足以判定可用：CDN 上 12.6.706-beta.0 起的 linux-x64 包（含 12.7.706）只有三个 .so，不含 Node 原生绑定，而 liteav/trtc.js:41 会 require 它 ⇒ 渲染进程模块加载期即抛错。",
+  "verification": {
+    "step1_zip_presence": "对 npm 上 111 个 12.x/13.x 版本按 url_template 发 HTTP HEAD（三域名之一 web.sdk.qcloud.com），断言 200 且 Content-Length > 1MB。命中 24 个 linux-x64 版本。",
+    "step2_payload_manifest": "对那 24 个版本用 HTTP Range 只取 zip 尾部中央目录（不下载整包），解出真实文件清单，断言清单内含 build/Release/trtc_electron_sdk.node。命中 12 个。",
+    "step3_full_download_check": "对 12.5.705-beta.0 与 12.7.706 整包下载后用 zipfile 全量校验：12.5.705-beta.0 的 trtc_electron_sdk.node = 8479808 字节、magic=ELF、ELFCLASS64、e_type=3(ET_DYN/共享对象)、sha256=05868b701262be8ba3b82dbabb6d8e3a3cf0130bc8903f37803f5aec8306f4f7、zip sha256=45da7b8329efc5566739fb20ebbc3ceaaaaffeb4d1c377adacd2ff2c36a6d296；12.7.706 整包内不存在该文件。",
+    "step4_domain_cross_check": "12.7.706 在 web.sdk.qcloud.com / web.sdk.cloud.tencent.cn / web.sdk.tencent.cn 三域名上长度均为 8684325 且产物清单一致，排除单一域名缺件。",
+    "raw_output": "outputs/trtc-linux-addon-versions.txt（筛 1 原始输出）"
+  }
+}
