@@ -168,6 +168,14 @@ function loadRealRtcJs() {
     './rtc-termination': { CMD_ID_TERMINATE: 1, makeTerminationCmdHandler: () => () => {} },
     './audio': { frameToS16Mono16k: () => null, makeAudioFrame16k: () => ({}) },
     './rtc-test-audio': { injectTestAudio: () => {} },
+    // 本端设备表观测（2026-09-16 容器事故沉淀）：纯函数模块，这里只需形状正确。
+    // 它只影响日志，不得影响打断冲刷行为 —— 本文件断言的正是后者。
+    './adev': {
+      PLAYER_DEVICE_EMPTY_CODE: 1202,
+      inventory: () => ({ speakers: [], mics: [], speakersError: '', micsError: '' }),
+      formatInventory: () => '[ADEV] stub',
+      onWarningLine: () => ({ audioDevice: false, text: '[ADEV] stub' }),
+    },
   };
 
   const fakeRequire = (id) => {

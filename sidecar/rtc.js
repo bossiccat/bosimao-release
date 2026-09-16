@@ -25,6 +25,7 @@ const {
 } = require('./intent-recovery');
 const { CMD_ID_TERMINATE, makeTerminationCmdHandler } = require('./rtc-termination');
 const { frameToS16Mono16k, makeAudioFrame16k } = require('./audio');
+const adev = require('./adev');
 const { injectTestAudio } = require('./rtc-test-audio');
 const TRTCCloud = require('trtc-electron-sdk').default;
 const { TRTCParams, TRTCAppScene } = require('trtc-electron-sdk');
@@ -44,6 +45,9 @@ let exited = false;
 // 边界（务必保持）：L3 的 sendCustomAudioData 返回成功只证明本地 API 调用返回，
 // 不证明 TRTC 已出网、不证明手机已收到、不证明扬声器已响。
 const DNL_LOG_EVERY = 100; // 首帧必打，之后节流
+// 1202（播放设备列表为空）可能因设备健康守护被反复重试，节流但首条必打：
+// 首条携带的后果说明是「为什么 up=0」的唯一自解释证据，不能因为节流被吞掉。
+const PLAYER_DEVICE_WARN_MIN_INTERVAL_MS = 30000;
 // DNL4 对账基准：pacer.stats.sent/.dropped/.underruns 是**进程级累计、从不复位**，
 // 而 arrived 在**每次 replyId 变化时归零**。不做「同 reply 基准快照」，balance 就只在
 // 进程内第一个 reply 成立（后续 reply 的 sent/dropped 带着历史累计，必然对不上账）。
@@ -202,6 +206,40 @@ function runSidecar() {
     onMixedAllAudioFrame: null,
   });
 
+  // ---------- 本端音频设备表（2026-09-16 容器事故的核心观测缺口）----------
+  // 事故形态：手机在正常发布（`RtcCustomAudio: lvl raw=64 … gate=true`），sidecar 却连续
+  // 70s `[STAT] up=0帧`、`[PCM]`/`[UPRMS]` 一行都没有。真因在 TRTC 原生层：
+  //   audio_player_safe_wrapper.cc  "player device list is empty"（io_source:player, code 1202）
+  //   io_working_status_printer.cc  kPlayout produced 0 ms data, callback count is 0
+  //   rtc_audio_jitter_buffer_v2.cc PacketBuffer is full … io_last_read_frame_ticks: -1
+  // ⇒ **本端没有可用播放设备 ⇒ 播放拉取链路根本没启动 ⇒ 远端帧永不回调（onPlayAudioFrame）
+  //   ⇒ up 恒为 0**。它不是网络/订阅问题，也不是手机没发。
+  // 这四行只存在于 TRTC 自己的原生日志（依赖 --enable-logging=stderr），不带我们的作用域、
+  // 也进不了 /status.sidecar.events 的语义过滤。下面两处把它翻译成我们自己的可检索行（见 adev.js）。
+  let lastPlayerDeviceWarnAt = 0;
+  const logDeviceInventory = (reason) => {
+    const inv = adev.inventory(cloud);
+    log('ADEV', `${reason} ${adev.formatInventory(inv)}`);
+    return inv;
+  };
+  // onWarning 此前**没有注册**：1202 只在原生日志里出现，JS 侧完全看不见。
+  cloud.on('onWarning', (code, msg) => {
+    if (Number(code) !== adev.PLAYER_DEVICE_EMPTY_CODE) {
+      log('WARN', adev.onWarningLine(code, msg, null).text);
+      return;
+    }
+    const now = Date.now();
+    if (now - lastPlayerDeviceWarnAt < PLAYER_DEVICE_WARN_MIN_INTERVAL_MS) return;
+    lastPlayerDeviceWarnAt = now;
+    // 警告发生**当下**再清点一次：与进房时那次对照，可区分「SDK 设备表本来就空」
+    // 与「设备在表里但打开失败」——这两种的上层修法完全不同。
+    try {
+      log('ADEV', adev.onWarningLine(code, msg, adev.inventory(cloud)).text);
+    } catch (e) {
+      log('ERR', `设备清点失败: ${e.message}`);
+    }
+  });
+
   cloud.on('onEnterRoom', (result) => {
     if (result > 0) {
       log('ROOM', `进房成功（elapsed=${result}ms）`);
@@ -217,6 +255,9 @@ function runSidecar() {
       } catch (e) {
         log('ERR', `进房后 enableCustomAudioCapture 失败: ${e.message}`);
       }
+      // 进房后清点一次设备表：这是「本端到底有没有播放设备」的第一手证据，
+      // 也是 up=0 时唯一能区分「设备表为空」与「设备在但打不开」的观测（见 adev.js）。
+      try { logDeviceInventory('进房后设备清点'); } catch (e) { log('ERR', `设备清点失败: ${e.message}`); }
     } else {
       log('ROOM', `进房失败 errCode=${result}`);
     }

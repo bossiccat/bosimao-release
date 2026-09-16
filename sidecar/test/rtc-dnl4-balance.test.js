@@ -178,6 +178,14 @@ function loadRealRtcJs() {
     './rtc-termination': { CMD_ID_TERMINATE: 1, makeTerminationCmdHandler: () => () => {} },
     './audio': { frameToS16Mono16k: () => null, makeAudioFrame16k: () => ({}) },
     './rtc-test-audio': { injectTestAudio: () => {} },
+    // 本端设备表观测（2026-09-16 容器事故沉淀）：只出日志（scope=ADEV），
+    // 不参与下行账目。本文件断言的是 DNL4 的账目自洽，与它无关。
+    './adev': {
+      PLAYER_DEVICE_EMPTY_CODE: 1202,
+      inventory: () => ({ speakers: [], mics: [], speakersError: '', micsError: '' }),
+      formatInventory: () => '[ADEV] stub',
+      onWarningLine: () => ({ audioDevice: false, text: '[ADEV] stub' }),
+    },
   };
 
   const fakeRequire = (id) => {
