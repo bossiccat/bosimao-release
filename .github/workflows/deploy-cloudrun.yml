@@ -390,9 +390,14 @@ jobs:
           gate = os.environ["GATE"]
           base = os.environ["BASE_URL"]
           owner = os.environ["VOICE_OWNER_CREDENTIAL"]
+          # TLS：**必须**用默认校验（验证书链 + 验主机名）。
+          # 此处曾写 `check_hostname = False` + `verify_mode = ssl.CERT_NONE`，
+          # 而紧接着下方会用这条连接把 **生产 owner 凭据**（= 全租户 admin：
+          # 可列/撤销全部设备、读会话）作为 Bearer 发到生产端点 ⇒ runner 出网链路上
+          # 任何 MITM 都能拿到它，且"产品自证"的结论本身可被中间人替换成 PASS。
+          # 2026-09-16 实测：jax-voice-api 与 jax-voice-bridge 用**默认校验**握手均通过
+          # （DigiCert 链，剩余有效期 140 天）⇒ 恢复校验不会弄挂自证。
           ctx = ssl.create_default_context()
-          ctx.check_hostname = False
-          ctx.verify_mode = ssl.CERT_NONE
 
           def call(path, method="GET", headers=None):
               req = urllib.request.Request(
