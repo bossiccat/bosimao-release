@@ -36,8 +36,10 @@ class AckReporterClient:
         client_cert_file: str,
         client_key_file: str,
         gateway_assertion: str,
-        connect_timeout_s: float = 0.5,
-        total_timeout_s: float = 2.0,
+        # 必须与 config.py 的同名默认值一致（见那里的说明）：这里是构造默认值，
+        # 生产由 drain_ack.build_ack_reporter 显式传 cfg 的取值，留着旧值只会造成第四套默认值漂移。
+        connect_timeout_s: float = 5.0,
+        total_timeout_s: float = 15.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         required = (

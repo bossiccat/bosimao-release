@@ -77,8 +77,16 @@ class BridgeConfig:
     control_plane_client_cert_file: str = ""
     control_plane_client_key_file: str = ""
     control_plane_gateway_assertion: str = ""
-    control_plane_connect_timeout_s: float = 0.5
-    control_plane_total_timeout_s: float = 2.0
+    # ⚠️ 这两个默认值曾经是 0.5 / 2.0 —— 那是「sidecar 与控制面同机」时代的错值。
+    # 现在的控制面是**公网 HTTPS + mTLS**（`.run.tcloudbase.com`），TLS 建连本身就常 >0.5s，
+    # 加上控制面冷启动与 nonce 落库，2.0s 总超时在稳态会偶发失败；而兑付失败是
+    # **fail-closed 且终局**（server.py 发 `ctrl exit hello_redemption_failed`、永不建会话）
+    # ⇒ 用户侧表现为「随机连不上」。drain 上报同样吃这两个值，超时即**静默丢失**（fire-once 无重试）。
+    # 为什么一直没暴露：本地 `.env` 把两者覆盖成 2.0 / 10.0，而部署 env **未设**这两项 ⇒
+    # 线上回落到这里的 0.5 / 2.0。改 redemption.py 的构造默认值是**无效**的 ——
+    # 两个消费点（server.py `_redemption`、drain_ack.py `build_ack_reporter`）都显式传参。
+    control_plane_connect_timeout_s: float = 5.0
+    control_plane_total_timeout_s: float = 15.0
     # 会话保护
     no_peer_timeout_s: float = 120.0   # 进房后长时间无远端加入 → 退房回待命
     extra: dict = field(default_factory=dict)
