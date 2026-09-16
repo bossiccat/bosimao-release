@@ -26,7 +26,7 @@
     <dimen name="jax_radius_xl">16dp</dimen>
 
     <!-- size.* -->
-    <dimen name="jax_touch_target_min">44dp</dimen>
+    <dimen name="jax_touch_target_min">48dp</dimen>
     <dimen name="jax_voice_control_size">56dp</dimen>
     <dimen name="jax_floating_orb_size">56dp</dimen>
     <dimen name="jax_icon_inline">16dp</dimen>
