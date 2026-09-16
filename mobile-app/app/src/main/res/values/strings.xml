@@ -61,6 +61,13 @@
     <string name="settings_threshold_sub">越低越灵敏、越易误触发；建议 0.10–0.35</string>
     <string name="settings_overlay_label">悬浮窗</string>
     <string name="settings_overlay_sub">常驻小圆球，显示状态色，轻触唤醒</string>
+    <!-- 设置页「高级」折叠区（开发者选项） -->
+    <string name="settings_advanced_title">高级设置</string>
+    <string name="settings_advanced_badge">开发者选项</string>
+    <string name="settings_advanced_sub">会话服务器 / 电池白名单 — 一般用户无需修改</string>
+    <string name="settings_advanced_expand">展开</string>
+    <string name="settings_advanced_collapse">收起</string>
+    <string name="settings_battery_already">已在电池白名单</string>
     <string name="btn_save">保存</string>
     <string name="saved">已保存</string>
 
