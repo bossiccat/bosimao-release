@@ -137,6 +137,27 @@ def test_plan_loads_modules_explicitly_instead_of_the_distro_default(tmp_path: P
     ), "virtual-source 的 master 是 null-sink 的 monitor，加载顺序不能反"
 
 
+def test_plan_gives_the_null_sink_the_property_the_sdk_actually_reads(tmp_path: Path) -> None:
+    """`device.form_factor` 必须有值 —— 它是 SDK 读取的**两个** device.* 属性之一。
+
+    判据（离线取证，可复现）：对 libliteavsdk.so（12.5.705-beta.0，
+    sha256 c5a6f1df…，与线上容器 pin 的 zip sha256 45da7b83… 一致）做全库可打印串扫描 +
+    `.rodata → .text` 的 RIP 相对取址交叉引用，`device.*` 前缀里**只有**
+    `device.description` 与 `device.form_factor` 被引用；`device.class` 零命中。
+    所以这里**只**要求补 form_factor：`device.class=sound` / `device.icon_name` 无证据支持，
+    加了也只是让镜像更像真机、并不能被 SDK 读到（不做的理由与被做的理由同等重要）。
+    """
+    loads = [a for a in _plan(tmp_path).argv if a.startswith("--load=")]
+    sink_load = next(a for a in loads if "module-null-sink" in a)
+    source_load = next(a for a in loads if "module-virtual-source" in a)
+    assert "device.description=JaxNullSink" in sink_load
+    assert "device.form_factor=speaker" in sink_load
+    assert "device.form_factor=microphone" in source_load
+    joined = " | ".join(loads)
+    assert "device.class=" not in joined, "device.class 在全库里 0 命中 ⇒ 不按'像真机'去补"
+    assert "device.icon_name=" not in joined
+
+
 def test_plan_pins_every_path_libpulse_could_guess(tmp_path: Path) -> None:
     """容器里没有 user session ⇒ XDG_RUNTIME_DIR 默认不存在，两边会各找一个不存在的目录。"""
     plan = _plan(tmp_path)

@@ -27,6 +27,10 @@
   全部难点就是"看不见"。前台运行时它的输出由 supervisor 的 Child 收到 stdout → CLS。
 * **必须显式给设备**（module-null-sink + module-virtual-source）：无头容器里没有声卡，
   只起守护进程的话设备表是空的，TRTC 的 `GetDevices` 依旧拿不到东西。
+  设备属性里的 `device.form_factor` 同样**不是可选项**：对 libliteavsdk.so 做全库串扫描 +
+  取址交叉引用后，SDK 真正读取的 `device.*` 属性只有 `device.description` 与
+  `device.form_factor` 两个（`device.class` 零命中）。缺 form_factor 的那一版正对应
+  线上"PA 里有 sink、TRTC 的播放设备表却为空"（code 1202）的现场。
 * **必须显式钉住路径**（XDG_RUNTIME_DIR / PULSE_RUNTIME_PATH / PULSE_SERVER）：
   容器里没有 user session，`XDG_RUNTIME_DIR` 默认不存在，libpulse 客户端与服务端
   各自按它推导 `pulse/native`，不钉住就是两边各自找一个不存在的目录。
@@ -142,11 +146,20 @@ def build_plan(runtime_dir=None, *, sink: str = SINK_NAME,
         "--load=module-native-protocol-unix auth-anonymous=1",
         # 设备：无头容器没有声卡，必须自己造。顺序有意义——virtual-source 的 master
         # 是 null-sink 的 monitor，所以 null-sink 必须先加载。
+        #
+        # `device.form_factor` 不是"补全得像样点"，它是**证据决定的一处**：
+        # 对 libliteavsdk.so（12.5.705-beta.0，sha256 c5a6f1df…）做全库可打印串扫描 +
+        # RIP 相对取址交叉引用，`device.*` 前缀的属性键**只有两个**被 SDK 读：
+        #   · device.description —— 我们本来就给了；
+        #   · device.form_factor —— 我们此前**完全没给**。
+        # 而 `device.class` 在 14.9MB 的 .so 里**一次都没出现**（0 命中），
+        # 所以不按"看起来更像真设备"去补 `device.class=sound`（无证据支持，宁可不加）。
+        # 属性值取 PA 的规范取值：播放端 speaker、采集端 microphone。
         f"--load=module-null-sink sink_name={sink}"
-        " sink_properties=device.description=JaxNullSink",
+        " sink_properties=device.description=JaxNullSink,device.form_factor=speaker",
         f"--load=module-virtual-source source_name={SOURCE_NAME}"
         f" master={MONITOR_NAME}"
-        " source_properties=device.description=JaxNullMic",
+        " source_properties=device.description=JaxNullMic,device.form_factor=microphone",
     ]
     return AudioPlan(
         binary=binary,
@@ -235,25 +248,43 @@ _DEVICE_BLOCK_RE = re.compile(r"^(Sink|Source) #\d+")
 # `\t\t\tproperties:` / `\t\t\t\tdevice.icon_name = …`，所以层级必须**钉死两格**，
 # 否则端口下的属性会污染属性键清单（那正是本项观测要看的两个值之一）。
 _PORT_LINE_RE = re.compile(r"^\t\t(?P<port>[^\t\s:]+):")
-# 属性键：恰好两个制表符 + key = value。
-_PROP_LINE_RE = re.compile(r"^\t\t(?P<key>[^\t=]+?)\s*=")
+# 属性行：恰好两个制表符 + key = value（`pactl list sinks` 形如
+# `\t\tdevice.class = "sound"`）。**值必须一起取出来**：只报键名的话，下一轮
+# 仍然只能知道"有没有这个键"，而不知道 SDK 真正看到的取值是多少——
+# 那正是 2026-09-16 这次连查两轮的原因。
+_PROP_LINE_RE = re.compile(r"^\t\t(?P<key>[^\t=]+?)\s*=\s*(?P<value>.*?)\s*$")
+
+
+def _prop_entry(key: str, value: str) -> str:
+    """属性行 → `key=value`。
+
+    PA 会给字符串值加双引号（`device.description = "JaxNullSink"`）。这里剥掉成对的
+    引号，让 `/status` 里的取值与 PA/我们写进 module 参数的字面量可比对；
+    既没引号也不成对时原样保留，绝不改写取值内容（观测不得替现场作答）。
+    """
+    key = key.strip()
+    value = value.strip()
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        inner = value[1:-1]
+        # 只在"内部没有裸引号"时剥；否则原样给出，避免把转义过的值改错。
+        if '"' not in inner:
+            value = inner
+    return f"{key}={value}"
 
 
 def parse_device_details(text: str | None) -> list[dict] | None:
-    """从 `pactl list sinks|sources`（长格式）里取每个设备的名称/端口/属性键/标志。
+    """从 `pactl list sinks|sources`（长格式）里取每个设备的名称/端口/属性(key=value)/标志。
 
-    为什么非要看**端口**和**属性键**：TRTC 的 Linux ADM 在 `pulse_audio_context.cc`
+    为什么非要看**端口**和**属性取值**：TRTC 的 Linux ADM 在 `pulse_audio_context.cc`
     里枚举设备（原生字符串 `device.form_factor` / `device.description` /
     `GetDevicesList` / `RefreshPlayerDevices`），并且有按端口判定的分支
     （原生字符串 `sink device port is not same, but the active port and sink name
     is same`）。而我们用 `module-null-sink` 造出来的 sink 与真实声卡**不对称**：
-    端口可能一个都没有，属性表里我们只显式写进了 `device.description`（可能还被 PA
-    补上 `device.class = "abstract"`）。到底是被"没有端口"筛掉、还是被
-    `device.class`/`device.form_factor` 筛掉，**只能靠把这份观测拿到线上看一次** ——
-    本函数的作用就是把这份不对称摊平，而不是替它下结论。
-
-    容器里没有 shell，`/status` 是唯一窗口 —— 所以这一项**只能**由这里接出来。
-    `None`（没清点成）与 `[]`（清点了但一个设备都没有）照例严格区分。
+    端口可能一个都没有，属性表也要么缺项、要么取值不同。
+    **只列键名是不够的**——"有没有这个键"和"SDK 看到的取值是多少"是两件事，
+    上一轮就是因为只列了键名而无法直接判定，才多花了一轮部署。
+    所以这里输出 `key=value`（键名与取值一起），`None`（没清点成）与 `[]`
+    （清点了但一个设备都没有）照例严格区分。
     """
     if text is None:
         return None
@@ -285,7 +316,7 @@ def parse_device_details(text: str | None) -> list[dict] | None:
         if section == "props":
             m = _PROP_LINE_RE.match(line)
             if m:
-                cur["props"].append(m.group("key").strip())
+                cur["props"].append(_prop_entry(m.group("key"), m.group("value")))
                 continue
         m = re.match(r"^\tName:\s*(\S+)\s*$", line)
         if m:
@@ -358,7 +389,7 @@ def inspect_devices(*, env: dict[str, str], sink: str,
     sources = _pactl_lines("sources", env=env, which=which, run=run)
     clients = _pactl_lines("clients", env=env, which=which, run=run)
     defaults = parse_server_defaults(_pactl_info(env=env, which=which, run=run))
-    # 长格式：每个 sink/source 的端口与属性键。这是「SDK 为什么筛掉它」的唯一可判据。
+    # 长格式：每个 sink/source 的端口与属性 key=value。这是「SDK 为什么筛掉它」的唯一可判据。
     sink_details = parse_device_details(
         _pactl_list("sinks", env=env, which=which, run=run))
     source_details = parse_device_details(
@@ -389,8 +420,9 @@ def summarize_devices(report: dict | None, *, error: str = "") -> dict:
       * None  —— 没清点成（pactl 缺失/失败）：**不知道**，不得当成 False，也不得当成 True。
 
     `sink_details` 是给"PA 有 sink 但 TRTC 说设备列表为空"这个分支用的：它把每个
-    sink 的端口与属性键摊开，用于判定 SDK 是筛掉了"没有端口的 null-sink"
-    还是筛掉了 `device.class`/`device.form_factor` 不达标的设备。
+    sink 的端口与属性 `key=value` 摊开，用于判定 SDK 是筛掉了"没有端口的 null-sink"
+    还是筛掉了属性取值不达标的设备。**取值必须一起给出**：只给键名时，
+    "有 device.form_factor 这个键"与"它的值是 speaker"是两件事，而 SDK 读到的是后者。
     """
     if not isinstance(report, dict):
         return {

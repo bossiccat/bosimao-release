@@ -116,6 +116,26 @@ PACTL_LIST_SINKS_NULL = (
     "\t\tpcm\n"
 )
 
+# 修复后的观测形态：除 device.description 外还带我们显式写进去的 device.form_factor=speaker。
+# 这不是"更好看"，而是**SDK 真的会读的那两个 device.* 键**（见 audio_env.build_plan 注释：
+# 全库串扫描 + 取址交叉引用后，被 SDK 读取的 device.* 属性只有 description 与 form_factor）。
+PACTL_LIST_SINKS_NULL_WITH_FORM_FACTOR = (
+    "Sink #0\n"
+    "\tName: jax_null\n"
+    '\tDescription: JaxNullSink\n'
+    "\tFlags: DECIBEL_VOLUME LATENCY SET_FORMATS \n"
+    "\tProperties:\n"
+    '\t\tdevice.description = "JaxNullSink"\n'
+    '\t\tdevice.form_factor = "speaker"\n'
+    '\t\tdevice.class = "abstract"\n'
+    '\t\tdevice.icon_name = "audio-card"\n'
+    "Sink #1\n"
+    "\tName: jax_null_b\n"
+    '\tDescription: Second\n'
+    "\tProperties:\n"
+    '\t\tdevice.icon_name = "audio-speakers"\n'
+)
+
 # 对照：真实声卡（用来证明解析器不是"总会报空"）。
 PACTL_LIST_SINKS_HW = (
     "Sink #1\n"
@@ -139,15 +159,29 @@ PACTL_LIST_SINKS_HW = (
 
 
 def test_parse_device_details_reports_ports_and_prop_keys_of_our_own_sink() -> None:
-    """端口与属性键必须被摊平报出来 —— 这是"SDK 为什么筛掉它"的唯一线上判据。"""
+    """端口与属性 `key=value` 必须被摊平报出来 —— 这是"SDK 为什么筛掉它"的唯一线上判据。"""
     details = audio_env.parse_device_details(PACTL_LIST_SINKS_NULL)
     assert details is not None and len(details) == 1
     d = details[0]
     assert d["name"] == "jax_null"
     assert d["ports"] == [], "没有 Ports 段 ⇒ 空端口（不是解析失败，也不是'不知道'）"
-    assert d["props"] == ["device.description"], "属性键里没有 device.class / device.form_factor"
+    assert d["props"] == ["device.description=JaxNullSink"], "取值必须一起给出，不能只给键名"
     assert isinstance(d["flags"], list) and d["flags"], "Flags 必须被解析出来（线上要判 HARDWARE）"
     assert "DECIBEL_VOLUME" in d["flags"]
+
+
+def test_parse_device_details_reports_prop_values_not_only_keys() -> None:
+    """**取值**才是 SDK 读到的东西：只列键名会让排查多绕一轮（2026-09-16 的教训）。
+
+    同时钉住层级：端口块内部那层（三/四个制表符）不得混进属性清单。
+    """
+    d = audio_env.parse_device_details(PACTL_LIST_SINKS_NULL_WITH_FORM_FACTOR)[0]
+    assert d["props"] == [
+        "device.description=JaxNullSink",
+        "device.form_factor=speaker",
+        "device.class=abstract",
+        "device.icon_name=audio-card",
+    ], "必须 key=value，且只取设备自己那一层（恰好两个制表符）"
 
 
 def test_parse_device_details_reads_real_ports_and_props() -> None:
@@ -155,10 +189,12 @@ def test_parse_device_details_reads_real_ports_and_props() -> None:
     d = audio_env.parse_device_details(PACTL_LIST_SINKS_HW)[0]
     assert d["name"] == "alsa_output.pci-0000_00_1f.3.analog-stereo"
     assert d["ports"] == ["analog-output-speaker", "analog-output-headphones"]
-    assert "device.form_factor" in d["props"] and "device.class" in d["props"]
+    keys = [p.split("=", 1)[0] for p in d["props"]]
+    assert "device.form_factor" in keys and "device.class" in keys
+    assert "device.form_factor=internal" in d["props"], "真机取值得能原样读出来"
     assert "HARDWARE" in d["flags"]
-    # 端口**内部**那层 properties 不得污染属性键清单（层级必须钉死两格）。
-    assert "device.icon_name" not in d["props"]
+    # 端口**内部**那层 properties 不得污染属性清单（层级必须钉死两格）。
+    assert "device.icon_name" not in keys
 
 
 def test_parse_device_details_keeps_unknown_separate_from_empty() -> None:
@@ -270,7 +306,7 @@ def test_summarize_devices_playout_ok_none_when_not_probed() -> None:
 
 
 def test_summarize_devices_passes_the_asymmetry_through_to_status() -> None:
-    """`playout_ok=True` 但 SDK 仍说设备列表为空时，端口/属性键必须已经在 /status 里。"""
+    """`playout_ok=True` 但 SDK 仍说设备列表为空时，端口与属性取值必须已经在 /status 里。"""
     details = audio_env.parse_device_details(PACTL_LIST_SINKS_NULL)
     summary = audio_env.summarize_devices({
         "probed": True, "sinks": ["0\tjax_null\t…"], "sources": ["1\tjax_null.mic\t…"],
@@ -280,7 +316,7 @@ def test_summarize_devices_passes_the_asymmetry_through_to_status() -> None:
     })
     assert summary["playout_ok"] is True
     assert summary["sink_details"][0]["ports"] == []
-    assert summary["sink_details"][0]["props"] == ["device.description"]
+    assert summary["sink_details"][0]["props"] == ["device.description=JaxNullSink"]
     assert summary["source_details"] == []
 
 
