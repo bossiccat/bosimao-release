@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -198,18 +199,124 @@ def _pactl_lines(kind: str, *, env: dict[str, str], which=shutil.which,
     return (done.stdout or "").splitlines()
 
 
+def _pactl_info(*, env: dict[str, str], which=shutil.which,
+                run=subprocess.run) -> str | None:
+    """`pactl info` 的文本；pactl 不可用或调用失败返回 None（与"没有默认设备"是两件事）。"""
+    pactl = which(PACTL) or ""
+    if not pactl:
+        return None
+    try:
+        done = run([pactl, "info"], capture_output=True, text=True, env=env, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return done.stdout or ""
+
+
+_DEFAULT_SINK_RE = re.compile(r"^\s*Default Sink:\s*(\S+)\s*$", re.MULTILINE)
+_DEFAULT_SOURCE_RE = re.compile(r"^\s*Default Source:\s*(\S+)\s*$", re.MULTILINE)
+
+
+def parse_server_defaults(text: str | None) -> dict:
+    """从 `pactl info` 文本里取默认 sink/source。
+
+    为什么单拎出来：TRTC 的设备服务里有"跟随系统默认设备"这一步
+    （原生字符串 `Failed to enable following default audio device` /
+    `Audio device following default invalid, invalidate audio device direction`）。
+    容器里只有一个我们自己造的 sink，**它是否被 PA 设为默认**是能不能被 SDK 选中的前提，
+    而这一条此前完全没有观测面。文本缺失/字段缺失一律返回 None，绝不猜。
+    """
+    if not isinstance(text, str):
+        return {"default_sink": None, "default_source": None}
+    sink = _DEFAULT_SINK_RE.search(text)
+    source = _DEFAULT_SOURCE_RE.search(text)
+    return {
+        "default_sink": sink.group(1) if sink else None,
+        "default_source": source.group(1) if source else None,
+    }
+
+
+def parse_client_names(lines: list[str] | None) -> list[str] | None:
+    """从 `pactl list short clients` 的行里取应用名（第 2 列）。
+
+    这是「TRTC 到底连上了**哪一个** pulseaudio」的唯一直接证据：SDK 的 libpulse 客户端
+    会把 `application.name` 设为 `liteav`（原生字符串 `pulseaudio.application.name.liteav`）。
+    若客户端清单里**没有** liteav，说明它连的不是我们起的那一个实例 —— 那台服务端
+    （自动拉起、默认配置）既没有硬件声卡也没有我们的 null-sink，设备表必然为空，
+    而且**不会**打出 `pulse server connect failed`（这正是本次最难排除的分支）。
+    """
+    if lines is None:
+        return None
+    names: list[str] = []
+    for line in lines:
+        parts = [p for p in re.split(r"[\t]+", line.strip()) if p != ""]
+        if len(parts) >= 2:
+            names.append(parts[1])
+        elif parts:
+            names.append(parts[0])
+    return names
+
+
 def inspect_devices(*, env: dict[str, str], sink: str,
                     which=shutil.which, run=subprocess.run) -> dict:
-    """清点音频设备：TRTC 的设备枚举必须有东西可拿，否则依旧 GetDevices wait。"""
+    """清点音频设备：TRTC 的设备枚举必须有东西可拿，否则依旧 GetDevices wait。
+
+    `probed` 是**必须看**的字段：pactl 不可用/调用失败时 sinks/sources 都是 None，
+    这与"清点成功但设备为空"是两件完全不同的事，混为一谈会把一次工具故障
+    误判成"音频子系统是哑的"（反之亦然，那更危险）。
+    """
     sinks = _pactl_lines("sinks", env=env, which=which, run=run)
     sources = _pactl_lines("sources", env=env, which=which, run=run)
+    clients = _pactl_lines("clients", env=env, which=which, run=run)
+    defaults = parse_server_defaults(_pactl_info(env=env, which=which, run=run))
     return {
         "pactl": (which(PACTL) or "") != "",
+        "probed": sinks is not None and sources is not None,
         "sinks": sinks,
         "sources": sources,
-        "sink_present": bool(sinks) and any(sink in line for line in sinks),
+        "clients": parse_client_names(clients),
         # monitor 与 virtual-source 名字都以 sink 名为前缀，故按前缀判定即可。
+        "sink_present": bool(sinks) and any(sink in line for line in sinks),
         "source_present": bool(sources) and any(sink in line for line in sources),
+        "default_sink": defaults["default_sink"],
+        "default_source": defaults["default_source"],
+    }
+
+
+def summarize_devices(report: dict | None, *, error: str = "") -> dict:
+    """清点结果 → `/status.audio.devices`（口径必须一眼可判，不给"0 台"留歧义）。
+
+    `playout_ok` 的三态是要点：
+      * True  —— 清点成功且 PA 里有 sink（**只**证明 PA 侧有设备）；
+      * False —— 清点成功但 PA 里一个 sink 都没有：TRTC 的播放设备枚举必然为空，
+                 远端音频帧不会回调、上行恒为 0（2026-09-16 事故的直接条件）；
+      * None  —— 没清点成（pactl 缺失/失败）：**不知道**，不得当成 False，也不得当成 True。
+    """
+    if not isinstance(report, dict):
+        return {
+            "probed": False, "sink_count": None, "source_count": None,
+            "client_count": None, "client_names": None, "sink_present": False,
+            "source_present": False, "default_sink": None, "default_source": None,
+            "playout_ok": None, "error": error,
+        }
+    sinks = report.get("sinks")
+    sources = report.get("sources")
+    clients = report.get("clients")
+    probed = bool(report.get("probed"))
+    playout_ok = (bool(report.get("sink_present")) if probed else None)
+    return {
+        "probed": probed,
+        "sink_count": len(sinks) if isinstance(sinks, list) else None,
+        "source_count": len(sources) if isinstance(sources, list) else None,
+        "client_count": len(clients) if isinstance(clients, list) else None,
+        "client_names": clients if isinstance(clients, list) else None,
+        "sink_present": bool(report.get("sink_present")),
+        "source_present": bool(report.get("source_present")),
+        "default_sink": report.get("default_sink"),
+        "default_source": report.get("default_source"),
+        "playout_ok": playout_ok,
+        "error": error,
     }
 
 

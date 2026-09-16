@@ -92,6 +92,11 @@ EVENT_MARKERS = (
     "ERR", "WARN", "error", "Error", "FATAL",
     "失败", "进房", "errCode", "hello-redeem", "rtc session", "ws connected",
     "Cannot find module",
+    # ADEV：本端音频设备表（sidecar/adev.js）。2026-09-16 事故里「手机在发、对端收不到」
+    # 的真因是**本端没有可用播放设备**，而那一行此前只存在于 TRTC 的原生日志中。
+    # 单独给一个标记，是为了让「进房后设备清点」这一行在 300 行 output_tail 被
+    # `[VOL]`（每 500ms 一条）挤空之后仍然可读 —— 判据必须能被一条 GET 取到。
+    "ADEV",
 )
 
 # 不进事件环的高频噪声行。`[VOL]` 独立成条：即使某条音量行里偶然带了别的标记词，
@@ -455,9 +460,45 @@ class BridgeSupervisor:
             "server": plan.server,
             "runtime_dir": str(plan.runtime_dir),
             "error": "",
+            # 实测清点结果（见 _probe_audio_devices）。**必须**与上面的 sink/source 分开看：
+            # 上面两个字段来自启动计划（"我们打算造什么"），devices 才是"真的造出来了什么"。
+            "devices": self._probe_audio_devices(plan),
         }
         logger.info("[audio] pulseaudio ready, sink=%s, socket=%s, server=%s",
                     plan.sink, plan.socket_path, plan.server)
+
+    def _probe_audio_devices(self, plan: audio_env.AudioPlan) -> dict:
+        """运行期清点音频设备，把「PA 里到底有没有 sink/source」变成一条 GET 可读的事实。
+
+        为什么必须有这一步（2026-09-16 事故的最大观测缺口）
+        -------------------------------------------------
+        此前 `/status.audio` 里的 `sink` / `source` **来自启动计划，不是实测**：它只能证明
+        "计划里写了这个 sink"，证明不了"PA 里真的有"。而 TRTC 的播放设备枚举正是从 PA 拿的
+        —— 构建期自证通过 ≠ 运行期有设备。事故现场这两件事同时成立：
+        `/status.audio` 报告 `ok=true, sink=jax_null`，而 sidecar 侧是
+        `player device list is empty`（code 1202）+ `up=0帧` 连续 70 秒。
+        口径混淆到这一步，一条 GET 就判不了死，只能去猜。
+        所以这里用构建期自证**同一个** `inspect_devices()` 再实测一次，并如实报出去。
+
+        失败语义：清点失败只写进 `devices.error` / `probed=false`，**绝不**影响启动与退出
+        （观测不得成为新的故障面）。但"清点成功且一个 sink 都没有"会被打成正 ERROR 一行：
+        那正是"远端音频帧永不回调、上行恒为 0"的直接条件。
+        """
+        try:
+            report = audio_env.inspect_devices(env=plan.env, sink=plan.sink)
+        except Exception as exc:  # noqa: BLE001 - 观测分支一律 fail-open
+            logger.warning("[audio] 设备清点异常（不影响启动）：%s", type(exc).__name__)
+            return audio_env.summarize_devices(None, error=f"{type(exc).__name__}: {exc}")
+        summary = audio_env.summarize_devices(report)
+        if summary["playout_ok"] is False:
+            logger.error(
+                "[audio] 清点结果 playout_ok=False：PA 里没有任何 sink=%s 前缀的设备 ⇒ "
+                "TRTC 的播放设备枚举会拿到空表 ⇒ 远端音频帧永不回调（onPlayAudioFrame）、"
+                "上行恒为 0。devices=%s", plan.sink, summary,
+            )
+        else:
+            logger.info("[audio] 设备清点 devices=%s", summary)
+        return summary
 
     def start(self) -> None:
         self._materialize_bridge_tls()
