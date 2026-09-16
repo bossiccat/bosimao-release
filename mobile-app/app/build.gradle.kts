@@ -32,11 +32,13 @@ android {
         resValue("string", "jax_capture_effects",
             (project.findProperty("jaxCaptureEffects") as String? ?: "AEC_NS").trim().uppercase())
 
-        // 采集音频模式 A/B（2026-09-16，根因：本机在 AUDIOCALL 通话形态下向自采返回全零）：
-        // -PjaxCaptureMode=NORMAL ⇒ 建自采 AudioRecord 那一刻把 AudioManager.mode 置 MODE_NORMAL，
-        // 建完恢复。默认 KEEP = 生产行为完全不变。
+        // 采集音频模式（2026-09-16 根因修复，已真机实测）：
+        // 默认 **NORMAL** —— 本机（Samsung S26U/AGM-LPI）在 AUDIOCALL 通话形态下
+        // 向自采 AudioRecord 返回全零（同机 MicRecorder 走 1ch/无音效形态 ⇒ 电平 39~72 正常）；
+        // 建 AudioRecord 那一瞬临时切 MODE_NORMAL 即恢复正常（实测 raw 最高 211/gate=true）。
+        // 回退开关：-PjaxCaptureMode=KEEP 可还原旧行为（仅用于对照，不用于发布）。
         resValue("string", "jax_capture_mode",
-            (project.findProperty("jaxCaptureMode") as String? ?: "KEEP").trim().uppercase())
+            (project.findProperty("jaxCaptureMode") as String? ?: "NORMAL").trim().uppercase())
     }
 
     buildTypes {
