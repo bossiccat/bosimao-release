@@ -22,8 +22,9 @@ interface PetProps {
 }
 
 // 语义色全部走 CSS 变量（P0-2），SVG stopColor 经 style 属性绑定才能解析 var()
+// 状态色环契约（商业化 2026-09-16）：空闲/监控态 = 灰绿，警示态 = 语义色
 const TONE_COLOR: Record<PetTone, string> = {
-  neutral: "var(--accent)",
+  neutral: "var(--voice-idle)",
   success: "var(--success)",
   warn: "var(--warn)",
   danger: "var(--danger)",
