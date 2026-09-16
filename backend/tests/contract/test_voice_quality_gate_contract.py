@@ -100,6 +100,38 @@ def test_missing_ratio_is_a_failure_not_skipped() -> None:
     assert any("不可得" in f for f in fails)
 
 
+def test_missing_downlink_drops_is_a_failure_not_an_implicit_zero() -> None:
+    """`queue_drops_down` **缺席**（None / 键不存在）必须判 FAIL，不能被当成 0。
+
+    为什么（2026-09-16 审计出的"假绿主通道"）
+    ----------------------------------------
+    `check-voice-quality-gate.py:100` 原写法是
+    `if REQUIRE_DOWNLINK_DROPS_ZERO and r.get("queue_drops_down"):` —— `None` 为假
+    ⇒ **"没测到"被判成"零丢帧 = 通过"**。而同一个门禁里 :96-99 对 `ratio_speech is None`
+    偏偏是**硬 FAIL**：同一个门禁两套缺席语义。
+
+    触发路径零前置条件：`run-sim-e2e.py:167` 用 `urlopen("...:19093/metrics", timeout=5)`
+    取桥指标，失败即 `:170-172` 置 `summary["bridge_metrics"] = None`；
+    `measure-rate-repeat.py:120-123` 再 `or {}` 取默认 ⇒ 字段整体缺失。
+    **一次 5s 读超时即可**，而那一轮可能真的跑成功了。
+    """
+    gate = _load_gate()
+    rows = [{"run": 1, "state": "replied", "reply_frames": 100, "ratio_speech": 0.95,
+             "queue_drops_up": 0, "age_drop_lines": []}]
+
+    explicit_none = [dict(rows[0], queue_drops_down=None)]
+    fails_none, _ = gate._check_clean(explicit_none)
+    assert any("queue_drops_down" in f for f in fails_none), (
+        f"queue_drops_down=None 必须 FAIL（缺席 ≠ 零丢帧），实得 {fails_none}"
+    )
+
+    absent_key = [dict(rows[0])]          # 键整体不存在（桥指标 `or {}` 后的真实形态）
+    fails_absent, _ = gate._check_clean(absent_key)
+    assert any("queue_drops_down" in f for f in fails_absent), (
+        f"queue_drops_down 键缺席必须 FAIL，实得 {fails_absent}"
+    )
+
+
 def test_downlink_age_drop_fails_but_uplink_only_warns() -> None:
     """下行的帧龄丢弃 = 用户少听一帧内容；上行的帧龄丢弃语义上正确，只告警。"""
     gate = _load_gate()

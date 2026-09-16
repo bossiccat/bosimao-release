@@ -97,8 +97,17 @@ def _check_clean(rows: list[dict]) -> tuple[list[str], list[str]]:
             fails.append(f"{tag}: 语速比不可得（文本提取或参照不可用）—— 不接受缺席，宁可不报")
         elif ratio < MIN_RATIO_SPEECH:
             fails.append(f"{tag}: 语速比 {ratio} < {MIN_RATIO_SPEECH} ⇒ **下行丢了音频**（不是模型说得快）")
-        if REQUIRE_DOWNLINK_DROPS_ZERO and r.get("queue_drops_down"):
-            fails.append(f"{tag}: queue_drops_down={r['queue_drops_down']} ≠ 0")
+        # ⚠️ 缺席（None / 键不存在）必须判 FAIL，与上面 `ratio_speech is None` 的缺席语义
+        # **对齐**。旧写法 `and r.get("queue_drops_down")` 里 None 为假 ⇒ 把「压根没测到」
+        # 判成「零丢帧 = 通过」，而同一个门禁对 ratio 的缺席却是硬 FAIL —— 两套语义。
+        # 触发路径零前置条件：run-sim-e2e.py:167 用一次 5s urlopen 超时读桥指标，失败即把
+        # summary["bridge_metrics"] 置 None，measure-rate-repeat.py:120-123 再 `or {}`
+        # 取默认 ⇒ 字段整体缺失，而那一轮可能真的跑成功了。
+        drops_down = r.get("queue_drops_down")
+        if REQUIRE_DOWNLINK_DROPS_ZERO and drops_down is None:
+            fails.append(f"{tag}: queue_drops_down 不可得（桥指标未取到）—— 不接受缺席，宁可不报")
+        elif drops_down:
+            fails.append(f"{tag}: queue_drops_down={drops_down} ≠ 0")
         down_age = [l for l in (r.get("age_drop_lines") or []) if "[down]" in l]
         if down_age:
             fails.append(f"{tag}: 出现下行 age-drop：{down_age[0]}")
