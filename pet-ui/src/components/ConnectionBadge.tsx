@@ -105,7 +105,7 @@ export function ConnectionBadge({
           display: inline-flex; align-items: center; gap: 6px;
           font-family: var(--font-mono); font-size: 11px;
           padding: 3px 8px; border-radius: 6px;
-          background: var(--surface-2); border: 1px solid var(--border);
+          background: var(--surface-raised); border: 1px solid var(--border);
           color: var(--fg-2); line-height: 1;
         }
         .conn-ws, .conn-voice { display: inline-flex; align-items: center; gap: 4px; }

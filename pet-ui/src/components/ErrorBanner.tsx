@@ -70,7 +70,7 @@ export function ErrorBanner({
         .err-action {
           display: inline-flex; align-items: center; gap: 5px;
           min-height: 28px; padding: 0 10px;
-          background: var(--accent); color: #06121a;
+          background: var(--accent); color: var(--accent-on);
           border: none; border-radius: 6px;
           font-size: 12px; font-weight: 600; cursor: pointer;
           white-space: nowrap;
