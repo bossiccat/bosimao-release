@@ -50,6 +50,13 @@ class BoundedAudioQueue:
         # 帧龄丢弃计数：超龄条目在每次 push/pop 时被静默丢弃（原实现无任何日志），
         # 是「max_frames 形同虚设、有效缓冲实际只有约 1s」这一事实的唯一可观测入口。
         self.age_dropped = 0
+        # 打断丢弃计数（flush() 路径）。**刻意独立于 drops**，理由见 flush() 的注释：
+        # drops 的语义是"背压 / 帧龄丢弃"，且已被 health/session 的 queue_drops_down
+        # 消费（health.py:93 → session.py:494）；把打断丢弃混进去会把"用户插话"
+        # 误读成"系统过载/丢帧故障"，也会让门禁的"下行零丢帧"判据含义漂移。
+        # 此前 flush() 丢弃的帧**不进任何计数器**（一次打断实测 ≈158 帧 ≈3.16s），
+        # 是打断延迟/丢帧归因的一个结构性盲区。
+        self.flush_dropped = 0
         self._last_age_drop_log = float("-inf")  # 首帧过龄即打，之后 ≥1s 一条
         # P0-5/F9：帧龄分布采样（量化 U4/U5 停摆导致的丢帧）
         self._age_samples: deque[float] = deque(maxlen=1000)
@@ -74,6 +81,10 @@ class BoundedAudioQueue:
             "backpressure_events": self.backpressure_events,
             "queue_bytes": self.bytes_total,
             "age_dropped": self.age_dropped,
+            # 打断丢弃（flush 路径）单独曝光：它**不在** queue_drops 里，也不在
+            # age_dropped 里（见 flush() 的口径说明）。消费方要与 queue_drops
+            # 分别判读，否则会把"打断"与"过载/过龄"混为一谈。
+            "flush_dropped": self.flush_dropped,
         }
 
     # ---- 入队（非阻塞） ----
@@ -140,16 +151,33 @@ class BoundedAudioQueue:
     # ---- generation flush ----
 
     def flush(self, generation: int | None = None) -> int:
-        """丢弃指定 generation（None=全部）条目，返回丢弃数（旧 generation 不再消费）"""
+        """丢弃指定 generation（None=全部）条目，返回丢弃数（旧 generation 不再消费）
+
+        丢弃数同时累加到**独立的** `flush_dropped`（并曝光为 metrics() 的同名字段）
+        与 age_dropped 是两类不同的丢弃，混算会让既有消费方误读：
+
+        · `drops` 的既有语义是"**背压 / 帧龄丢弃**"（入队预算过载 + 超龄过期），
+          已被 health.py:93 / session.py:494 作为 `queue_drops_down` 消费，也是门禁
+          「下行零丢帧」的读数。flush 是**打断**语义（DownlinkShaper.reset()），
+          把它并进 drops 会让"用户插话"被误报成"系统过载/丢帧故障"。
+        · `age_dropped` 是帧龄过期专项，flush 与帧龄无关，同样不得混入。
+
+        ⇒ 新增独立计数 `flush_dropped`：既让打断丢弃**可观测**（此前一次打断丢弃
+        ≈158 帧 ≈3.16s 完全不进任何计数器），又不改变任何既有口径。
+        注意：JS 侧 downlink_pacer.js::clear() 是把打断丢弃计入 stats.dropped 的 ——
+        两侧口径本就相反，本字段只解决"桥侧看得见"，不去动 JS 侧既有语义。
+        """
         if generation is None:
             dropped = len(self._entries)
             self._entries.clear()
+            self.flush_dropped += dropped
             return dropped
         kept: deque[QueueEntry] = deque(
             entry for entry in self._entries if entry.generation != generation
         )
         dropped = len(self._entries) - len(kept)
         self._entries = kept
+        self.flush_dropped += dropped
         return dropped
 
     def bump_generation(self) -> int:
