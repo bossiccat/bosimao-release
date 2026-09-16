@@ -47,7 +47,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libudev1 \
         libxcb-xfixes0 \
         libxcb-shm0 \
+        pulseaudio \
+        pulseaudio-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# 音频子系统（PulseAudio）——2026-09-16 线上事故沉淀，发布阻断级
+# ---------------------------------------------------------------------------
+# 镜像原本**没有任何音频子系统**。TRTC 的 Linux 原生层进房时直接打：
+#   pulse_audio_context.cc:69   pulse server connect failed, please install pulseaudio
+#   pulse_audio_context.cc:1327 current context is not ready  GetDevices wait
+# 之后 EnterRoom 再无一行原生日志（26 分钟零输出），桥侧权威上行计数
+# `up rms=%.0f frames=%d`（backend/rtc_bridge/session.py:308）一条都没出现
+# ⇒ 手机与云端媒体面从来没共处一室（手机侧 user size 恒为 1）。
+#
+# 装两个包，各有明确用途：
+#   · pulseaudio        —— 守护进程本体 + 标准模块（module-native-protocol-unix /
+#                          module-null-sink / module-virtual-source），运行期必需；
+#   · pulseaudio-utils  —— `pactl`，**只在构建期**用于清点 sink/source（见下面的自证 RUN）。
+# 无头容器没有声卡，所以设备必须自己造：用 module-null-sink 造一个 null sink
+# （同时提供 monitor source），再用 module-virtual-source 派生一个"虚拟麦克风"。
+# 具体 argv 与环境变量在 cloudbridge/audio_env.py 里（运行期与构建期共用同一份）。
 
 # 上面五个图形/设备库不是「顺手装的」：它们来自 TRTC Linux 原生库自己的 DT_NEEDED。
 # 解析 build/Release 的三个 .so 的 ELF 动态段得到（2026-09-16 离线核对，见
@@ -197,6 +216,21 @@ RUN set -eu; cd sidecar; \
     echo "[trtc-addon] ldd OK: $(echo "$LDD_OUT" | wc -l) 个条目全部解析（含同目录 liteav 系列 .so）"
 
 COPY cloudbridge ./cloudbridge
+
+# 音频子系统构建期自证（fail-closed）
+# ---------------------------------------------------------------------------
+# 「本机的开发环境没有 docker」这类话不能当作"参数对不对只能等线上才知道"的借口：
+# 把运行期那一份 argv（cloudbridge/audio_env.py:build_plan，运行期与构建期**同一个**
+# 函数）在这里对着**真实 Debian 镜像**跑一次，用 pactl 清点 sink/source 是否真的存在。
+# 起不来、套接字不出现、设备清点为空 —— 任一条都让**构建失败**，绝不产出
+# 「进程起得来但音频层是哑的」镜像（那正是 DeployId 015 的状态：进房永远完不成，
+# 且真实 sidecar 的渲染进程日志当时也读不到，藏了 26 分钟）。
+# 用临时 HOME，避免把 pulse 的 cookie/配置写进镜像层。
+RUN set -eu; \
+    export HOME=/tmp/pulse-selftest-home; \
+    mkdir -p "$HOME"; \
+    python cloudbridge/audio_env.py --self-test --runtime-dir /tmp/pulse-selftest; \
+    rm -rf "$HOME" /tmp/pulse-selftest
 
 # 平台只暴露一个端口；rtc_bridge 的 19092/19093 保持容器内 localhost，不对外。
 EXPOSE 9200
