@@ -42,6 +42,7 @@ from pathlib import Path
 # supervisor.py 以脚本方式启动（python cloudbridge/supervisor.py）；显式把本目录放入
 # sys.path，使 `import sim_phone` 在"脚本运行"与"被测试 importlib 加载"两种方式下都成立。
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import audio_env  # noqa: E402
 import sim_phone  # noqa: E402
 import sim_provision  # noqa: E402
 import tls_material  # noqa: E402
@@ -82,10 +83,14 @@ class Child:
     TAIL_LINES = 120
 
     def __init__(self, name: str, argv: list[str], cwd: Path, extra_env: dict[str, str],
-                 *, liveness: bool = True) -> None:
+                 *, liveness: bool = True, tail_lines: int | None = None) -> None:
         self.name = name
         self.argv = argv
         self.cwd = cwd
+        # 尾部窗口长度按子进程分别设定：真实 sidecar 打开 --enable-logging=stderr 后，
+        # 渲染进程的每一条 console 都会进这里（这正是我们要的），固定的 120 行会被
+        # 高频的 [STAT]/[UPRMS] 挤满，把"进房失败 errCode="那种一行定生死的死因挤出窗口。
+        self.tail_lines = tail_lines or self.TAIL_LINES
         # liveness=False 的子进程是"一次性任务"（如手机模拟器）：它跑完就退出是**预期行为**，
         # 不得据此判定整体失败并触发容器重启。
         self.liveness = liveness
@@ -110,8 +115,8 @@ class Child:
                     continue
                 with self._lock:
                     self.tail.append(line)
-                    if len(self.tail) > self.TAIL_LINES:
-                        del self.tail[: len(self.tail) - self.TAIL_LINES]
+                    if len(self.tail) > self.tail_lines:
+                        del self.tail[: len(self.tail) - self.tail_lines]
                 logger.info("[%s] %s", self.name, line)
         except Exception:  # 读管道失败不应影响监督逻辑
             return
@@ -195,6 +200,18 @@ class BridgeSupervisor:
         self.sim_metrics = sim_phone.PhoneSimMetrics()
         self._sim_lock = threading.Lock()
 
+        # 音频子系统（PulseAudio）：TRTC 的 Linux 原生层没有它就不能初始化音频设备，
+        # EnterRoom 永远完不成 ⇒ 手机与云端媒体面从不共处一室（2026-09-16 事故，
+        # 详见 cloudbridge/audio_env.py）。它必须在 sidecar **之前**就绪。
+        self.audio: Child | None = None
+        self._audio_plan: audio_env.AudioPlan | None = None
+        self._audio_status: dict = {"ok": False, "state": "not-started", "error": ""}
+        self.audio_runtime_dir = audio_env.default_runtime_dir()
+        try:
+            self.audio_ready_timeout_s = float(_env("JAX_AUDIO_READY_TIMEOUT_S", "20") or 20)
+        except ValueError:
+            self.audio_ready_timeout_s = audio_env.READY_TIMEOUT_S
+
         # 子进程 env：*_FILE 指向的文件在 start() 时由注入的 PEM 环境变量落盘
         # （见 tls_material）。私钥绝不烘进镜像。
         # CONTROL_PLANE_BASE_URL 是服务既有键名，而 rtc_bridge 读的是
@@ -229,6 +246,11 @@ class BridgeSupervisor:
                 "--no-sandbox",
                 "--disable-gpu",
                 "--disable-dev-shm-usage",
+                # 渲染进程的 console 必须进 stdout。此前只有内置模拟机带这个开关，
+                # 真实 sidecar 的渲染进程 JS 日志既不进 stdout、也不在 /status 里
+                # ——「进房成功/进房失败 errCode=」「[PCM]」「[UPRMS]」「[STAT]」全都看不见，
+                # 这是 2026-09-16 排查里最大的观测障碍。与模拟机保持完全一致。
+                "--enable-logging=stderr",
                 ".",
                 "--role=sidecar",
                 f"--bridge-url={self.bridge_ws}",
@@ -236,6 +258,9 @@ class BridgeSupervisor:
             ],
             SIDECAR_DIR,
             {},
+            # 打开渲染进程日志后行数陡增，尾部窗口放大一倍多，保证"进房失败 errCode="
+            # 这类一行定生死的死因不会被高频状态行挤出 /status.sidecar.output_tail。
+            tail_lines=300,
         )
 
     # ---- 生命周期 ----
@@ -262,8 +287,72 @@ class BridgeSupervisor:
         self.bridge._env.update(files)
         self._tls_material = {"ok": True, "error": ""}
 
+    def _start_audio(self) -> None:
+        """在 sidecar 之前把音频子系统拉起来，并等它**真的可连**。
+
+        为什么必须先起：TRTC 的 Linux 原生层在 EnterRoom 里初始化音频设备管理器，
+        连不上 PulseAudio 就 `GetDevices wait`，进房**永远完不成**（26 分钟零原生日志），
+        手机侧 user size 恒为 1，桥侧 `up rms=` 一条都不出现——手机和云端媒体面
+        从来没共处一室（2026-09-16 事故）。
+
+        fail-closed：起不来就在 stdout 打 FATAL 并让容器退出（进 CLS，一条日志可判定），
+        绝不带着一个哑的音频层继续——那正是本次事故藏了 26 分钟的形态。
+        """
+        if not self.sidecar_enabled:
+            # 没有 TRTC 对端就不需要音频层；显式记一条，避免以后误读成"音频起过"。
+            logger.info("[audio] skipped: BRIDGE_SIDECAR_ENABLED=false（无 TRTC 对端，无需音频子系统）")
+            self._audio_status = {"ok": True, "state": "skipped", "error": ""}
+            return
+
+        try:
+            plan = audio_env.build_plan(self.audio_runtime_dir)
+        except audio_env.AudioSubsystemError as exc:
+            self._audio_status = {"ok": False, "state": "unavailable", "error": str(exc)}
+            logger.error("[audio] FATAL: %s", exc)
+            raise SystemExit(1) from exc
+
+        self._audio_plan = plan
+        # 与其它子进程同等的监督语义：pulseaudio 死了容器即退出（绝不带着哑音频层跑）。
+        self.audio = Child("pulseaudio", plan.argv, SERVER_ROOT, plan.env)
+        try:
+            self.audio.start()
+        except Exception as exc:  # noqa: BLE001 - 启动失败必须 fail-closed
+            self._audio_status = {"ok": False, "state": "launch_failed",
+                                  "error": f"{type(exc).__name__}"}
+            logger.error("[audio] FATAL: pulseaudio 无法启动（%s）；拒绝在无音频子系统的容器里"
+                         "启动 sidecar —— TRTC 的 EnterRoom 会永远完不成", type(exc).__name__)
+            raise SystemExit(1) from exc
+
+        if not audio_env.wait_for_socket(plan.socket_path, timeout=self.audio_ready_timeout_s,
+                                        alive=self.audio.alive):
+            self._audio_status = {"ok": False, "state": "not_ready",
+                                  "socket": str(plan.socket_path), "error": "socket_absent"}
+            logger.error("[audio] FATAL: pulseaudio 在 %ss 内未就绪（socket=%s 未出现）；"
+                         "拒绝启动 sidecar —— TRTC 只会在 `GetDevices wait` 上卡死",
+                         self.audio_ready_timeout_s, plan.socket_path)
+            raise SystemExit(1)
+
+        # 路径必须先落进本进程 env：sidecar 由 xvfb-run 派生，多一跳继承最容易丢变量。
+        # （Child 在构造时已拷贝 os.environ，所以下面还要显式更新它的 _env。）
+        os.environ.update(plan.env)
+        self.sidecar._env.update(plan.env)
+        self._audio_status = {
+            "ok": True,
+            "state": "ready",
+            "sink": plan.sink,
+            "source": plan.source,
+            "socket": str(plan.socket_path),
+            "server": plan.server,
+            "runtime_dir": str(plan.runtime_dir),
+            "error": "",
+        }
+        logger.info("[audio] pulseaudio ready, sink=%s, socket=%s, server=%s",
+                    plan.sink, plan.socket_path, plan.server)
+
     def start(self) -> None:
         self._materialize_bridge_tls()
+        # 音频子系统必须先于 sidecar 就绪（TRTC 进房即用音频设备）。
+        self._start_audio()
         self.bridge.start()
         if self.sidecar_enabled:
             self.sidecar.start()
@@ -309,6 +398,14 @@ class BridgeSupervisor:
                 self.sim_metrics.failure = f"prompt_generation:{type(exc).__name__}"
             return
 
+        # 凭证只走环境变量：argv 会进日志（Child.start 会打印整条命令），env 不会。
+        sim_env = {
+            "VOICE_SIM_DEVICE_CREDENTIAL": device.credential_token,
+            "JAX_SIDECAR_LOG_DIR": str(getattr(self, "sim_log_dir", "/tmp/sim-logs")),
+        }
+        # 模拟器与 sidecar 同容器、同走 TRTC 原生层，音频子系统变量必须一并注入。
+        if getattr(self, "_audio_plan", None) is not None:
+            sim_env.update(self._audio_plan.env)
         self.sim_phone = Child(
             "sim-phone",
             [
@@ -319,7 +416,7 @@ class BridgeSupervisor:
                 "--disable-dev-shm-usage",
                 # 让 Chromium 把渲染进程 console 直接写到 stderr：无头环境里渲染进程
                 # 日志既不进 stdout 也不一定落文件（实测注入目录一个文件都没生成，
-                # stdout 只有 dbus 噪声），死因必须有个出口。仅模拟器需要，故只加在这里。
+                # stdout 只有 dbus 噪声），死因必须有个出口。真实 sidecar 也已同款打开。
                 "--enable-logging=stderr",
                 ".",
                 "--role=phone",
@@ -335,11 +432,7 @@ class BridgeSupervisor:
                 f"--join-grace={self.sim_join_grace_s}",
             ],
             SIDECAR_DIR,
-            # 凭证只走环境变量：argv 会进日志（Child.start 会打印整条命令），env 不会。
-            {
-                "VOICE_SIM_DEVICE_CREDENTIAL": device.credential_token,
-                "JAX_SIDECAR_LOG_DIR": str(getattr(self, "sim_log_dir", "/tmp/sim-logs")),
-            },
+            sim_env,
             liveness=False,  # 跑完即退出是预期
         )
         try:
@@ -414,12 +507,20 @@ class BridgeSupervisor:
                     continue
         return found
 
+    def _children(self) -> list[Child]:
+        """接受监督的全部子进程（含音频子系统）。容器内没有自愈，退出即整体退出。"""
+        children = [self.sidecar, self.bridge]
+        audio = getattr(self, "audio", None)
+        if audio is not None:
+            children.append(audio)
+        return children
+
     def terminate_all(self) -> None:
         self.shutting_down = True
-        for child in (self.sidecar, self.bridge):
+        for child in self._children():
             child.signal(signal.SIGTERM)
         deadline = time.monotonic() + 10
-        for child in (self.sidecar, self.bridge):
+        for child in self._children():
             while child.alive() and time.monotonic() < deadline:
                 time.sleep(0.2)
             child.signal(signal.SIGKILL)
@@ -451,6 +552,11 @@ class BridgeSupervisor:
 
     def _first_dead(self) -> Child | None:
         """只把 liveness 子进程的死当失败；模拟器等一次性子进程退出不算。"""
+        # 音频子系统死掉同样是致命的：TRTC 的原生层随后会退化成 `GetDevices wait`，
+        # 进房永远完不成——这种"进程都活着但媒体面死了"的状态最难查，所以直接整体退出。
+        audio = getattr(self, "audio", None)
+        if audio is not None and audio.liveness and audio.reap() is not None:
+            return audio
         if self.bridge.liveness and self.bridge.reap() is not None:
             return self.bridge
         if self.sidecar_enabled and self.sidecar.liveness and self.sidecar.reap() is not None:
@@ -488,6 +594,10 @@ class BridgeSupervisor:
             "trtc_sdk_version": self.sdk_version(),
             # TLS 材料落盘结果（不含敏感值）：部署门禁据此读死因。
             "tls_material": getattr(self, "_tls_material", {"ok": True, "error": ""}),
+            # 音频子系统状态：判定"手机与云端是否真的能在同一房间"的第一块拼图。
+            # 没有它，TRTC 的 EnterRoom 会卡在 `GetDevices wait` 上永不完成。
+            "audio": getattr(self, "_audio_status",
+                             {"ok": False, "state": "not-started", "error": ""}),
         }
         payload["ok"] = bool(
             self.bridge.alive()
