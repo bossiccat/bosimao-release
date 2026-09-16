@@ -42,7 +42,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxfixes3 \
         libdrm2 \
         fonts-liberation \
+        libgl1 \
+        libegl1 \
+        libudev1 \
+        libxcb-xfixes0 \
+        libxcb-shm0 \
     && rm -rf /var/lib/apt/lists/*
+
+# 上面五个图形/设备库不是「顺手装的」：它们来自 TRTC Linux 原生库自己的 DT_NEEDED。
+# 解析 build/Release 的三个 .so 的 ELF 动态段得到（2026-09-16 离线核对，见
+# cloudbridge/trtc-electron-sdk-linux-versions.json 的 verification）：
+#   libliteavsdk.so  需要 libGL.so.1 / libEGL.so.1 / libXrandr.so.2 / libXfixes.so.3 /
+#                    libxcb.so.1 / libxcb-shm.so.0 / libxcb-xfixes.so.0 / libudev.so.1 /
+#                    libX11.so.6 / libX11-xcb.so.1 / libdrm 等
+#   libtxffmpeg.so   需要 libz.so.1 等
+# DT_NEEDED 是**加载期**硬依赖：缺一个，dlopen 直接失败，sidecar 又在模块加载期死掉
+# （与本次线上事故同一个表现）。libXrandr/libXfixes/libX11/libxcb 已由 libgtk-3-0 /
+# libx11-xcb1 链带上；libGL/libEGL/libudev/libxcb-xfixes/libxcb-shm 未必，
+# 这里显式声明，避免依赖传递闭包的偶然性。
+
+# 动态链接器搜索路径：TRTC 的 Linux 原生库**没有 DT_RPATH/DT_RUNPATH**（实测三个 .so 与
+# .node 的四段全为空），而 trtc_electron_sdk.node 的 DT_NEEDED 里是裸名
+# `libliteavsdk.so` / `libtxffmpeg.so` / `libuser_sig_gen.so`——它们就在 .node 同目录。
+# glibc 解析裸名时不搜索「加载对象自身所在目录」，所以不显式给路径就会
+# dlopen 失败（又是模块加载期即死）。这里只加这一个目录，内容是 4 个 SDK 专属 .so，无冲突。
+ENV LD_LIBRARY_PATH=/srv/sidecar/node_modules/trtc-electron-sdk/build/Release
 
 # Python 依赖：与 cloudapi 同一闭包（rtc_bridge 会 import app.*），额外需要 websockets。
 # edge-tts 用于**云端生成手机模拟器的中文提示音**（真语音，非音调），配合 ffmpeg 转 16k wav。
@@ -159,7 +183,18 @@ RUN set -eu; cd sidecar; \
       echo "[trtc-addon] FATAL: node_modules 里 JS 包版本（${INSTALLED}）!= ARG TRTC_ELECTRON_SDK_VERSION（${EXPECTED}）；JS 与原生 addon 版本漂移，拒绝构建"; \
       exit 1; \
     fi; \
-    echo "[trtc-addon] fail-closed 校验通过（存在 + 非零字节 + 版本一致）"
+    echo "[trtc-addon] fail-closed 校验通过（存在 + 非零字节 + 版本一致）"; \
+    LDD_OUT="$(ldd "$ADDON" 2>&1 || true)"; \
+    echo "$LDD_OUT" | sed 's/^/[trtc-addon] ldd| /'; \
+    if echo "$LDD_OUT" | grep -q "=> not found"; then \
+      echo "[trtc-addon] FATAL: 原生 addon 的动态依赖未解析（见上面 ldd 的 '=> not found'）；拒绝构建「dlopen 即失败」的镜像"; \
+      exit 1; \
+    fi; \
+    if ! echo "$LDD_OUT" | grep -q "=> "; then \
+      echo "[trtc-addon] FATAL: ldd 未能解析该 .node（输出里没有任何已解析依赖，可能不是 Linux x86-64 的 ELF）；拒绝构建"; \
+      exit 1; \
+    fi; \
+    echo "[trtc-addon] ldd OK: $(echo "$LDD_OUT" | wc -l) 个条目全部解析（含同目录 liteav 系列 .so）"
 
 COPY cloudbridge ./cloudbridge
 

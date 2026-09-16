@@ -224,3 +224,34 @@ def test_addon_presence_check_rejects_zero_byte_file() -> None:
     assert "-s \"$ADDON\"" in text
     assert "! -s \"$ADDON\"" in text
     assert "sha256sum" in text, "必须把 addon 的 sha256 打进构建日志，便于与线上产物对账"
+
+
+def test_dockerfile_verifies_addon_dynamic_dependencies_resolve() -> None:
+    """DT_NEEDED 是**加载期**硬依赖：缺一个，dlopen 就失败，sidecar 又在模块加载期死掉。
+
+    2026-09-16 离线解析 addon 的 ELF 动态段发现：trtc_electron_sdk.node 的 DT_NEEDED 里是
+    裸名 `libliteavsdk.so` / `libtxffmpeg.so` / `libuser_sig_gen.so`（同目录），而
+    libliteavsdk.so 还要 libGL.so.1 / libEGL.so.1 / libudev.so.1 / libxcb-xfixes.so.0 等。
+    这类缺失在无头容器里同样是静默的（渲染进程只留一行 CONSOLE 错误），
+    所以必须在构建期用 ldd 断言全部可解析 —— 结构性断言，执行者是构建期 shell。
+    """
+    text = _dockerfile()
+    assert 'LDD_OUT="$(ldd "$ADDON" 2>&1 || true)"' in text, "必须真的对 addon 执行 ldd"
+    assert "=> not found" in text, "必须按 ldd 的 '=> not found' 判据失败"
+    assert 'grep -q "=> "' in text, "必须拒绝「ldd 完全解析不出」的情况（输出里一个依赖都没解析）"
+    ldd_block = text.split("LDD_OUT=", 1)[1][:600]
+    assert ldd_block.count("exit 1") >= 2, "依赖缺失/未解析都必须 fail-closed"
+
+
+def test_dockerfile_pins_loader_path_and_declares_addon_shared_library_deps() -> None:
+    """TRTC 的 Linux 原生库没有 DT_RPATH/DT_RUNPATH，裸名 soname 必须靠 LD_LIBRARY_PATH。
+
+    同时，libliteavsdk.so 的 DT_NEEDED 里有若干不保证由 apt 传递闭包带进来的库，
+    必须显式安装——赌传递闭包就是又一次「静默失败」。
+    """
+    text = _dockerfile()
+    assert (
+        "LD_LIBRARY_PATH=/srv/sidecar/node_modules/trtc-electron-sdk/build/Release" in text
+    ), "addon 同目录的 .so 是裸名依赖，必须显式给出动态链接器搜索路径"
+    for package in ("libgl1", "libegl1", "libudev1", "libxcb-xfixes0", "libxcb-shm0"):
+        assert package in text, f"{package} 必须显式安装（来自 libliteavsdk.so 的 DT_NEEDED）"
