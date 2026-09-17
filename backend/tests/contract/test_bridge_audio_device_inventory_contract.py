@@ -165,6 +165,7 @@ def test_parse_device_details_reports_ports_and_prop_keys_of_our_own_sink() -> N
     d = details[0]
     assert d["name"] == "jax_null"
     assert d["ports"] == [], "没有 Ports 段 ⇒ 空端口（不是解析失败，也不是'不知道'）"
+    assert d["active_port"] is None, "没有 Active Port 行 ⇒ None（这正是 SDK 跳过它的原因）"
     assert d["props"] == ["device.description=JaxNullSink"], "取值必须一起给出，不能只给键名"
     assert isinstance(d["flags"], list) and d["flags"], "Flags 必须被解析出来（线上要判 HARDWARE）"
     assert "DECIBEL_VOLUME" in d["flags"]
@@ -189,12 +190,45 @@ def test_parse_device_details_reads_real_ports_and_props() -> None:
     d = audio_env.parse_device_details(PACTL_LIST_SINKS_HW)[0]
     assert d["name"] == "alsa_output.pci-0000_00_1f.3.analog-stereo"
     assert d["ports"] == ["analog-output-speaker", "analog-output-headphones"]
+    assert d["active_port"] == "analog-output-speaker", (
+        "真机的 Active Port 必须能读出来 —— ports 非空 != core 选中了端口，"
+        "而 SDK 判的是后者（见 audio_env 模块头）"
+    )
     keys = [p.split("=", 1)[0] for p in d["props"]]
     assert "device.form_factor" in keys and "device.class" in keys
     assert "device.form_factor=internal" in d["props"], "真机取值得能原样读出来"
     assert "HARDWARE" in d["flags"]
     # 端口**内部**那层 properties 不得污染属性清单（层级必须钉死两格）。
     assert "device.icon_name" not in keys
+
+
+def test_sink_ports_are_present_is_the_sdk_criterion() -> None:
+    """`sink_ports_are_present()` 就是"SDK 会不会看见这台设备"的观测口径。
+
+    三态必须分开：设备不在（未知/拼错了名字）、设备在但没有端口、设备在且有选中端口。
+    2026-09-17 线上那一台 null-sink 落在第二种 —— 于是 code 1202。
+    """
+    today = audio_env.parse_device_details(PACTL_LIST_SINKS_NULL)
+    assert audio_env.sink_ports_are_present({"sink_details": today}, "jax_null") is False, \
+        "今天的现实（无端口、无 Active Port）必须判 False"
+    assert audio_env.sink_ports_are_present({"sink_details": today}, "no-such-sink") is False, \
+        "名字对不上也是 False（调用方要自己区分'没清点到'与'没有端口'）"
+    assert audio_env.sink_ports({"sink_details": today}, "jax_null") == ([], None)
+
+    hw = audio_env.parse_device_details(PACTL_LIST_SINKS_HW)
+    assert audio_env.sink_ports_are_present({"sink_details": hw},
+                                            "alsa_output.pci-0000_00_1f.3.analog-stereo") is True
+
+    # 端口在、但没有 Active Port 行（core 还没选中）⇒ False。这一条是"ports 非空就绿"的
+    # 假绿防线：SDK 读的是选中那一个。
+    ports_without_active = audio_env.parse_device_details(
+        PACTL_LIST_SINKS_HW.replace("\tActive Port: analog-output-speaker\n", ""))
+    assert audio_env.sink_ports_are_present({"sink_details": ports_without_active},
+                                            "alsa_output.pci-0000_00_1f.3.analog-stereo") is False
+
+    # 没清点成（None）与清点到空都不能伪装成"有端口"。
+    assert audio_env.sink_ports_are_present({"sink_details": None}, "jax_null") is False
+    assert audio_env.sink_ports_are_present({}, "jax_null") is False
 
 
 def test_parse_device_details_keeps_unknown_separate_from_empty() -> None:

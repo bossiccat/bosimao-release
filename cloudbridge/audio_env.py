@@ -58,6 +58,14 @@
 
 因此本文件的 proplist 部分保留（写法约束、构建期门禁都留着），但**降级为外观**，
 不再声称它能修 1202。
+
+**真正的修法（2026-09-17）**：再加一条 `module-raop-sink`（argv 里第三条 `--load=`）
+—— 它是**唯一**一个由模块自己建出端口的合成 sink（raop-sink.c 里
+`pa_sink_new_data_add_port(..., "network-output", ...)`），因此是唯一能过 SDK 端口判据的
+设备。加载它不需要任何对端进程。构建期自证的**第四关**断言**观测到的** `Active Port:`：
+这一关红了是**有价值的否定结果**（说明该回到架构问题），不要去把断言调松。
+三个承重参数（`autoreconnect=true` / 不改 `server` / 不启监听进程）见 build_plan 的注释。
+
 * **必须显式钉住路径**（XDG_RUNTIME_DIR / PULSE_RUNTIME_PATH / PULSE_SERVER）：
   容器里没有 user session，`XDG_RUNTIME_DIR` 默认不存在，libpulse 客户端与服务端
   各自按它推导 `pulse/native`，不钉住就是两边各自找一个不存在的目录。
@@ -94,6 +102,17 @@ SOURCE_NAME = f"{SINK_NAME}.mic"
 SINK_FORM_FACTOR = "speaker"
 SOURCE_FORM_FACTOR = "microphone"
 MONITOR_NAME = f"{SINK_NAME}.monitor"
+# raop sink（module-raop-sink）：**唯一**一个由模块自己建出端口的合成 sink
+# （raop-sink.c 里 `pa_sink_new_data_add_port(..., "network-output", ...)`），
+# 而端口正是 SDK 接受设备的判据（模块头"1202 的真实判据"一节）。
+# 这就是"我们这边造的设备能被 SDK 看见"的那一条路。
+RAOP_SINK_NAME = "jax_raop"
+# 无对端（容器里**没有、也不该有** AirPlay 接收端）：故意指向一个**关闭的 loopback 端口**。
+# **不要**改成黑洞 IP —— 见 build_plan 里那段注释：关闭的 loopback 端口是**同步**失败
+# （不武装重连定时器），黑洞 IP 走**异步**路径、会武装 5s 重试定时器。
+RAOP_SERVER = "127.0.0.1:5000"
+# module-raop-sink 自己建出来的端口名 = PA core 会选中的 active port（构建期门禁断言这个值）。
+RAOP_ACTIVE_PORT = "network-output"
 READY_TIMEOUT_S = 20.0
 POLL_INTERVAL_S = 0.25
 
@@ -179,8 +198,33 @@ def build_plan(runtime_dir=None, *, sink: str = SINK_NAME,
         # 客户端入口（unix 套接字）。auth-anonymous=1：容器内单租户、套接字目录 0700，
         # 免掉 cookie/HOME 不一致导致"客户端连不上"的整类问题。
         "--load=module-native-protocol-unix auth-anonymous=1",
+        # raop sink：**唯一**一个由模块自己建出端口的合成 sink ⇒ 唯一能过 SDK 端口判据的
+        # 设备（null-sink / alsa-sink-device=null / jack-sink 都**不建端口**，见模块头）。
+        # 模块本体来自独立包 `pulseaudio-module-raop`（Dockerfile 里另有早期校验）。
+        #
+        # 下面三条都是**承重**的，不是装饰，别"顺手优化"掉：
+        #
+        # 1) `autoreconnect=true` 是**承重参数**：raop-sink.c:772 的默认值是 false，而
+        #    :780 的 `autonull` 是**跟着 autoreconnect 派生**出来的。autonull=true 才跳过
+        #    :560-564 那条唯一"不消费"的 `continue` 分支；否则 :276-278 那个卸载点变成
+        #    可达 ⇒ sink 被销毁 ⇒ 设备又没了。
+        # 2) **不需要、也不允许**加任何"监听端口"的进程（不启 AirPlay 接收端、不改
+        #    `server` 指向。**尤其不要**把它换成黑洞 IP）：往一个**关闭的 loopback 端口**
+        #    连是**同步**失败 —— 不武装重连定时器（rtsp_client.c:386-389 +
+        #    raop-client.c:1524）；而黑洞 IP 走**异步**路径、会武装那个 5 秒重试定时器，
+        #    于是我们就在跑一个只为探活而存在的定时器（多一份不必要的运行时行为）。
+        # 3) 没有对端时 sink 仍然**实时消费并丢弃**数据，而这次 render 调用会沿
+        #    sink-input 链一路上溯到我们的拦截器 —— **这正是本修复成立的机制**
+        #    （`pa_sink_render_full` 保证返回满长度；raop-sink.c:560-564 的 `continue`
+        #    是唯一不消费的路径，autonull=true 时它被跳过）。
+        f"--load=module-raop-sink sink_name={RAOP_SINK_NAME}"
+        f" protocol=UDP server={RAOP_SERVER} encryption=none"
+        f" autoreconnect=true latency_msec=50"
+        f' sink_properties="device.description=Jax Speaker'
+        f' device.form_factor={SINK_FORM_FACTOR} device.bus=pci"',
         # 设备：无头容器没有声卡，必须自己造。顺序有意义——virtual-source 的 master
-        # 是 null-sink 的 monitor，所以 null-sink 必须先加载。
+        # 是 null-sink 的 monitor，所以 null-sink 必须先加载（raop sink 与它们无依赖，
+        # 上面那条放在 native-protocol-unix 之后、null-sink 之前）。
         #
         # 下面这两串属性是**外观**，不是 1202 的解 —— 2026-09-17 更正：此前这里写着
         # "device.form_factor 是证据决定的一处、缺它就对应线上 1202 现场"，**那是错的**
@@ -334,7 +378,7 @@ def _prop_entry(key: str, value: str) -> str:
 
 
 def parse_device_details(text: str | None) -> list[dict] | None:
-    """从 `pactl list sinks|sources`（长格式）里取每个设备的名称/端口/属性(key=value)/标志。
+    """从 `pactl list sinks|sources`（长格式）里取设备的名称/端口/**选中的端口**/属性(key=value)/标志。
 
     为什么非要看**端口**和**属性取值**：TRTC 的 Linux ADM 在 `pulse_audio_context.cc`
     里枚举设备（原生字符串 `device.form_factor` / `device.description` /
@@ -348,6 +392,8 @@ def parse_device_details(text: str | None) -> list[dict] | None:
     —— 那个字段是 64 位端口指针，为空即**跳过该设备**，而 module-null-sink 永远
     不填端口 ⇒ 用 null-sink 造出来的 sink 必然被跳过（详见模块头"1202 的真实判据"
     一节）。属性那一列则是**外观**：它决定 icon/description/priority，不是被跳过的原因。
+    因此这里额外取 `Active Port:`（`active_port`）：**`ports` 非空 ≠ core 选中了端口**，
+    而传进 `pa_sink_info` 的是选中那一个。判"设备会不会被 SDK 看见"必须看它。
     **只列键名是不够的**——"有没有这个键"和"SDK 看到的取值是多少"是两件事，
     上一轮就是因为只列了键名而无法直接判定，才多花了一轮部署。
     所以这里输出 `key=value`（键名与取值一起），`None`（没清点成）与 `[]`
@@ -360,7 +406,8 @@ def parse_device_details(text: str | None) -> list[dict] | None:
     section = ""
     for raw in text.splitlines():
         if _DEVICE_BLOCK_RE.match(raw):
-            cur = {"name": "", "ports": [], "props": [], "flags": []}
+            cur = {"name": "", "ports": [], "props": [], "flags": [],
+                   "active_port": None}
             out.append(cur)
             section = ""
             continue
@@ -395,9 +442,38 @@ def parse_device_details(text: str | None) -> list[dict] | None:
             cur["flags"] = m.group(1).split()
             section = ""
             continue
+        # `Active Port:` 是**必需**项：SDK 的列举路径跳过的正是"端口指针为空"的设备
+        # （见模块头），而 `ports` 非空不等于 core 选中了某个端口 —— 判据是这一行。
+        m = re.match(r"^\tActive Port:\s*(\S+)\s*$", line)
+        if m:
+            cur["active_port"] = m.group(1)
+            section = ""
+            continue
         if line and not line.startswith("\t"):
             section = ""
     return out
+
+
+def sink_ports(report: dict, sink: str) -> tuple[list[str], str | None]:
+    """`report` 里名为 `sink` 的设备 →（它的端口清单, 它**选中的**端口）。
+
+    设备不存在返回 `([], None)` —— 与"设备在但没有端口"是两件不同的事，
+    调用方（构建期门禁）必须把两者分开说，否则又会得到一条读数含糊的日志。
+    """
+    for d in (report.get("sink_details") or []):
+        if d.get("name") == sink:
+            return list(d.get("ports") or []), d.get("active_port")
+    return [], None
+
+
+def sink_ports_are_present(report: dict, sink: str) -> bool:
+    """该设备是否**既有端口、又被 core 选中了端口** —— SDK 接受设备的充要观测条件。
+
+    2026-09-17 线上（null-sink）的真实输出正是 False：`Ports:` 段为空、
+    也没有 `Active Port:` 行 ⇒ SDK 列举时按端口判空跳过 ⇒ code 1202。
+    """
+    ports, active = sink_ports(report, sink)
+    return bool(ports) and bool(active)
 
 
 _DEFAULT_SINK_RE = re.compile(r"^\s*Default Sink:\s*(\S+)\s*$", re.MULTILINE)
@@ -609,13 +685,16 @@ def selftest(*, runtime_dir=None, timeout: float = READY_TIMEOUT_S,
     本机（Windows，无 pulseaudio、无 docker）跑不出 0；它是给 `docker build` 用的，
     参数全部可注入是为了让契约测试能用替身把每条失败分支都逼出来。
 
-    三关各有各的死法，缺一不可：套接字不出现（守护进程没起来）、设备不存在
-    （TRTC 的 GetDevices 拿到空表）、**属性没落到设备上**（设备在、但参数被静默丢掉，
-    019 的逗号写法死的正是这一关，此前没人卡它）。第三关是**外观**属性的落地检查，
-    不是 code 1202 的解（真实判据是端口，见模块头）—— 它守的是"写了却没生效"。
-    前两关各自的"清点了什么"在日志里已经是逐字原文（`list short` 的输出被整行带出）；
-    第三关原先只打解析结果，所以那一关的失败分支额外用 `raw_device_dumps()` 把
-    **长格式原文逐字**打出来（019 的代价就出在这里）。
+    四关各有各的死法，缺一不可：
+      1. 套接字不出现（守护进程没起来）；
+      2. 设备不存在（TRTC 的 GetDevices 拿到空表）；
+      3. **属性没落到设备上**（设备在、但参数被静默丢掉 —— 019 的逗号写法死在这一关）；
+      4. **端口**（`Active Port:`）—— 这一关才是 SDK 的真正判据：列举路径跳过端口指针为空
+         的设备，所以 `jax_raop` 必须端口非空且选中 `network-output`。第 3 关是**外观**
+         属性的落地检查，不是 1202 的解；第 4 关才是。
+    各关的"清点了什么"在日志里都已是逐字原文（`list short` 的输出被整行带出；第 3、4 关
+    额外用 `raw_device_dumps()` 打出长格式原文，第 4 关还 `_echo` pulseaudio 日志，
+    因为 module-raop-sink 的 dlopen/握手失败原文只在那里）。
     """
     try:
         plan = build_plan(runtime_dir, which=which)
@@ -639,6 +718,9 @@ def selftest(*, runtime_dir=None, timeout: float = READY_TIMEOUT_S,
         log(f"[audio] self-test: 套接字就绪 -> {plan.socket_path}")
         devices = inspect_devices(env=env, sink=plan.sink, which=which, run=run)
         _echo(log_path, log)
+        # raop sink 的端口观测：第四关用它，成功路径也把它打进日志（构建日志要能直接读到
+        # "这台设备到底有没有端口、选中了哪个"——那才是 SDK 的判据）。
+        raop_ports, raop_active_port = sink_ports(devices, RAOP_SINK_NAME)
 
         if not devices["pactl"]:
             log("[audio] FATAL: pactl 不可用（pulseaudio-utils 未安装），无法清点音频设备；"
@@ -674,8 +756,38 @@ def selftest(*, runtime_dir=None, timeout: float = READY_TIMEOUT_S,
                 for line in raw_device_dumps(devices):
                     log(line)
                 return 1
+            # 第四关：**端口** —— 这一关才是 SDK 的判据（见模块头）。
+            # 前三关只证明"设备在、参数落上了"；而 SDK 的 sink 列举路径在
+            # `0x5e7f55 cmp qword [rsi+0x188], 0` / `0x5e7f5d je 0x5e7fe3` 处直接
+            # **跳过端口指针为空的设备**。所以这里断言的是**观测到的**端口：
+            # module-raop-sink 必须真的 dlopen 成功、建出端口，且 PA core 选中了它。
+            # 这一关是"raop 路线成不成立"的唯一裁判：**红了就是有价值的否定结果**
+            # （说明该回到架构问题），不是"把断言调松一点"。
+            def _raop_port_failure(reason: str) -> int:
+                log(f"[audio] FATAL: {reason}")
+                log(f"[audio] // {RAOP_SINK_NAME}: ports={raop_ports} "
+                    f"active_port={raop_active_port!r}"
+                    f"（期望 active_port={RAOP_ACTIVE_PORT!r}）")
+                # module-raop-sink 是 dlopen 进来的：装载失败 / 握手失败的**原文**只在
+                # pulseaudio 自己的日志里 —— 逐字转出来（构建日志必须能直接读到那一行）。
+                _echo(log_path, log)
+                # 解析器是这一关的唯一裁判 ⇒ 它读到的长格式原文也逐字带出（019 的教训）。
+                for line in raw_device_dumps(devices):
+                    log(line)
+                return 1
+
+            if not sink_ports_are_present(devices, RAOP_SINK_NAME):
+                return _raop_port_failure(
+                    f"sink={RAOP_SINK_NAME} 没有端口、或没有选中端口 —— SDK 的列举路径会"
+                    f"直接跳过它（端口指针为空），1202 不会变")
+            if raop_active_port != RAOP_ACTIVE_PORT:
+                return _raop_port_failure(
+                    f"sink={RAOP_SINK_NAME} 选中的端口不是期望值 —— 设备被看见了，但端口名"
+                    f"与 SDK 判据依赖的那一个不一致")
         log(f"[audio] self-test OK: sink={plan.sink} source={plan.source} "
-            f"sinks={len(devices['sinks'] or [])} sources={len(devices['sources'] or [])}")
+            f"sinks={len(devices['sinks'] or [])} sources={len(devices['sources'] or [])} "
+            f"{RAOP_SINK_NAME}_ports={raop_ports} "
+            f"{RAOP_SINK_NAME}_active_port={raop_active_port!r}")
         return 0
     finally:
         if proc.poll() is None:

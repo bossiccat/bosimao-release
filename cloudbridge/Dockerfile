@@ -49,7 +49,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxcb-shm0 \
         pulseaudio \
         pulseaudio-utils \
+        pulseaudio-module-raop \
     && rm -rf /var/lib/apt/lists/*
+
+# 发布阻断：module-raop-sink.so 必须在镜像里（**早失败**，不等后面的自证）
+# ---------------------------------------------------------------------------
+# raop-sink 是唯一一个**由模块自己建出端口**的合成 sink（raop-sink.c 里
+# `pa_sink_new_data_add_port(..., "network-output", ...)`），而端口正是 TRTC 接受设备的
+# 判据（SDK 的列举路径在 `cmp qword [rsi+0x188], 0` 处跳过端口指针为空的设备）。
+# 承载它的二进制不在 `pulseaudio` 包里，而在**独立包** `pulseaudio-module-raop`
+# （Debian 把 jack/bluetooth/raop/zeroconf/lirc/gsettings 这些模块都拆成了单独的包）。
+# 所以"装了 pulseaudio"**不等于**"有 module-raop-sink" —— 这里必须显式校验。
+# ⚠️ 保留 `/usr/lib/pulse-*/modules/` 的**通配**：模块目录名带 PA 版本
+# （bookworm = pulse-16.1+dfsg1，trixie = pulse-17.0+dfsg1，而 `python:3.11-slim`
+# 目前解析到 trixie），写死版本号会在换 suite 时静默失配。
+# ⚠️ 校验**不得**放进管道：`test -f ... | ...` / `ls ... | grep -q ...` 的退出码取自
+# 管道最后一个命令，文件不存在也会"成功"，那是假绿。这里用 `if ! ls <glob>`：
+# 通配不匹配时 sh 把字面量交给 ls，ls 报错 → 取反成立 → 打印诊断并 exit 1。
+RUN set -eu; \
+    if ! ls /usr/lib/pulse-*/modules/module-raop-sink.so > /dev/null 2>&1; then \
+      echo "[audio] FATAL: module-raop-sink.so 不在镜像里 —— pulseaudio-module-raop 没装上，或模块目录名变了；拒绝构建"; \
+      echo "[audio] 实际模块目录内容（raop 相关）："; \
+      ls /usr/lib/pulse-*/modules/ | grep raop || echo "  （一个 raop 模块都没有）"; \
+      exit 1; \
+    fi; \
+    echo "[audio] module-raop-sink.so OK: $(ls /usr/lib/pulse-*/modules/module-raop-sink.so)"
 
 # 音频子系统（PulseAudio）——2026-09-16 线上事故沉淀，发布阻断级
 # ---------------------------------------------------------------------------
@@ -60,12 +84,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # `up rms=%.0f frames=%d`（backend/rtc_bridge/session.py:308）一条都没出现
 # ⇒ 手机与云端媒体面从来没共处一室（手机侧 user size 恒为 1）。
 #
-# 装两个包，各有明确用途：
-#   · pulseaudio        —— 守护进程本体 + 标准模块（module-native-protocol-unix /
-#                          module-null-sink / module-virtual-source），运行期必需；
-#   · pulseaudio-utils  —— `pactl`，**只在构建期**用于清点 sink/source（见下面的自证 RUN）。
-# 无头容器没有声卡，所以设备必须自己造：用 module-null-sink 造一个 null sink
-# （同时提供 monitor source），再用 module-virtual-source 派生一个"虚拟麦克风"。
+# 装三个包，各有明确用途：
+#   · pulseaudio             —— 守护进程本体 + 标准模块（module-native-protocol-unix /
+#                               module-null-sink / module-virtual-source），运行期必需；
+#   · pulseaudio-utils       —— `pactl`，**只在构建期**用于清点 sink/source（见下面的自证 RUN）；
+#   · pulseaudio-module-raop —— `module-raop-sink.so`（上面已单独早期校验），**只能**由这个包提供。
+# 无头容器没有声卡，设备必须自己造：null-sink 造一个 null sink（同时提供 monitor source），
+# 再用 module-virtual-source 派生"虚拟麦克风"；而 raop sink 是**唯一**带端口的合成 sink。
 # 具体 argv 与环境变量在 cloudbridge/audio_env.py 里（运行期与构建期共用同一份）。
 
 # 上面五个图形/设备库不是「顺手装的」：它们来自 TRTC Linux 原生库自己的 DT_NEEDED。

@@ -93,6 +93,37 @@ def test_dockerfile_verifies_the_audio_subsystem_during_build() -> None:
     assert "COPY cloudbridge ./cloudbridge" in text
 
 
+def test_dockerfile_installs_and_verifies_the_raop_module() -> None:
+    """`module-raop-sink.so` 只在**独立包** `pulseaudio-module-raop` 里，且必须早失败。
+
+    Debian 把 jack/bluetooth/raop/zeroconf/lirc/gsettings 这些模块都拆成了单独的包，
+    `pulseaudio` 本体**不含** module-raop-sink.so（实测：pulseaudio 17.0+dfsg1-2 的文件
+    清单里 67 个 module-*.so 没有它）⇒ "装了 pulseaudio"不等于"有 raop sink"。
+    这一条是**静态形状**断言（本机无 docker，无法构建镜像核对真实层内容）；
+    真正的行为验证在构建期：文件校验 + audio_env 的第四关（端口）。
+    """
+    packages = {token.strip("\\") for token in _apt_install_tokens()}
+    assert "pulseaudio-module-raop" in packages, (
+        "必须在 apt 清单里显式装 pulseaudio-module-raop —— module-raop-sink.so 只由它提供"
+    )
+    text = (CLOUDBRIDGE / "Dockerfile").read_text(encoding="utf-8")
+    assert "/usr/lib/pulse-*/modules/module-raop-sink.so" in text, (
+        "校验必须用 /usr/lib/pulse-*/modules/ 通配：模块目录名带 PA 版本"
+        "（bookworm=pulse-16.1+dfsg1 / trixie=pulse-17.0+dfsg1），写死会在换 suite 时静默失配"
+    )
+    # 校验不得靠管道：`test -f … | …` / `ls … | grep -q …` 的退出码取自管道最后一个命令，
+    # 文件不存在也会"成功" —— 那是假绿（本仓库已经吃过一次假绿的亏）。
+    for line in text.splitlines():
+        stripped = line.strip()
+        if "module-raop-sink.so" not in stripped:
+            continue
+        assert not re.search(r"module-raop-sink\.so\s*\|", stripped), (
+            f"raop 模块校验被放进管道，失败会被吞掉：{stripped!r}"
+        )
+    assert re.search(r"grep raop", text), "失败时必须打印 `ls …/modules/ | grep raop` 诊断"
+    assert re.search(r"exit 1", text)
+
+
 # --- 2. 启动计划：前台运行 + 显式设备 + 显式路径 -----------------------------
 
 
@@ -194,6 +225,44 @@ def test_plan_quotes_the_properties_so_they_survive_both_parsers(tmp_path: Path)
     assert "," not in inner, "逗号不是属性分隔符（019 就死在这）"
     assert inner.split() == ["device.description=JaxNullSink",
                              "device.form_factor=speaker"], "proplist 层靠空白把属性分条"
+
+
+def test_plan_loads_the_raop_sink_module_as_the_only_port_bearing_device(tmp_path: Path) -> None:
+    """argv 里必须真的有 `module-raop-sink`，而且参数串是**承重契约**，不能"顺手改改"。
+
+    为什么非 raop：SDK 的列举路径跳过端口指针为空的设备，而 **module-raop-sink 是唯一
+    一个由模块自己建出端口的合成 sink**（raop-sink.c 里
+    `pa_sink_new_data_add_port(..., "network-output", ...)`）；null-sink /
+    `module-alsa-sink device=null` / jack-sink 都不建端口（各自源码见 audio_env 模块头与
+    build_plan 的注释）。
+
+    参数里三个承重点（都在 audio_env 注释里写了理由，这里把它钉住）：
+      · `autoreconnect=true`：raop-sink.c:772 默认 false，而 :780 的 `autonull` 由它派生
+        ⇒ 不写这条，卸载点（:276-278）变可达、sink 会被销毁；
+      · `server=127.0.0.1:5000`：**故意**指向关闭的 loopback 端口（同步失败、不武装重连
+        定时器）；换成黑洞 IP 会走异步路径、武装 5s 定时器；
+      · `sink_properties` 整串带外层双引号（019 的逗号写法在这里同样不成立）。
+    """
+    loads = [a for a in _plan(tmp_path).argv if a.startswith("--load=")]
+    raop = next(a for a in loads if "module-raop-sink" in a)
+    assert raop == (
+        "--load=module-raop-sink sink_name=jax_raop protocol=UDP "
+        "server=127.0.0.1:5000 encryption=none autoreconnect=true latency_msec=50 "
+        'sink_properties="device.description=Jax Speaker device.form_factor=speaker '
+        'device.bus=pci"'
+    ), "raop 的 argv 是承重契约（autoreconnect 决定 autonull），不得改写"
+    assert "autoreconnect=true" in raop, "缺它就是 raop-sink.c:780 的 autonull=false，sink 会被卸载"
+    assert "0.0.0.0" not in raop and "255.255.255.255" not in raop, (
+        "server 必须是关闭的 loopback（同步失败、不武装重连定时器），不能换成黑洞 IP"
+    )
+    # 顺序：raop 在 native-protocol-unix 之后（客户端出入口先就绪），
+    # 且**没有**动 null-sink → virtual-source 的相邻关系（virtual-source 的 master 是
+    # null-sink 的 monitor，顺序反了 source 就加载不了）。
+    idx = {name: i for i, name in enumerate(loads)}
+    assert idx["--load=module-native-protocol-unix auth-anonymous=1"] < \
+        idx[next(a for a in loads if "module-raop-sink" in a)]
+    assert idx[next(a for a in loads if "module-null-sink" in a)] < \
+        idx[next(a for a in loads if "module-virtual-source" in a)]
 
 
 def test_plan_pins_every_path_libpulse_could_guess(tmp_path: Path) -> None:
@@ -515,6 +584,8 @@ def _pactl_run(stdout_by_kind: dict[str, str]):
 
 # `pactl list <kind>`（长格式）。同一份文本既是 `_pactl_lines` 的输入、也是长格式解析器的
 # 输入（替身按 `cmd[-1]` 分发），所以夹具必须**让设备存在与属性落上两个判据同时成立**。
+# 2026-09-17 起还要让**第四关（端口）**成立：raop sink 必须带端口且被 core 选中
+# （`module-raop-sink` 是唯一会自己建端口的合成 sink，也是唯一能过 SDK 端口判据的设备）。
 PACTL_SELFTEST_SINKS_OK = (
     "Sink #0\n"
     "\tState: SUSPENDED\n"
@@ -523,6 +594,45 @@ PACTL_SELFTEST_SINKS_OK = (
     "\tFlags: DECIBEL_VOLUME LATENCY SET_FORMATS \n"
     "\tProperties:\n"
     '\t\tdevice.description = "JaxNullSink"\n'
+    '\t\tdevice.form_factor = "speaker"\n'
+    "Sink #1\n"
+    "\tState: SUSPENDED\n"
+    "\tName: jax_raop\n"
+    "\tDescription: Jax Speaker\n"
+    "\tDriver: module-raop-sink.c\n"
+    "\tSample Specification: s16le 2ch 44100Hz\n"
+    "\tChannel Map: front-left,front-right\n"
+    "\tFlags: DECIBEL_VOLUME LATENCY \n"
+    "\tProperties:\n"
+    '\t\tdevice.description = "Jax Speaker"\n'
+    '\t\tdevice.form_factor = "speaker"\n'
+    '\t\tdevice.bus = "pci"\n'
+    "\tPorts:\n"
+    "\t\tnetwork-output: Network output (priority 0, latency offset 0 usec, available: unknown)\n"
+    "\tActive Port: network-output\n"
+    "\tFormats:\n"
+    "\t\tpcm\n"
+)
+# **今天的现实**（2026-09-17 线上 null-sink 的实测形态）：两台设备都在、属性也落上了，
+# 但 null-sink 那一台**没有 Ports 段、也没有 Active Port 行** —— 这正是 SDK 跳过它、
+# 报 code 1202 的原因。第四关必须在这份输入上判红。
+PACTL_SELFTEST_SINKS_NO_RAOP_PORTS = (
+    "Sink #0\n"
+    "\tState: SUSPENDED\n"
+    "\tName: jax_null\n"
+    "\tDescription: JaxNullSink\n"
+    "\tFlags: DECIBEL_VOLUME LATENCY SET_FORMATS \n"
+    "\tProperties:\n"
+    '\t\tdevice.description = "JaxNullSink"\n'
+    '\t\tdevice.form_factor = "speaker"\n'
+    "Sink #1\n"
+    "\tState: SUSPENDED\n"
+    "\tName: jax_raop\n"
+    "\tDescription: Jax Speaker\n"
+    "\tDriver: module-raop-sink.c\n"
+    "\tFlags: DECIBEL_VOLUME LATENCY \n"
+    "\tProperties:\n"
+    '\t\tdevice.description = "Jax Speaker"\n'
     '\t\tdevice.form_factor = "speaker"\n'
 )
 PACTL_SELFTEST_SOURCES_OK = (
@@ -553,15 +663,17 @@ PACTL_SELFTEST_SINKS_COMMA_FORM = (
 )
 
 
-def _selftest(monkeypatch, tmp_path: Path, *, sinks: str, sources: str, which_ok: bool):
+def _selftest(monkeypatch, tmp_path: Path, *, sinks: str, sources: str, which_ok: bool,
+              logs: list[str] | None = None, popen=None):
+    """跑一次构建期自证。`logs` 传列表即逐行收集 stdout 文案（失败分支的输出要能断言）。"""
     monkeypatch.setattr(audio_env, "wait_for_socket", lambda *a, **k: True)
     return audio_env.selftest(
         runtime_dir=tmp_path,
-        popen=lambda *a, **k: _FakeProc(),
+        popen=popen or (lambda *a, **k: _FakeProc()),
         which=lambda name: (f"/usr/bin/{name}" if which_ok else None),
         run=_pactl_run({"sinks": sinks, "sources": sources}),
         sleep=lambda _s: None,
-        log=lambda _m: None,
+        log=(logs.append if logs is not None else (lambda _m: None)),
     )
 
 
@@ -622,6 +734,96 @@ def test_build_selftest_prints_the_raw_pactl_text_it_parsed(monkeypatch, tmp_pat
         "两类设备各自的原文都要带出来，不能只带出事的那一类"
     # 分隔线/前缀之外不得改写内容：出事设备那行里被污染的描述必须原样可见。
     assert 'device.description = "JaxNullSink,device.form_factor=speaker"' in joined
+
+
+# module-raop-sink dlopen 失败的**原文**形态（pulseaudio 的 module.c 就是这么打的）。
+# 这一关的失败输出必须能把它逐字带出来 —— 否则"raop 没装上"和"raop 装了但没端口"
+# 在日志里长得一样，又得多跑一轮部署才知道该修哪边。
+RAOP_DLOPEN_ERROR = (
+    'E: [pulseaudio] module.c: Failed to load module "module-raop-sink" '
+    "(argument: \"sink_name=jax_raop protocol=UDP server=127.0.0.1:5000\"): "
+    "initialization failed.\n"
+)
+
+
+def _popen_writing(text: str):
+    """替身 Popen：往 supervisor 给它的 stdout 句柄里写一段"守护进程日志"。"""
+    def _popen(*_args, **kwargs):
+        handle = kwargs.get("stdout")
+        if handle is not None:
+            handle.write(text.encode("utf-8"))
+            handle.flush()
+        return _FakeProc()
+    return _popen
+
+
+def test_build_selftest_fails_when_the_raop_sink_has_no_port(monkeypatch, tmp_path: Path) -> None:
+    """**今天的现实**必须判红：两台设备都在、属性也落上了，但 raop sink 没有端口。
+
+    这一关是唯一能判"raop 路线成不成立"的观测点（端口才是 SDK 的判据）。红了是
+    **有价值的否定结果**，所以断言里要能看到观测值本身（`ports=[]` / `active_port=None`）
+    和它读到的原文，而不是只有一句"failed"。
+    """
+    logs: list[str] = []
+    code = _selftest(monkeypatch, tmp_path,
+                     sinks=PACTL_SELFTEST_SINKS_NO_RAOP_PORTS,
+                     sources=PACTL_SELFTEST_SOURCES_OK,
+                     which_ok=True, logs=logs)
+    assert code == 1, "没有端口就必须判失败（端口是 SDK 接受设备的判据）"
+    joined = "\n".join(logs)
+    assert "jax_raop" in joined
+    assert "ports=[]" in joined and "active_port=None" in joined, (
+        "失败输出必须带**观测值**，否则无法二分'没建端口'与'解析器读错了'"
+    )
+    assert "network-output" in joined, "要写明期望值，读者才能判断是不是端口名变了"
+    for raw_line in PACTL_SELFTEST_SINKS_NO_RAOP_PORTS.splitlines():
+        assert raw_line in joined, f"长格式原文缺行（必须逐字）：{raw_line!r}"
+
+
+def test_build_selftest_fails_when_the_raop_port_is_not_the_expected_one(monkeypatch,
+                                                                       tmp_path: Path) -> None:
+    """端口在、但名字不是期望值 ⇒ 也判红：SDK 依赖的正是这一个字段的取值。"""
+    logs: list[str] = []
+    code = _selftest(monkeypatch, tmp_path,
+                     sinks=PACTL_SELFTEST_SINKS_OK.replace(
+                         "Active Port: network-output", "Active Port: something-else"),
+                     sources=PACTL_SELFTEST_SOURCES_OK,
+                     which_ok=True, logs=logs)
+    assert code == 1
+    joined = "\n".join(logs)
+    assert "active_port='something-else'" in joined, "观测值必须逐字给出"
+
+
+def test_build_selftest_reports_the_raop_dlopen_error_verbatim(monkeypatch,
+                                                              tmp_path: Path) -> None:
+    """模块没装载成功时，**完整 dlopen 报错**必须逐字进构建日志。
+
+    这条错只在 pulseaudio 自己的日志里（模块是 dlopen 进来的），所以第四关失败时
+    必须把守护进程日志原样转出来；否则"raop 没装上"与"装了但没端口"在日志里无法区分。
+    """
+    logs: list[str] = []
+    code = _selftest(monkeypatch, tmp_path,
+                     sinks=PACTL_SELFTEST_SINKS_NO_RAOP_PORTS,
+                     sources=PACTL_SELFTEST_SOURCES_OK,
+                     which_ok=True, logs=logs,
+                     popen=_popen_writing(RAOP_DLOPEN_ERROR))
+    assert code == 1
+    joined = "\n".join(logs)
+    assert RAOP_DLOPEN_ERROR.strip() in joined, "dlopen 报错必须逐字可见（只加行首前缀）"
+    assert "module-raop-sink" in joined
+
+
+def test_build_selftest_passes_with_the_loaded_raop_sink(monkeypatch, tmp_path: Path) -> None:
+    """装载成功的样子：raop sink 带端口、`Active Port: network-output` ⇒ 四关全过。"""
+    logs: list[str] = []
+    code = _selftest(monkeypatch, tmp_path,
+                     sinks=PACTL_SELFTEST_SINKS_OK,
+                     sources=PACTL_SELFTEST_SOURCES_OK,
+                     which_ok=True, logs=logs)
+    assert code == 0
+    joined = "\n".join(logs)
+    assert "jax_raop_ports=['network-output']" in joined, "成功路径也要把端口观测写进日志"
+    assert "jax_raop_active_port='network-output'" in joined
 
 
 def test_build_selftest_fails_when_devices_are_missing(monkeypatch, tmp_path: Path) -> None:
