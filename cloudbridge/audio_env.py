@@ -27,14 +27,37 @@
   全部难点就是"看不见"。前台运行时它的输出由 supervisor 的 Child 收到 stdout → CLS。
 * **必须显式给设备**（module-null-sink + module-virtual-source）：无头容器里没有声卡，
   只起守护进程的话设备表是空的，TRTC 的 `GetDevices` 依旧拿不到东西。
-  设备属性里的 `device.form_factor` 同样**不是可选项**：对 libliteavsdk.so 做全库串扫描 +
-  取址交叉引用后，SDK 真正读取的 `device.*` 属性只有 `device.description` 与
-  `device.form_factor` 两个（`device.class` 零命中）。缺 form_factor 的那一版正对应
-  线上"PA 里有 sink、TRTC 的播放设备表却为空"（code 1202）的现场。
-  另外它的**写法本身是个陷阱**：PA 的 modargs 层与 proplist 层都只以空白分隔属性，
+  设备属性（`device.description` / `device.form_factor`）只影响**外观**：SDK 读的
+  `device.*` 键只有这两个（`device.class`/`device.icon_name`/`device.api`/`device.bus`/
+  `device.string`/`device.profile` 在 14.9MB 的 .so 里**连字符串都不存在**），
+  用途是算 icon/description/priority。**它们不是 code 1202 的成因** —— 见下一节。
+  写法上仍有个陷阱要守：PA 的 modargs 层与 proplist 层都只以空白分隔属性，
   `device.description=a,device.form_factor=b` 这种逗号写法**不会**产生第二个属性
-  （只把 description 改坏），而漏掉引号又会因为"多出一个不在白名单里的模块参数"
-  直接让模块加载失败。正确写法与依据见 build_plan，构建期由 selftest 卡住。
+  （只把 description 改坏），而漏掉引号会因为"多出一个不在白名单里的模块参数"
+  直接让模块加载失败。正确写法见 build_plan，构建期由 selftest 卡住。
+
+1202 的真实判据是**端口**，不是属性（2026-09-17 更正）
+----------------------------------------------------
+本文件与 019/020 的提交信息曾把"缺 `device.form_factor`"写成线上
+`player device list is empty`（code 1202）的成因。**那个归因是错的**：当时手里只有
+"SDK 读了这两个键"这一个事实，就把它当成了"读不到就拒收" —— 把"可读"当成了"必读"。
+真实的跳过分支在**端口**上：
+
+* `libliteavsdk.so`（sha256 `c5a6f1df…`，12.7.706 的同名库字节相同）的 sink 列表
+  回调里有一条跳过分支：`0x5e7f55` 处 `cmp qword [rsi+0x188], 0`，紧跟
+  `0x5e7f5d je 0x5e7fe3` —— 该字段为零即**跳过这个设备**。字段是 `pa_sink_info`
+  的端口指针（另一路 worker 的反汇编给出归属；我本人在 `0x5e7f20` 起反汇编复核过
+  这条 cmp/je 与跳过目标 `0x5e7fe3`）：**64 位与 0 比较 = 指针判空**，
+  而 `flags` 是 32 位位域，形态不符；`pa_sink_info.flags` 在其列举路径只被搬运、
+  从未被分支（同一路 worker 的指令级结论）。
+* 而 `module-null-sink` **永远不填端口**（端口只由 card/UCM 路径产生）
+  ⇒ 端口指针恒为 NULL ⇒ 设备必被跳过 ⇒ 播放设备表为空 ⇒ 1202。
+* 推论：现网"用 `module-null-sink` 造设备"这条路线**注定拿不到设备**，与 proplist
+  写什么无关；018/019/020 在这一点上没有任何差别，所以那三次部署都不构成
+  对属性假设的检验。
+
+因此本文件的 proplist 部分保留（写法约束、构建期门禁都留着），但**降级为外观**，
+不再声称它能修 1202。
 * **必须显式钉住路径**（XDG_RUNTIME_DIR / PULSE_RUNTIME_PATH / PULSE_SERVER）：
   容器里没有 user session，`XDG_RUNTIME_DIR` 默认不存在，libpulse 客户端与服务端
   各自按它推导 `pulse/native`，不钉住就是两边各自找一个不存在的目录。
@@ -62,10 +85,12 @@ SINK_NAME = "jax_null"
 # 由 module-null-sink 的 monitor 派生出的"虚拟麦克风"：无头容器里唯一一个
 # 非 monitor 的 source，TRTC 的采集设备枚举才能拿到一个像样的输入设备。
 SOURCE_NAME = f"{SINK_NAME}.mic"
-# 写进设备属性的 device.form_factor（PA 的规范取值）。它不是"看起来更像真机"的装饰：
-# libliteavsdk.so 真正读取的 device.* 属性**只有** device.description 与
-# device.form_factor 两个（device.class 在全库里 0 命中）。完整依据与**写法约束**
-# 见 build_plan 里的注释；这两个值同时被 selftest 当作构建期的验收判据。
+# 写进设备属性的 device.form_factor（PA 的规范取值）。
+# **定位是"外观"**：libliteavsdk.so 读的 device.* 键只有 device.description 与
+# device.form_factor 这两个，用途是算 icon/description/priority —— 它们**不是**
+# code 1202 的成因（真实判据是端口，见模块头"1202 的真实判据"一节）。
+# 之所以留着而不是删掉：它零成本、让设备描述更可读，且它把"PA 参数写法"这一类
+# 陷阱连同构建期门禁一起钉住了（019 就是死在这类写法上）。
 SINK_FORM_FACTOR = "speaker"
 SOURCE_FORM_FACTOR = "microphone"
 MONITOR_NAME = f"{SINK_NAME}.monitor"
@@ -157,13 +182,20 @@ def build_plan(runtime_dir=None, *, sink: str = SINK_NAME,
         # 设备：无头容器没有声卡，必须自己造。顺序有意义——virtual-source 的 master
         # 是 null-sink 的 monitor，所以 null-sink 必须先加载。
         #
-        # `device.form_factor` 不是"补全得像样点"，它是**证据决定的一处**：
-        # 对 libliteavsdk.so（12.5.705-beta.0，sha256 c5a6f1df…）做全库可打印串扫描 +
-        # RIP 相对取址交叉引用，`device.*` 前缀的属性键**只有两个**被 SDK 读：
-        #   · device.description —— 我们本来就给了；
-        #   · device.form_factor —— 我们此前**完全没给**。
-        # 而 `device.class` 在 14.9MB 的 .so 里**一次都没出现**（0 命中），
-        # 所以不按"看起来更像真设备"去补 `device.class=sound`（无证据支持，宁可不加）。
+        # 下面这两串属性是**外观**，不是 1202 的解 —— 2026-09-17 更正：此前这里写着
+        # "device.form_factor 是证据决定的一处、缺它就对应线上 1202 现场"，**那是错的**
+        # （把"SDK 可读"当成了"SDK 必读"）。真实判据是**端口**：SDK 的 sink 列表回调在
+        # `0x5e7f55` 处 `cmp qword [rsi+0x188], 0` + `0x5e7f5d je 0x5e7fe3` 直接跳过
+        # 端口指针为空的设备，而 module-null-sink **永远不填端口** ⇒ 播放设备表必为空。
+        # 详见模块头"1202 的真实判据"一节。
+        #
+        # 那为什么还留着？两点，都不是"它能修 1202"：
+        #   1. 零成本的外观改善（SDK 确实读这两个键来算 icon/description/priority，
+        #      device.class / device.icon_name / device.api / device.bus / device.string /
+        #      device.profile 在 14.9MB 的 .so 里**连字符串都不存在**，补它们纯属噪声，
+        #      已经决定不做）；
+        #   2. 它把"PA 模块参数怎么写"这一类陷阱连同构建期门禁一起钉住了（见下），
+        #      而这一类陷阱在 019 上真实发生过一次。
         # 属性值取 PA 的规范取值：播放端 speaker、采集端 microphone。
         #
         # **写法有硬约束：不能写成 `a=1,b=2`。** 019 就栽在这里（2026-09-17 的
@@ -310,6 +342,12 @@ def parse_device_details(text: str | None) -> list[dict] | None:
     （原生字符串 `sink device port is not same, but the active port and sink name
     is same`）。而我们用 `module-null-sink` 造出来的 sink 与真实声卡**不对称**：
     端口可能一个都没有，属性表也要么缺项、要么取值不同。
+
+    **端口这一列不是装饰，是判据**（2026-09-17 更正）：SDK 的 sink 列举路径有一条
+    跳过分支 `0x5e7f55 cmp qword [rsi+0x188], 0` / `0x5e7f5d je 0x5e7fe3`
+    —— 那个字段是 64 位端口指针，为空即**跳过该设备**，而 module-null-sink 永远
+    不填端口 ⇒ 用 null-sink 造出来的 sink 必然被跳过（详见模块头"1202 的真实判据"
+    一节）。属性那一列则是**外观**：它决定 icon/description/priority，不是被跳过的原因。
     **只列键名是不够的**——"有没有这个键"和"SDK 看到的取值是多少"是两件事，
     上一轮就是因为只列了键名而无法直接判定，才多花了一轮部署。
     所以这里输出 `key=value`（键名与取值一起），`None`（没清点成）与 `[]`
@@ -419,8 +457,7 @@ def inspect_devices(*, env: dict[str, str], sink: str,
     clients = _pactl_lines("clients", env=env, which=which, run=run)
     defaults = parse_server_defaults(_pactl_info(env=env, which=which, run=run))
     # 长格式：每个 sink/source 的端口与属性 key=value。这是「SDK 为什么筛掉它」的唯一可判据。
-    sink_details = parse_device_details(
-        _pactl_list("sinks", env=env, which=which, run=run))
+    sink_details = parse_device_details(_pactl_list("sinks", env=env, which=which, run=run))
     source_details = parse_device_details(
         _pactl_list("sources", env=env, which=which, run=run))
     return {
@@ -449,9 +486,10 @@ def summarize_devices(report: dict | None, *, error: str = "") -> dict:
       * None  —— 没清点成（pactl 缺失/失败）：**不知道**，不得当成 False，也不得当成 True。
 
     `sink_details` 是给"PA 有 sink 但 TRTC 说设备列表为空"这个分支用的：它把每个
-    sink 的端口与属性 `key=value` 摊开，用于判定 SDK 是筛掉了"没有端口的 null-sink"
-    还是筛掉了属性取值不达标的设备。**取值必须一起给出**：只给键名时，
-    "有 device.form_factor 这个键"与"它的值是 speaker"是两件事，而 SDK 读到的是后者。
+    sink 的端口与属性 `key=value` 摊开。判据在**端口**上（2026-09-17 反汇编更正）：
+    SDK 的列举路径对端口指针为空的设备直接跳过，而 null-sink 永远没有端口 ⇒
+    这类 sink 必被筛掉。属性取值一并给出是为了另一件事（参数有没有真的落上设备），
+    **不要**再把"属性取值不达标"当成被筛掉的原因 —— 那个假设已被证伪。
     """
     if not isinstance(report, dict):
         return {
@@ -500,10 +538,18 @@ def _echo(log_path: Path, log) -> None:
 def missing_device_properties(report: dict, sink: str, source: str) -> list[str]:
     """自证：设备**在**还不够 —— 我们写进去的 device.form_factor 必须真的落在设备上。
 
-    为什么非要在构建期卡这一条（而不是只看"设备存在"）：019 那次修复把属性写成了
-    `a=1,b=2`，PA 的两层解析器都只以空白分隔，于是那个逗号**没有产生第二个属性**，
-    而设备照样被创建、套接字照样就绪 —— 原有的"设备存在"自证全绿、镜像照发，
-    可 SDK 读到的 form_factor 其实是空的。**没有这一条，"设备存在"就是假绿。**
+    先说清楚**它不是**什么（2026-09-17 更正）：这一关**不是** code 1202 的解。
+    `device.form_factor` 的用途是算 icon/description/priority，属**外观**；线上
+    `player device list is empty` 的真实判据是**端口**（见模块头"1202 的真实判据"
+    一节与 `parse_device_details`）。别再把"这关过了"当成"1202 会好"。
+
+    那为什么还留着？因为它卡的是一类**独立且真实**的失效：**参数写了、但没生效**。
+    019 那次把属性写成 `a=1,b=2`，PA 的两层解析器都只以空白分隔，于是那个逗号
+    **没有产生第二个属性**，而设备照样被创建、套接字照样就绪 —— 原有的"设备存在"
+    自证全绿、镜像照发，参数却是哑的。**"设备存在"在这一点上是假绿**：静默被丢掉的
+    参数与"属性确实落上"在原有日志里长得一模一样。这一关把这类静默失效变成构建失败，
+    顺带钉死了 PA 模块参数的写法陷阱（见 build_plan 的硬约束）。
+
     返回缺失项清单（空列表 = 齐了），调用方据此 fail-closed。
     """
     want = (
@@ -532,8 +578,9 @@ def selftest(*, runtime_dir=None, timeout: float = READY_TIMEOUT_S,
     参数全部可注入是为了让契约测试能用替身把每条失败分支都逼出来。
 
     三关各有各的死法，缺一不可：套接字不出现（守护进程没起来）、设备不存在
-    （TRTC 的 GetDevices 拿到空表）、**属性没落到设备上**（设备在、但 SDK 想读的
-    `device.form_factor` 是空的 —— 019 的逗号写法死的正是这一关，此前没人卡它）。
+    （TRTC 的 GetDevices 拿到空表）、**属性没落到设备上**（设备在、但参数被静默丢掉，
+    019 的逗号写法死的正是这一关，此前没人卡它）。第三关是**外观**属性的落地检查，
+    不是 code 1202 的解（真实判据是端口，见模块头）—— 它守的是"写了却没生效"。
     """
     try:
         plan = build_plan(runtime_dir, which=which)
@@ -574,11 +621,11 @@ def selftest(*, runtime_dir=None, timeout: float = READY_TIMEOUT_S,
                 log(f"[audio] sources={devices['sources']}")
                 return 1
             # 设备在 ≠ 属性落上了。这一关专门卡"参数写法对但没生效"：
-            # 设备照样存在、套接字照样就绪，可 SDK 读到的 device.form_factor 是空的。
+            # 设备照样存在、套接字照样就绪，可参数被 PA 静默丢掉了。
             missing = missing_device_properties(devices, plan.sink, plan.source)
             if missing:
                 log("[audio] FATAL: 设备在、套接字就绪，但我们写进去的 device.form_factor "
-                    "没有落到设备上 —— TRTC 的 device.* 属性表里就没有它。"
+                    "没有落到设备上 —— 参数写了却没生效（TRTC 那边读到的这个键是空的）。"
                     "先看 argv 里的 sink_properties/source_properties 是不是漏了外层双引号、"
                     "或用了逗号分隔（两层解析器都只以空白分隔）：")
                 log(f"[audio] argv={' '.join(plan.argv)}")
