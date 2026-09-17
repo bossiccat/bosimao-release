@@ -150,12 +150,45 @@ def test_plan_gives_the_null_sink_the_property_the_sdk_actually_reads(tmp_path: 
     loads = [a for a in _plan(tmp_path).argv if a.startswith("--load=")]
     sink_load = next(a for a in loads if "module-null-sink" in a)
     source_load = next(a for a in loads if "module-virtual-source" in a)
-    assert "device.description=JaxNullSink" in sink_load
-    assert "device.form_factor=speaker" in sink_load
-    assert "device.form_factor=microphone" in source_load
+    assert sink_load == (
+        f"--load=module-null-sink sink_name={audio_env.SINK_NAME} "
+        'sink_properties="device.description=JaxNullSink device.form_factor=speaker"'
+    ), "属性必须整串用双引号包住、内部以空白分条（019 的逗号写法根本产生不了第二个属性）"
+    assert source_load == (
+        f"--load=module-virtual-source source_name={audio_env.SOURCE_NAME} "
+        "master=jax_null.monitor "
+        'source_properties="device.description=JaxNullMic device.form_factor=microphone"'
+    )
     joined = " | ".join(loads)
     assert "device.class=" not in joined, "device.class 在全库里 0 命中 ⇒ 不按'像真机'去补"
     assert "device.icon_name=" not in joined
+
+
+def test_plan_quotes_the_properties_so_they_survive_both_parsers(tmp_path: Path) -> None:
+    """019 的教训固化进断言：逗号分隔**不会**产生第二个属性，而漏引号**更糟**。
+
+    PA 的两层解析器都**只以空白分隔**：
+      · src/pulsecore/modargs.c:107-142 的 parse()：isspace() 分 `key=value`，逗号只是
+        取值里的普通字符；
+      · src/pulse/proplist.c:450-543 的 pa_proplist_from_string()：同样只认 isspace()。
+    所以 `a=1,b=2` 只会把 description 变成
+    `JaxNullSink,device.form_factor=speaker`（属性没落上）；而 `a=1 b=2` 在**不加**外层
+    引号时，`device.form_factor=speaker` 会被当成**独立的模块参数**，它不在
+    module-null-sink 的白名单里（module-null-sink.c:80-90）⇒ pa_modargs_new 返回 NULL
+    （modargs.c:66-77 未知 key 即 fail）⇒ 模块加载失败 ⇒ 守护进程退出、容器崩溃重启。
+    这个双重引号写法是上游自己的用法：v16.1 src/daemon/default.pa.in:116 就是
+    `sink_properties="device.description='RTP Multicast Sink'"`；而 `--load=` 的值由
+    cmdline.c:226-228 原样拼成 `load-module %s\n` 后走同一套配置文件解析器。
+    """
+    load = next(a for a in _plan(tmp_path).argv
+                if a.startswith("--load=module-null-sink"))
+    value = load.split("sink_properties=", 1)[1]
+    assert value.startswith('"') and value.endswith('"'), \
+        "整串属性必须被 modargs 层的双引号包住，否则第二个 key 会脱离 sink_properties"
+    inner = value[1:-1]
+    assert "," not in inner, "逗号不是属性分隔符（019 就死在这）"
+    assert inner.split() == ["device.description=JaxNullSink",
+                             "device.form_factor=speaker"], "proplist 层靠空白把属性分条"
 
 
 def test_plan_pins_every_path_libpulse_could_guess(tmp_path: Path) -> None:
@@ -475,6 +508,46 @@ def _pactl_run(stdout_by_kind: dict[str, str]):
     return _run
 
 
+# `pactl list <kind>`（长格式）。同一份文本既是 `_pactl_lines` 的输入、也是长格式解析器的
+# 输入（替身按 `cmd[-1]` 分发），所以夹具必须**让设备存在与属性落上两个判据同时成立**。
+PACTL_SELFTEST_SINKS_OK = (
+    "Sink #0\n"
+    "\tState: SUSPENDED\n"
+    "\tName: jax_null\n"
+    "\tDescription: JaxNullSink\n"
+    "\tFlags: DECIBEL_VOLUME LATENCY SET_FORMATS \n"
+    "\tProperties:\n"
+    '\t\tdevice.description = "JaxNullSink"\n'
+    '\t\tdevice.form_factor = "speaker"\n'
+)
+PACTL_SELFTEST_SOURCES_OK = (
+    "Source #0\n"
+    "\tState: SUSPENDED\n"
+    "\tName: jax_null.monitor\n"
+    "\tFlags: DECIBEL_VOLUME LATENCY \n"
+    "\tProperties:\n"
+    '\t\tdevice.description = "Monitor of JaxNullSink"\n'
+    '\t\tdevice.class = "monitor"\n'
+    "Source #1\n"
+    "\tState: SUSPENDED\n"
+    "\tName: jax_null.mic\n"
+    "\tFlags: DECIBEL_VOLUME LATENCY \n"
+    "\tProperties:\n"
+    '\t\tdevice.description = "JaxNullMic"\n'
+    '\t\tdevice.form_factor = "microphone"\n'
+)
+# 019 实际发出去的那一版观测形态：逗号没有产生第二个属性，form_factor 根本没落上设备
+# （它被并进了 description 的取值里）。
+PACTL_SELFTEST_SINKS_COMMA_FORM = (
+    "Sink #0\n"
+    "\tState: SUSPENDED\n"
+    "\tName: jax_null\n"
+    "\tFlags: DECIBEL_VOLUME LATENCY SET_FORMATS \n"
+    "\tProperties:\n"
+    '\t\tdevice.description = "JaxNullSink,device.form_factor=speaker"\n'
+)
+
+
 def _selftest(monkeypatch, tmp_path: Path, *, sinks: str, sources: str, which_ok: bool):
     monkeypatch.setattr(audio_env, "wait_for_socket", lambda *a, **k: True)
     return audio_env.selftest(
@@ -490,12 +563,30 @@ def _selftest(monkeypatch, tmp_path: Path, *, sinks: str, sources: str, which_ok
 def test_build_selftest_passes_when_sink_and_source_exist(monkeypatch, tmp_path: Path) -> None:
     code = _selftest(
         monkeypatch, tmp_path,
-        sinks="0\tjax_null\tmodule-null-sink\ts16le 2ch 44100Hz\tSUSPENDED\n",
-        sources=("1\tjax_null.monitor\tmodule-null-sink\tmonitor\n"
-                 "2\tjax_null.mic\tmodule-virtual-source\ts16le 2ch 44100Hz\n"),
+        sinks=PACTL_SELFTEST_SINKS_OK,
+        sources=PACTL_SELFTEST_SOURCES_OK,
         which_ok=True,
     )
     assert code == 0
+
+
+def test_build_selftest_fails_when_the_property_did_not_land(monkeypatch, tmp_path: Path) -> None:
+    """设备在、套接字就绪，但属性没落上 —— 019 正是这样"全绿"发出去的。
+
+    这一关是 2026-09-17 补的：原来的自证只问"设备在不在"，而 SDK 读的是
+    `device.form_factor` **这个键本身**；逗号写法把它并进了 description 的取值里，
+    设备照样存在 ⇒ 自证全绿 ⇒ 镜像照发，可 SDK 那边 form_factor 是空的。
+    """
+    assert _selftest(monkeypatch, tmp_path,
+                     sinks=PACTL_SELFTEST_SINKS_COMMA_FORM,
+                     sources=PACTL_SELFTEST_SOURCES_OK,
+                     which_ok=True) == 1, "sink 侧属性没落上必须判失败"
+    assert _selftest(monkeypatch, tmp_path,
+                     sinks=PACTL_SELFTEST_SINKS_OK,
+                     sources=PACTL_SELFTEST_SOURCES_OK.replace(
+                         'device.form_factor = "microphone"',
+                         'device.form_factor = "microphone,unused=x"'),
+                     which_ok=True) == 1, "source 侧属性没落上同样必须判失败（只补 sink 不算完）"
 
 
 def test_build_selftest_fails_when_devices_are_missing(monkeypatch, tmp_path: Path) -> None:

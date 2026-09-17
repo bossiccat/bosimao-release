@@ -31,6 +31,10 @@
   取址交叉引用后，SDK 真正读取的 `device.*` 属性只有 `device.description` 与
   `device.form_factor` 两个（`device.class` 零命中）。缺 form_factor 的那一版正对应
   线上"PA 里有 sink、TRTC 的播放设备表却为空"（code 1202）的现场。
+  另外它的**写法本身是个陷阱**：PA 的 modargs 层与 proplist 层都只以空白分隔属性，
+  `device.description=a,device.form_factor=b` 这种逗号写法**不会**产生第二个属性
+  （只把 description 改坏），而漏掉引号又会因为"多出一个不在白名单里的模块参数"
+  直接让模块加载失败。正确写法与依据见 build_plan，构建期由 selftest 卡住。
 * **必须显式钉住路径**（XDG_RUNTIME_DIR / PULSE_RUNTIME_PATH / PULSE_SERVER）：
   容器里没有 user session，`XDG_RUNTIME_DIR` 默认不存在，libpulse 客户端与服务端
   各自按它推导 `pulse/native`，不钉住就是两边各自找一个不存在的目录。
@@ -58,6 +62,12 @@ SINK_NAME = "jax_null"
 # 由 module-null-sink 的 monitor 派生出的"虚拟麦克风"：无头容器里唯一一个
 # 非 monitor 的 source，TRTC 的采集设备枚举才能拿到一个像样的输入设备。
 SOURCE_NAME = f"{SINK_NAME}.mic"
+# 写进设备属性的 device.form_factor（PA 的规范取值）。它不是"看起来更像真机"的装饰：
+# libliteavsdk.so 真正读取的 device.* 属性**只有** device.description 与
+# device.form_factor 两个（device.class 在全库里 0 命中）。完整依据与**写法约束**
+# 见 build_plan 里的注释；这两个值同时被 selftest 当作构建期的验收判据。
+SINK_FORM_FACTOR = "speaker"
+SOURCE_FORM_FACTOR = "microphone"
 MONITOR_NAME = f"{SINK_NAME}.monitor"
 READY_TIMEOUT_S = 20.0
 POLL_INTERVAL_S = 0.25
@@ -155,11 +165,30 @@ def build_plan(runtime_dir=None, *, sink: str = SINK_NAME,
         # 而 `device.class` 在 14.9MB 的 .so 里**一次都没出现**（0 命中），
         # 所以不按"看起来更像真设备"去补 `device.class=sound`（无证据支持，宁可不加）。
         # 属性值取 PA 的规范取值：播放端 speaker、采集端 microphone。
+        #
+        # **写法有硬约束：不能写成 `a=1,b=2`。** 019 就栽在这里（2026-09-17 的
+        # revert 9971f9c）：那个逗号没有产生第二个属性，只把 description 变成了
+        # `JaxNullSink,device.form_factor=speaker`，于是 form_factor 根本没落上设备。
+        # 两层解析器都**只以空白分隔**，逗号只是取值里的普通字符：
+        #   · src/pulsecore/modargs.c:107-142 的 parse()：isspace() 分隔 `key=value`；
+        #   · src/pulse/proplist.c:450-543 的 pa_proplist_from_string()：同样只认 isspace()。
+        # 所以整串属性必须先用 **modargs 层的双引号**包住，再由 proplist 层用空白拆成两条。
+        # 少了这层引号就变成两件事：`device.form_factor=speaker` 会被当成**独立的模块参数**，
+        # 而它不在 module-null-sink 的白名单里（module-null-sink.c:80-90），
+        # pa_modargs_new 返回 NULL（modargs.c:66-77 未知 key 即 fail）⇒ 模块加载失败
+        # ⇒ 守护进程退出 ⇒ 容器崩溃重启 —— 这比"属性没生效"更糟，所以引号不是可选的。
+        # 这个双重引号写法是**上游自己的用法**，见 v16.1 src/daemon/default.pa.in:116：
+        #   load-module module-null-sink … sink_properties="device.description='RTP Multicast Sink'"
+        # 而 `--load=` 的值由 cmdline.c:226-228 原样拼成 `load-module %s\n` 后走**同一套**
+        # 配置文件解析器，所以 .pa 里成立的写法在这里同样成立；argv 是列表传递、不经 shell，
+        # `"` 会原样到达进程（supervisor 用 Popen(list)）。
         f"--load=module-null-sink sink_name={sink}"
-        " sink_properties=device.description=JaxNullSink",
+        f' sink_properties="device.description=JaxNullSink'
+        f' device.form_factor={SINK_FORM_FACTOR}"',
         f"--load=module-virtual-source source_name={SOURCE_NAME}"
         f" master={MONITOR_NAME}"
-        " source_properties=device.description=JaxNullMic",
+        f' source_properties="device.description=JaxNullMic'
+        f' device.form_factor={SOURCE_FORM_FACTOR}"',
     ]
     return AudioPlan(
         binary=binary,
@@ -468,15 +497,43 @@ def _echo(log_path: Path, log) -> None:
         log(f"[audio] pulseaudio| {line}")
 
 
+def missing_device_properties(report: dict, sink: str, source: str) -> list[str]:
+    """自证：设备**在**还不够 —— 我们写进去的 device.form_factor 必须真的落在设备上。
+
+    为什么非要在构建期卡这一条（而不是只看"设备存在"）：019 那次修复把属性写成了
+    `a=1,b=2`，PA 的两层解析器都只以空白分隔，于是那个逗号**没有产生第二个属性**，
+    而设备照样被创建、套接字照样就绪 —— 原有的"设备存在"自证全绿、镜像照发，
+    可 SDK 读到的 form_factor 其实是空的。**没有这一条，"设备存在"就是假绿。**
+    返回缺失项清单（空列表 = 齐了），调用方据此 fail-closed。
+    """
+    want = (
+        (report.get("sink_details"), sink, "sink", SINK_FORM_FACTOR),
+        (report.get("source_details"), source, "source", SOURCE_FORM_FACTOR),
+    )
+    missing: list[str] = []
+    for details, name, kind, factor in want:
+        props = [p for d in (details or []) if d.get("name") == name
+                 for p in (d.get("props") or [])]
+        if f"device.form_factor={factor}" not in props:
+            missing.append(
+                f"{kind} {name} 上没有 device.form_factor={factor}"
+                f"（实测 props={props if props else '未清点到该设备的属性'}）")
+    return missing
+
+
 def selftest(*, runtime_dir=None, timeout: float = READY_TIMEOUT_S,
              require_devices: bool = True, popen=subprocess.Popen,
              which=shutil.which, run=subprocess.run, sleep=time.sleep,
              log=_report) -> int:
-    """在**当前真实环境**里用与运行期同一套 argv 起一次，并清点设备。
+    """在**当前真实环境**里用与运行期同一套 argv 起一次，并清点设备**与设备属性**。
 
     返回进程退出码语义：0 = 通过，1 = fail-closed。
     本机（Windows，无 pulseaudio、无 docker）跑不出 0；它是给 `docker build` 用的，
     参数全部可注入是为了让契约测试能用替身把每条失败分支都逼出来。
+
+    三关各有各的死法，缺一不可：套接字不出现（守护进程没起来）、设备不存在
+    （TRTC 的 GetDevices 拿到空表）、**属性没落到设备上**（设备在、但 SDK 想读的
+    `device.form_factor` 是空的 —— 019 的逗号写法死的正是这一关，此前没人卡它）。
     """
     try:
         plan = build_plan(runtime_dir, which=which)
@@ -515,6 +572,18 @@ def selftest(*, runtime_dir=None, timeout: float = READY_TIMEOUT_S,
                 log(f"[audio] FATAL: 音频子系统里没有 source≈{plan.sink}（monitor 或虚拟麦）"
                     " —— TRTC 的采集设备枚举会拿到空表（GetDevices wait）")
                 log(f"[audio] sources={devices['sources']}")
+                return 1
+            # 设备在 ≠ 属性落上了。这一关专门卡"参数写法对但没生效"：
+            # 设备照样存在、套接字照样就绪，可 SDK 读到的 device.form_factor 是空的。
+            missing = missing_device_properties(devices, plan.sink, plan.source)
+            if missing:
+                log("[audio] FATAL: 设备在、套接字就绪，但我们写进去的 device.form_factor "
+                    "没有落到设备上 —— TRTC 的 device.* 属性表里就没有它。"
+                    "先看 argv 里的 sink_properties/source_properties 是不是漏了外层双引号、"
+                    "或用了逗号分隔（两层解析器都只以空白分隔）：")
+                log(f"[audio] argv={' '.join(plan.argv)}")
+                for item in missing:
+                    log(f"[audio]   · {item}")
                 return 1
         log(f"[audio] self-test OK: sink={plan.sink} source={plan.source} "
             f"sinks={len(devices['sinks'] or [])} sources={len(devices['sources'] or [])}")
