@@ -156,10 +156,10 @@ def build_plan(runtime_dir=None, *, sink: str = SINK_NAME,
         # 所以不按"看起来更像真设备"去补 `device.class=sound`（无证据支持，宁可不加）。
         # 属性值取 PA 的规范取值：播放端 speaker、采集端 microphone。
         f"--load=module-null-sink sink_name={sink}"
-        " sink_properties=device.description=JaxNullSink,device.form_factor=speaker",
+        " sink_properties=device.description=JaxNullSink",
         f"--load=module-virtual-source source_name={SOURCE_NAME}"
         f" master={MONITOR_NAME}"
-        " source_properties=device.description=JaxNullMic,device.form_factor=microphone",
+        " source_properties=device.description=JaxNullMic",
     ]
     return AudioPlan(
         binary=binary,
