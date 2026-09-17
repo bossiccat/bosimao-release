@@ -457,9 +457,12 @@ def inspect_devices(*, env: dict[str, str], sink: str,
     clients = _pactl_lines("clients", env=env, which=which, run=run)
     defaults = parse_server_defaults(_pactl_info(env=env, which=which, run=run))
     # 长格式：每个 sink/source 的端口与属性 key=value。这是「SDK 为什么筛掉它」的唯一可判据。
-    sink_details = parse_device_details(_pactl_list("sinks", env=env, which=which, run=run))
-    source_details = parse_device_details(
-        _pactl_list("sources", env=env, which=which, run=run))
+    # **原文一并带出来**（`*_details_raw`）：019 那一轮构建期只报了"解析结果"，
+    # 于是没人能复核解析器自己的口径对不对 —— 那次代价是一次部署。
+    sink_details_raw = _pactl_list("sinks", env=env, which=which, run=run)
+    source_details_raw = _pactl_list("sources", env=env, which=which, run=run)
+    sink_details = parse_device_details(sink_details_raw)
+    source_details = parse_device_details(source_details_raw)
     return {
         "pactl": (which(PACTL) or "") != "",
         "probed": sinks is not None and sources is not None,
@@ -473,6 +476,9 @@ def inspect_devices(*, env: dict[str, str], sink: str,
         "default_source": defaults["default_source"],
         "sink_details": sink_details,
         "source_details": source_details,
+        # 原文只在构建期日志里用（`summarize_devices` 不往外带），避免把 /status 撑大。
+        "sink_details_raw": sink_details_raw,
+        "source_details_raw": source_details_raw,
     }
 
 
@@ -551,6 +557,8 @@ def missing_device_properties(report: dict, sink: str, source: str) -> list[str]
     顺带钉死了 PA 模块参数的写法陷阱（见 build_plan 的硬约束）。
 
     返回缺失项清单（空列表 = 齐了），调用方据此 fail-closed。
+    失败输出的**逐字原文**由 `raw_device_dumps()` 提供（调用方 selftest 负责打印）：
+    本函数只能报"我没解析到"，而解析器自己的口径对不对要拿原文复核。
     """
     want = (
         (report.get("sink_details"), sink, "sink", SINK_FORM_FACTOR),
@@ -567,6 +575,30 @@ def missing_device_properties(report: dict, sink: str, source: str) -> list[str]
     return missing
 
 
+def raw_device_dumps(report: dict) -> list[str]:
+    """`pactl list sinks` / `pactl list sources` 的**逐字原文**（构建期日志用）。
+
+    为什么非带原文不可：019 那一轮的构建日志只给了**解析结果**，于是没人能复核解析器
+    自己的口径对不对 —— 而解析器恰恰是那一关唯一裁判（`_PROP_LINE_RE` 只认**恰好两个**
+    制表符：PA 的输出层级一变就读不到属性，报出来的形态却和"属性真的没落上"一模一样）。
+    结果是一次白跑的部署。所以原文必须逐字进日志：**有分歧时以原文为准**。
+
+    不做截断、不重排、不改写取值；`[audio] | ` 前缀只加在行首（与 `_echo` 同一约定），
+    整行内容保持原样。`None`（没清点成）与空串（清点成但没有任何设备）照例严格区分。
+    """
+    out: list[str] = []
+    for kind, key in (("sinks", "sink_details_raw"), ("sources", "source_details_raw")):
+        text = report.get(key)
+        out.append(f"[audio] ---- pactl list {kind}：解析器读到的原文（逐字）----")
+        if isinstance(text, str) and text:
+            out.extend(f"[audio] | {line}" for line in text.splitlines())
+        else:
+            out.append(f"[audio] | <无原文可打印 text={text!r}>"
+                       "（None=没清点成；''=清点了但一个设备都没有）")
+        out.append(f"[audio] ---- end pactl list {kind} ----")
+    return out
+
+
 def selftest(*, runtime_dir=None, timeout: float = READY_TIMEOUT_S,
              require_devices: bool = True, popen=subprocess.Popen,
              which=shutil.which, run=subprocess.run, sleep=time.sleep,
@@ -581,6 +613,9 @@ def selftest(*, runtime_dir=None, timeout: float = READY_TIMEOUT_S,
     （TRTC 的 GetDevices 拿到空表）、**属性没落到设备上**（设备在、但参数被静默丢掉，
     019 的逗号写法死的正是这一关，此前没人卡它）。第三关是**外观**属性的落地检查，
     不是 code 1202 的解（真实判据是端口，见模块头）—— 它守的是"写了却没生效"。
+    前两关各自的"清点了什么"在日志里已经是逐字原文（`list short` 的输出被整行带出）；
+    第三关原先只打解析结果，所以那一关的失败分支额外用 `raw_device_dumps()` 把
+    **长格式原文逐字**打出来（019 的代价就出在这里）。
     """
     try:
         plan = build_plan(runtime_dir, which=which)
@@ -625,12 +660,19 @@ def selftest(*, runtime_dir=None, timeout: float = READY_TIMEOUT_S,
             missing = missing_device_properties(devices, plan.sink, plan.source)
             if missing:
                 log("[audio] FATAL: 设备在、套接字就绪，但我们写进去的 device.form_factor "
-                    "没有落到设备上 —— 参数写了却没生效（TRTC 那边读到的这个键是空的）。"
-                    "先看 argv 里的 sink_properties/source_properties 是不是漏了外层双引号、"
-                    "或用了逗号分隔（两层解析器都只以空白分隔）：")
+                    "没有落到设备上 —— 参数写了却没生效（TRTC 那边读到的这个键是空的）。")
+                log("[audio] 先看 argv 里的 sink_properties/source_properties："
+                    "漏了外层双引号、或用了逗号分隔（两层解析器都只以空白分隔）都会这样；"
+                    "再对下面的原文，确认不是解析器自己的口径误报。")
                 log(f"[audio] argv={' '.join(plan.argv)}")
                 for item in missing:
                     log(f"[audio]   · {item}")
+                # 逐字带上解析器读到的**长格式原文**：本关的唯一裁判是解析器自己
+                # （`_PROP_LINE_RE` 只认恰好两个制表符），它的口径错了会报出与"属性真的
+                # 没落上"完全相同的形态。019 那一轮的日志里只有解析结果、没有原文，
+                # 于是没人能复核，白跑一轮部署 ⇒ 原文必须逐字可见，有分歧时以原文为准。
+                for line in raw_device_dumps(devices):
+                    log(line)
                 return 1
         log(f"[audio] self-test OK: sink={plan.sink} source={plan.source} "
             f"sinks={len(devices['sinks'] or [])} sources={len(devices['sources'] or [])}")

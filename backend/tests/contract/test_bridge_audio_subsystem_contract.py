@@ -138,7 +138,7 @@ def test_plan_loads_modules_explicitly_instead_of_the_distro_default(tmp_path: P
 
 
 def test_plan_gives_the_null_sink_the_property_the_sdk_actually_reads(tmp_path: Path) -> None:
-    """`device.form_factor` 必须有值 —— 它是 SDK 读取的**两个** device.* 属性之一。
+    """`device.form_factor` 要有值 —— 它是 SDK 读取的**两个** device.* 属性之一。
 
     判据（离线取证，可复现）：对 libliteavsdk.so（12.5.705-beta.0，
     sha256 c5a6f1df…，与线上容器 pin 的 zip sha256 45da7b83… 一致）做全库可打印串扫描 +
@@ -146,6 +146,11 @@ def test_plan_gives_the_null_sink_the_property_the_sdk_actually_reads(tmp_path: 
     `device.description` 与 `device.form_factor` 被引用；`device.class` 零命中。
     所以这里**只**要求补 form_factor：`device.class=sound` / `device.icon_name` 无证据支持，
     加了也只是让镜像更像真机、并不能被 SDK 读到（不做的理由与被做的理由同等重要）。
+
+    **定位必须说清楚（2026-09-17 更正）**：这两个键属**外观**（icon/description/priority），
+    **不是**线上 `player device list is empty`（code 1202）的成因 —— 那是**端口**判据
+    （SDK 跳过端口指针为空的设备，而 null-sink 永远没有端口）。本断言保留的理由是
+    它是"参数写了却没生效"这类静默失效的第一道固化，**不是**"过了它 1202 就好"。
     """
     loads = [a for a in _plan(tmp_path).argv if a.startswith("--load=")]
     sink_load = next(a for a in loads if "module-null-sink" in a)
@@ -587,6 +592,36 @@ def test_build_selftest_fails_when_the_property_did_not_land(monkeypatch, tmp_pa
                          'device.form_factor = "microphone"',
                          'device.form_factor = "microphone,unused=x"'),
                      which_ok=True) == 1, "source 侧属性没落上同样必须判失败（只补 sink 不算完）"
+
+
+def test_build_selftest_prints_the_raw_pactl_text_it_parsed(monkeypatch, tmp_path: Path) -> None:
+    """这一关的唯一裁判是解析器自己 ⇒ 它的输入必须**逐字**进日志（019 的代价就出在这里）。
+
+    019 的构建日志里只有"解析结果"（缺失项 + 实测 props），没有原文。于是当解析器
+    自己的口径有问题时（`_PROP_LINE_RE` 只认**恰好两个**制表符：PA 输出层级一变就读不到
+    属性），报出来的形态与"属性真的没落上"**一模一样**，日志里无法二分 ⇒ 白跑一轮部署。
+    这里断言的正是**逐字原文**（含层级制表符、引号与取值都原样），不是"有没有报错"。
+    """
+    logs: list[str] = []
+    monkeypatch.setattr(audio_env, "wait_for_socket", lambda *a, **k: True)
+    code = audio_env.selftest(
+        runtime_dir=tmp_path,
+        popen=lambda *a, **k: _FakeProc(),
+        which=lambda name: f"/usr/bin/{name}",
+        run=_pactl_run({"sinks": PACTL_SELFTEST_SINKS_COMMA_FORM,
+                        "sources": PACTL_SELFTEST_SOURCES_OK}),
+        sleep=lambda _s: None,
+        log=logs.append,
+    )
+    assert code == 1, "sink 侧属性没落上必须判失败（本用例借这条分支验输出）"
+    joined = "\n".join(logs)
+    for raw_line in (PACTL_SELFTEST_SINKS_COMMA_FORM
+                     + PACTL_SELFTEST_SOURCES_OK).splitlines():
+        assert raw_line in joined, f"长格式原文缺行（必须逐字）：{raw_line!r}"
+    assert "pactl list sinks" in joined and "pactl list sources" in joined, \
+        "两类设备各自的原文都要带出来，不能只带出事的那一类"
+    # 分隔线/前缀之外不得改写内容：出事设备那行里被污染的描述必须原样可见。
+    assert 'device.description = "JaxNullSink,device.form_factor=speaker"' in joined
 
 
 def test_build_selftest_fails_when_devices_are_missing(monkeypatch, tmp_path: Path) -> None:

@@ -218,6 +218,66 @@ def test_inspect_devices_carries_long_format_details() -> None:
     assert report["sink_details"][0]["name"] == "jax_null"
     assert report["sink_details"][0]["ports"] == []
     assert report["source_details"][0]["name"] == "jax_null.mic"
+    # 原文必须一并带出来（供构建期日志**逐字**打印）：解析器是那一关的唯一裁判，
+    # 只有解析结果时无法二分"属性真的没落上"与"解析器自己读错了"——019 的代价。
+    assert report["sink_details_raw"] == PACTL_LIST_SINKS_NULL
+    assert report["source_details_raw"] == "Source #1\n\tName: jax_null.mic\n\tPorts:\n"
+
+
+def test_inspect_devices_keeps_a_failed_long_listing_as_unknown() -> None:
+    """长格式清点失败 ⇒ raw=None（没清点成），不得表现成"清点了、这台设备没有属性"。"""
+    def _run(cmd, **kwargs):  # noqa: ARG001
+        key = " ".join(cmd[1:])
+        if key == "list sinks":
+            return subprocess.CompletedProcess(cmd, 1, "", "boom")
+        out = {
+            "list short sinks": "0\tjax_null\tmodule-null-sink\t…\n",
+            "list short sources": "1\tjax_null.mic\tmodule-virtual-source\t…\n",
+            "list sources": "Source #1\n\tName: jax_null.mic\n\tPorts:\n",
+            "info": PACTL_INFO,
+        }.get(key, "")
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    report = audio_env.inspect_devices(env={}, sink=audio_env.SINK_NAME,
+                                       which=lambda name: f"/usr/bin/{name}", run=_run)
+
+    assert report["probed"] is True, "短格式还是清点成了 —— 两件事不可混"
+    assert report["sink_details_raw"] is None and report["sink_details"] is None
+    assert report["source_details_raw"] is not None, "另一类设备不受影响，不得一起塌掉"
+    assert "text=None" in "\n".join(audio_env.raw_device_dumps(report))
+
+
+def test_raw_device_dumps_are_verbatim_and_keep_unknown_separate_from_empty() -> None:
+    """逐字原文 + 三态口径：`None`（没清点成）与 `''`（清点了但没有任何设备）不可混。"""
+    lines = audio_env.raw_device_dumps({
+        "sink_details_raw": PACTL_LIST_SINKS_NULL,
+        "source_details_raw": None,
+    })
+    joined = "\n".join(lines)
+    for raw_line in PACTL_LIST_SINKS_NULL.splitlines():
+        assert raw_line in joined, f"原文必须逐字（含层级制表符）：{raw_line!r}"
+    assert "text=None" in joined, "没清点成必须显式标出，不能看起来像'设备表是空的'"
+
+    empty = "\n".join(audio_env.raw_device_dumps(
+        {"sink_details_raw": "", "source_details_raw": ""}))
+    assert "text=None" not in empty, "清点到空与'没清点成'是两件不同的事"
+    assert "text=''" in empty
+
+
+def test_summarize_devices_does_not_push_the_raw_text_into_status() -> None:
+    """原文只进**构建期**日志：/status 每次 GET 都驮整份 `pactl list` 会白撑载荷。"""
+    summary = audio_env.summarize_devices({
+        "probed": True, "sinks": ["0\tjax_null\t…"], "sources": ["1\tjax_null.mic\t…"],
+        "clients": ["liteav"], "sink_present": True, "source_present": True,
+        "default_sink": "jax_null", "default_source": "jax_null.monitor",
+        "sink_details": audio_env.parse_device_details(PACTL_LIST_SINKS_NULL),
+        "source_details": [],
+        "sink_details_raw": PACTL_LIST_SINKS_NULL,
+        "source_details_raw": PACTL_LIST_SINKS_NULL,
+    })
+    assert "sink_details_raw" not in summary and "source_details_raw" not in summary
+    # 解析结果照旧在（口径不得因为"不带原文"而缩水）。
+    assert summary["sink_details"][0]["props"] == ["device.description=JaxNullSink"]
 
 
 # --- 2. inspect_devices：probed 与"设备为空"是两件不同的事 -------------------
