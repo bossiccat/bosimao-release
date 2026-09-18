@@ -26,7 +26,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xauth \
         nodejs \
         npm \
-        ffmpeg \
         libnss3 \
         libatk1.0-0 \
         libatk-bridge2.0-0 \
@@ -113,10 +112,24 @@ RUN set -eu; \
 ENV LD_LIBRARY_PATH=/srv/sidecar/node_modules/trtc-electron-sdk/build/Release
 
 # Python 依赖：与 cloudapi 同一闭包（rtc_bridge 会 import app.*），额外需要 websockets。
-# edge-tts 用于**云端生成手机模拟器的中文提示音**（真语音，非音调），配合 ffmpeg 转 16k wav。
+# ⚠️ 这里**不装** `ffmpeg` / `edge-tts`（2026-09-18 回收）。
+#    这两个东西只服务一件事：**容器内**的手机模拟器把中文提示音合成成 16k wav
+#    （落地点是 cloudbridge/sim_phone.py:ensure_prompt_wav，调用方是 supervisor 的
+#     `_start_sim_phone`）。那个模拟器已作为「产品运行期里的测试夹具」被整体移除
+#    （见 cloudbridge/supervisor.py 顶部的说明），容器里**再无任何运行期消费者**：
+#    · cloudbridge 只跑 rtc_bridge + sidecar + audio；rtc_bridge 的 import 闭包
+#      （session.py → app.voice.apm_bridge / qwen_realtime_bridge / end_detect）**不经过**
+#      app.voice.half_duplex，而 `import edge_tts` 只发生在 app/voice/tts_edge.py:52
+#      （half_duplex → tts_edge 这条链属于 FastAPI 语音网关，不在本镜像里）。
+#    · `ffmpeg` 这条 apt 依赖此前也只被 ensure_prompt_wav 用（subprocess 调 CLI）；
+#      镜像里的 `libtxffmpeg.so` 是 TRTC 自带库，与 apt 的 ffmpeg **毫无关系**，别动它。
+#    本地 harness（scripts/sim/run-phone.py）在**容器外**跑，用的是**宿主机**的
+#    ffmpeg/edge-tts，不受本改动影响。
+#    回归：test_image_no_longer_ships_the_prompt_audio_toolchain 已把原来的
+#    test_image_can_synthesise_the_prompt_audio_in_cloud 由「断言这两个工具存在」
+#    翻转为「断言不存在」——若有人把它们加回来，测试会红。
 COPY cloudbridge/requirements.txt ./cloudbridge-requirements.txt
-RUN pip install --no-cache-dir -r cloudbridge-requirements.txt \
-    && pip install --no-cache-dir edge-tts==7.2.8
+RUN pip install --no-cache-dir -r cloudbridge-requirements.txt
 
 # 受跟踪的三棵树：rtc_bridge（零改动）、sidecar（零改动）、backend/app（共享协议与配置）
 COPY backend/app ./backend/app

@@ -439,14 +439,111 @@ def test_no_phone_role_child_survives_in_the_supervisor() -> None:
     assert "self.sim_phone = Child(" not in text
 
 
-def test_image_can_synthesise_the_prompt_audio_in_cloud() -> None:
-    """提示音必须能在云端生成：真实中文语音（edge-tts）转 16k wav（ffmpeg）。
+# 手机模拟器的提示音工具链（`edge-tts` + `ffmpeg`）——2026-09-18 从生产镜像回收
+# ---------------------------------------------------------------------------
+# 它们只服务一件事：**容器内**把中文提示音合成成 16k wav
+# （落地点 cloudbridge/sim_phone.py:ensure_prompt_wav，调用方是 supervisor 已删除的
+# `_start_sim_phone`）。模拟器本身已作为「产品运行期里的测试夹具」被整体移除，
+# 于是容器里**再无任何运行期消费者**：
+#   · cloudbridge 只跑 rtc_bridge + sidecar + audio；rtc_bridge 的 import 闭包
+#     （session.py → app.voice.apm_bridge / qwen_realtime_bridge / end_detect）**不经过**
+#     app.voice.half_duplex，而 `import edge_tts` 只发生在 app/voice/tts_edge.py:52
+#     —— 那条链属于 FastAPI 语音网关，不在本镜像里；
+#   · apt 的 `ffmpeg` 此前也只被 ensure_prompt_wav 用 subprocess 调起。镜像里出现的
+#     `libtxffmpeg.so` 是 **TRTC 自带库**，与 apt 的 ffmpeg 毫无关系（别误删）。
+# 本地 harness（scripts/sim/run-phone.py）在**容器外**运行，用宿主机的这两个工具，
+# 不受本改动影响。
+#
+# 检查口径与 supervisor 那条移除检查器一致：**只看会被执行的内容**，注释里解释历史
+# 是允许的 —— 否则"为什么删掉"这句话本身就会被自己的测试判红。
 
-    用音调代替语音测不出链路真伪——模型只对语音产生有意义的回复。
+_PROMPT_AUDIO_TOKENS = ("ffmpeg", "edge-tts", "edge_tts")
+
+
+def _dockerfile_executable_text(dockerfile_text: str) -> str:
+    """剥掉 Dockerfile 的**整行注释**，只留真正会被执行的行。
+
+    Dockerfile 里首个非空白字符是 `#` 的行不参与任何指令、也不参与续行拼接。
+    剥掉后，`libtxffmpeg.so`（字符串本身含 "ffmpeg"）这类只出现在注释里的 TRTC 库名
+    就不会误伤检查器。
+    """
+    return "\n".join(
+        line for line in dockerfile_text.splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
+def _prompt_audio_toolchain_violations(dockerfile_text: str) -> list[str]:
+    """返回「镜像里仍带着提示音工具链」的违规点（空列表 = 干净）。"""
+    body = _dockerfile_executable_text(dockerfile_text)
+    violations: list[str] = []
+    for token in _PROMPT_AUDIO_TOKENS:
+        if token in body:
+            where = [ln.strip() for ln in body.splitlines() if token in ln]
+            violations.append(f"Dockerfile 的执行内容里仍有 {token!r}：{where}")
+    return violations
+
+
+def test_image_no_longer_ships_the_prompt_audio_toolchain() -> None:
+    """**移除**：商用镜像不再带 ffmpeg / edge-tts —— 它们只服务已删掉的容器内模拟器。
+
+    这一条正是原 `test_image_can_synthesise_the_prompt_audio_in_cloud` 的翻转：
+    从「断言这两个工具**存在**」改为「断言它们**不存在**」。
     """
     dockerfile = (CLOUDBRIDGE / "Dockerfile").read_text(encoding="utf-8")
-    assert "ffmpeg" in dockerfile
-    assert "edge-tts" in dockerfile
+    violations = _prompt_audio_toolchain_violations(dockerfile)
+    assert violations == [], (
+        "生产镜像里还留着手机模拟器的提示音工具链（应随模拟器一起回收）：\n"
+        + "\n".join(violations)
+    )
+
+    # 回收必须是**外科手术式**的：音频子系统与 TRTC 原生库的搜索路径一字未动。
+    body = _dockerfile_executable_text(dockerfile)
+    for kept in ("pulseaudio", "pulseaudio-utils", "pulseaudio-module-raop",
+                 "xvfb", "xauth", "npm"):
+        assert kept in body, f"回收 ffmpeg/edge-tts 时误伤了与本任务无关的依赖：{kept}"
+    assert (
+        "ENV LD_LIBRARY_PATH=/srv/sidecar/node_modules/trtc-electron-sdk/build/Release"
+        in body
+    ), "TRTC 原生库的 dlopen 搜索路径必须原样保留（libtxffmpeg.so 与 apt 的 ffmpeg 无关）"
+    assert "-r cloudbridge-requirements.txt" in body, "运行期 Python 依赖闭包必须照旧安装"
+
+
+def test_the_removal_checker_rejects_the_pre_removal_dockerfile() -> None:
+    """检查器必须真的抓得住「删之前那一版」——否则它只是装饰。
+
+    同时钉住三件事：
+      ① apt 清单里加回 `ffmpeg`            → 判红；
+      ② `pip install edge-tts==7.2.8` 加回 → 判红；
+      ③ 而**注释里**提到这两个名字**不算违规** —— 否则"为什么删掉"就写不出口。
+    """
+    dockerfile = (CLOUDBRIDGE / "Dockerfile").read_text(encoding="utf-8")
+
+    # ① apt 清单里加回 ffmpeg
+    apt_anchor = "        npm \\\n"
+    assert apt_anchor in dockerfile, "Dockerfile 的 apt 清单结构变了，请先更新本用例"
+    with_apt = dockerfile.replace(apt_anchor, apt_anchor + "        ffmpeg \\\n", 1)
+    violations = _prompt_audio_toolchain_violations(with_apt)
+    assert violations, "apt 清单里加回 ffmpeg 竟然没被判红"
+    assert "ffmpeg" in violations[0]
+
+    # ② pip 装回 edge-tts
+    pip_anchor = "RUN pip install --no-cache-dir -r cloudbridge-requirements.txt\n"
+    assert pip_anchor in dockerfile, "Dockerfile 的 pip 安装段结构变了，请先更新本用例"
+    with_pip = dockerfile.replace(
+        pip_anchor,
+        pip_anchor.rstrip("\n") + " \\\n"
+        "    && pip install --no-cache-dir edge-tts==7.2.8\n",
+        1,
+    )
+    violations = _prompt_audio_toolchain_violations(with_pip)
+    assert violations, "pip 装回 edge-tts 竟然没被判红"
+    assert any("edge-tts" in v for v in violations)
+
+    # ③ 注释不算违规（顶部那段解释性注释也因此不许被误伤）
+    assert _prompt_audio_toolchain_violations(
+        dockerfile + "\n# 历史：这里曾装过 ffmpeg / edge-tts，现随模拟器一起回收\n"
+    ) == [], "检查器把注释也当成了违规——那「为什么删掉」就写不出来了"
 
 
 def test_status_no_longer_reports_simulation() -> None:
