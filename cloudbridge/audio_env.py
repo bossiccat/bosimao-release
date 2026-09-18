@@ -66,6 +66,11 @@
 这一关红了是**有价值的否定结果**（说明该回到架构问题），不要去把断言调松。
 三个承重参数（`autoreconnect=true` / 不改 `server` / 不启监听进程）见 build_plan 的注释。
 
+022 构建把这条路线的最初一轮打回了，原因是**属性值里带空格**：`device.description=Jax Speaker`
+让 raop-sink.c 报 `Invalid properties`（modargs 剥掉外层引号后，`pa_proplist_from_string`
+按空白分条 ⇒ 裸 token `Speaker`）。已改为单 token `JaxRaoSpeaker`、并删掉零收益的
+`device.bus`；**属性值禁止出现任何空白**这一不变式由契约测试钉住（见 build_plan 注释第 4 条）。
+
 * **必须显式钉住路径**（XDG_RUNTIME_DIR / PULSE_RUNTIME_PATH / PULSE_SERVER）：
   容器里没有 user session，`XDG_RUNTIME_DIR` 默认不存在，libpulse 客户端与服务端
   各自按它推导 `pulse/native`，不钉住就是两边各自找一个不存在的目录。
@@ -217,11 +222,27 @@ def build_plan(runtime_dir=None, *, sink: str = SINK_NAME,
         #    sink-input 链一路上溯到我们的拦截器 —— **这正是本修复成立的机制**
         #    （`pa_sink_render_full` 保证返回满长度；raop-sink.c:560-564 的 `continue`
         #    是唯一不消费的路径，autonull=true 时它被跳过）。
+        #
+        # 4) **属性值里一个空白字符都不许有**（2026-09-17 022 构建实测：属性串写成
+        #    `device.description=Jax Speaker` 时 raop-sink.c 直接打 `Invalid properties`，
+        #    随后 `module.c: Failed to load module "module-raop-sink" … initialization failed.`
+        #    ⇒ jax_raop 从未materialise、门禁判红。注意当时**没有**任何 libraop/so 报错，
+        #    所以这不是 rpath 问题、**不要**去加 LD_LIBRARY_PATH 之类的绕行）。
+        #    机制是第一层 modargs 剥掉外层双引号后，那一串交给 `pa_proplist_from_string`，
+        #    而它**按空白分条**：`device.description=Jax Speaker` 会变成
+        #    `device.description=Jax` **外加一个裸 token `Speaker`** ⇒ proplist 非法 ⇒
+        #    `pa_modargs_get_proplist` 失败 ⇒ 模块拒绝初始化。
+        #    `jax_null` 之所以没踩到，只是因为它的值里恰好没有空格。
+        #    ⇒ 描述性文案不许写进属性值（想要可读名字就该用**没有空格**的单 token，
+        #    如 `JaxRaoSpeaker`）；本期也不再发 `device.bus`：SDK 的 sink 路径只读
+        #    `device.description` 与 `device.form_factor`（`device.bus` 只在 card 路径被读），
+        #    发它是纯粹的额外风险面、零收益。
+        #    这个不变式由契约测试 `test_every_load_element_has_a_space_free_proplist` 钉住。
         f"--load=module-raop-sink sink_name={RAOP_SINK_NAME}"
         f" protocol=UDP server={RAOP_SERVER} encryption=none"
         f" autoreconnect=true latency_msec=50"
-        f' sink_properties="device.description=Jax Speaker'
-        f' device.form_factor={SINK_FORM_FACTOR} device.bus=pci"',
+        f' sink_properties="device.description=JaxRaoSpeaker'
+        f' device.form_factor={SINK_FORM_FACTOR}"',
         # 设备：无头容器没有声卡，必须自己造。顺序有意义——virtual-source 的 master
         # 是 null-sink 的 monitor，所以 null-sink 必须先加载（raop sink 与它们无依赖，
         # 上面那条放在 native-protocol-unix 之后、null-sink 之前）。

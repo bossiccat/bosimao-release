@@ -241,19 +241,24 @@ def test_plan_loads_the_raop_sink_module_as_the_only_port_bearing_device(tmp_pat
         ⇒ 不写这条，卸载点（:276-278）变可达、sink 会被销毁；
       · `server=127.0.0.1:5000`：**故意**指向关闭的 loopback 端口（同步失败、不武装重连
         定时器）；换成黑洞 IP 会走异步路径、武装 5s 定时器；
-      · `sink_properties` 整串带外层双引号（019 的逗号写法在这里同样不成立）。
+      · `sink_properties` 整串带外层双引号（019 的逗号写法在这里同样不成立），
+        且**值里没有空白** —— 022 构建就死在这条上（`Jax Speaker` ⇒ raop-sink.c
+        `Invalid properties`），所以 description 用单 token `JaxRaoSpeaker`；
+        `device.bus` 直接不发（SDK 的 sink 路径只读 description/form_factor）。
     """
     loads = [a for a in _plan(tmp_path).argv if a.startswith("--load=")]
     raop = next(a for a in loads if "module-raop-sink" in a)
     assert raop == (
         "--load=module-raop-sink sink_name=jax_raop protocol=UDP "
         "server=127.0.0.1:5000 encryption=none autoreconnect=true latency_msec=50 "
-        'sink_properties="device.description=Jax Speaker device.form_factor=speaker '
-        'device.bus=pci"'
+        'sink_properties="device.description=JaxRaoSpeaker device.form_factor=speaker"'
     ), "raop 的 argv 是承重契约（autoreconnect 决定 autonull），不得改写"
     assert "autoreconnect=true" in raop, "缺它就是 raop-sink.c:780 的 autonull=false，sink 会被卸载"
     assert "0.0.0.0" not in raop and "255.255.255.255" not in raop, (
         "server 必须是关闭的 loopback（同步失败、不武装重连定时器），不能换成黑洞 IP"
+    )
+    assert "device.bus" not in raop, (
+        "device.bus 只在 SDK 的 card 路径被读、sink 路径不读 —— 发它纯属额外风险面（022 起已删）"
     )
     # 顺序：raop 在 native-protocol-unix 之后（客户端出入口先就绪），
     # 且**没有**动 null-sink → virtual-source 的相邻关系（virtual-source 的 master 是
@@ -263,6 +268,97 @@ def test_plan_loads_the_raop_sink_module_as_the_only_port_bearing_device(tmp_pat
         idx[next(a for a in loads if "module-raop-sink" in a)]
     assert idx[next(a for a in loads if "module-null-sink" in a)] < \
         idx[next(a for a in loads if "module-virtual-source" in a)]
+
+
+# --- 2b. 属性串的不变式：**值里不许有空白**（022 构建失败的真因） --------------
+#
+# 2026-09-17，DeployId 022 的构建日志（逐字）：
+#     E: [pulseaudio] raop-sink.c: Invalid properties
+#     E: [pulseaudio] module.c: Failed to load module "module-raop-sink" (argument: "…"): initialization failed.
+#     [audio] FATAL: sink=jax_raop 没有端口、或没有选中端口 …
+# 而**没有**任何 libraop / cannot open shared object file 报错 ⇒ .so 与 rpath 都是好的。
+#
+# 机制：argv 元素里那串 `sink_properties="…"` 先被 PA 第一层 modargs 剥掉外层双引号，
+# 剩下的字符串交给 `pa_proplist_from_string`，而它**按空白分条**。于是
+# `device.description=Jax Speaker` 被劈成 `device.description=Jax` **加一个裸 token
+# `Speaker`** ⇒ proplist 非法 ⇒ `pa_modargs_get_proplist` 失败 ⇒ 模块拒绝初始化。
+# `jax_null` 侥幸没事只因为它的值里恰好没有空格。
+#
+# 这类失效**在测试里本来完全不可见**（字符串是合法的 Python、argv 拼得出来），
+# 所以这里把它提升为一条 repo 级不变式，而不是"下次注意"。
+
+_PROP_ARG_RE = re.compile(r'(?:sink|source)_properties="([^"]*)"')
+
+# 整串 = 一个或多个"空白分隔的 key=value"，key 非空、value 非空且**不含空白**。
+# （`[^\s]+` 而不是 `[^\s=]+`：PA 的值里允许出现 `=`。）
+_PROP_LIST_OK_RE = re.compile(r"^(?:\s*[^\s=]+=[^\s]+)+$")
+
+
+def _proplist_values(load: str) -> list[str]:
+    """取出一条 `--load=` 元素里所有 `sink_properties=` / `source_properties=` 的值（已剥外层双引号）。"""
+    return _PROP_ARG_RE.findall(load)
+
+
+def _proplist_violations(value: str) -> list[str]:
+    """属性串违反不变式的地方（空列表 = 合规）。**必须能在旧形态上判红**，见下面那条测试。"""
+    if _PROP_LIST_OK_RE.match(value):
+        return []
+    out: list[str] = []
+    for token in value.split():
+        if "=" not in token:
+            out.append(
+                f"裸 token {token!r}：没有 '='，说明某个属性的**值里有空白**、"
+                f"被 proplist 解析器劈成了两条（模块会直接报 Invalid properties）")
+        elif not token.split("=", 1)[0]:
+            out.append(f"空键名：{token!r}")
+        elif not token.split("=", 1)[1]:
+            out.append(f"空值：{token!r}")
+    if not out:
+        out.append(f"属性串形态非法（期望'空白分隔的 key=value'）：{value!r}")
+    return out
+
+
+def test_every_load_element_has_a_space_free_proplist(tmp_path: Path) -> None:
+    """argv 里**每一条**带属性的 `--load=`，其属性值都不得含空白 —— 不止 raop 那条。
+
+    null-sink / virtual-source / raop 走的是同一个 `pa_modargs_get_proplist`，
+    所以这条不变式对三者同等成立：任何一个值里掉了空格进去，构建期的设备/端口门禁
+    都只会看到"设备没材料化"，而看不到真正的原因（022 就是这样白跑了一轮部署）。
+    """
+    loads = [a for a in _plan(tmp_path).argv if a.startswith("--load=")]
+    checked = 0
+    for load in loads:
+        for value in _proplist_values(load):
+            checked += 1
+            violations = _proplist_violations(value)
+            assert not violations, (
+                f"{load.split(' ', 1)[0]} 的属性串非法（值里不许有空白）：{violations}")
+    assert checked == 3, (
+        f"应当检查到 3 条属性串（raop / null-sink / virtual-source 各一条），实到 {checked} —— "
+        f"少一条说明有设备的属性被删掉了，多一条说明新增了未覆盖的写法")
+
+
+def test_the_proplist_invariant_rejects_the_form_that_broke_the_022_build() -> None:
+    """**这条测试的全部价值**：022 那一串（值里带空格）必须被判红。
+
+    如果它绿了，上面的不变式就形同虚设 —— 所以这里同时断言"裸 token 被指出来"，
+    以及"去掉空格后同一串判绿"（错的不是可读名字，是名字里的空格）。
+    """
+    broken = ('--load=module-raop-sink sink_name=jax_raop protocol=UDP '
+              'server=127.0.0.1:5000 encryption=none autoreconnect=true latency_msec=50 '
+              'sink_properties="device.description=Jax Speaker device.form_factor=speaker '
+              'device.bus=pci"')
+    (value,) = _proplist_values(broken)
+    violations = _proplist_violations(value)
+    assert violations, "022 的形态必须判红，否则这条不变式守不住任何东西"
+    assert any("Speaker" in v for v in violations), (
+        f"必须指出被劈出来的裸 token `Speaker`，实际报的是 {violations}")
+
+    fixed = broken.replace("device.description=Jax Speaker",
+                           "device.description=JaxRaoSpeaker")
+    (value2,) = _proplist_values(fixed)
+    assert _proplist_violations(value2) == [], (
+        "把值里的空格去掉之后同一串必须判绿（可读名字不是问题，空格才是）")
 
 
 def test_plan_pins_every_path_libpulse_could_guess(tmp_path: Path) -> None:
@@ -598,15 +694,14 @@ PACTL_SELFTEST_SINKS_OK = (
     "Sink #1\n"
     "\tState: SUSPENDED\n"
     "\tName: jax_raop\n"
-    "\tDescription: Jax Speaker\n"
+    "\tDescription: JaxRaoSpeaker\n"
     "\tDriver: module-raop-sink.c\n"
     "\tSample Specification: s16le 2ch 44100Hz\n"
     "\tChannel Map: front-left,front-right\n"
     "\tFlags: DECIBEL_VOLUME LATENCY \n"
     "\tProperties:\n"
-    '\t\tdevice.description = "Jax Speaker"\n'
+    '\t\tdevice.description = "JaxRaoSpeaker"\n'
     '\t\tdevice.form_factor = "speaker"\n'
-    '\t\tdevice.bus = "pci"\n'
     "\tPorts:\n"
     "\t\tnetwork-output: Network output (priority 0, latency offset 0 usec, available: unknown)\n"
     "\tActive Port: network-output\n"
@@ -628,11 +723,11 @@ PACTL_SELFTEST_SINKS_NO_RAOP_PORTS = (
     "Sink #1\n"
     "\tState: SUSPENDED\n"
     "\tName: jax_raop\n"
-    "\tDescription: Jax Speaker\n"
+    "\tDescription: JaxRaoSpeaker\n"
     "\tDriver: module-raop-sink.c\n"
     "\tFlags: DECIBEL_VOLUME LATENCY \n"
     "\tProperties:\n"
-    '\t\tdevice.description = "Jax Speaker"\n'
+    '\t\tdevice.description = "JaxRaoSpeaker"\n'
     '\t\tdevice.form_factor = "speaker"\n'
 )
 PACTL_SELFTEST_SOURCES_OK = (
