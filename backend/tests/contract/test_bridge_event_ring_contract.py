@@ -247,7 +247,6 @@ def test_status_exposes_events_and_last_join_under_the_sidecar():
     """验收口径：一次 GET /api/v1/voice/bridge/status 就能判定"进房了没有"。"""
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
-    sup.sim_enabled = False
     sup.bridge_health_url = "http://127.0.0.1:19093/health"
     sup.sign_url = "https://example.invalid"
     sup.device_id = "jax-cloud-bridge"

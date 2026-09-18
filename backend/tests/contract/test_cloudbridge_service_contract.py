@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -182,7 +183,6 @@ def test_watch_exits_nonzero_when_rtc_bridge_dies() -> None:
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
     sup.shutting_down = False
-    sup.sim_enabled = False
     sup.sidecar_enabled = True
     sup.crash_grace_s = 0
     sup.bridge = _StubChild(alive=False, exit_code=1)
@@ -197,7 +197,6 @@ def test_watch_exits_nonzero_when_sidecar_dies() -> None:
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
     sup.shutting_down = False
-    sup.sim_enabled = False
     sup.sidecar_enabled = True
     sup.crash_grace_s = 0
     sup.bridge = _StubChild(alive=True)
@@ -214,7 +213,6 @@ def test_watch_exits_nonzero_when_sidecar_dies() -> None:
 def test_status_reports_children_health_and_verdict() -> None:
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
-    sup.sim_enabled = False
     sup.bridge_health_url = "http://127.0.0.1:19093/health"
     sup.sign_url = "https://example.invalid"
     sup.device_id = "jax-cloud-bridge"
@@ -235,7 +233,6 @@ def test_status_reports_children_health_and_verdict() -> None:
 def test_status_is_not_ok_when_health_probe_fails() -> None:
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
-    sup.sim_enabled = False
     sup.bridge_health_url = "http://127.0.0.1:19093/health"
     sup.sign_url = ""
     sup.device_id = "jax-cloud-bridge"
@@ -280,7 +277,6 @@ def test_watch_holds_the_status_endpoint_before_exiting() -> None:
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
     sup.shutting_down = False
-    sup.sim_enabled = False
     sup.sidecar_enabled = False
     sup.crash_grace_s = 0.3
     sup.bridge = _StubChild(alive=False, exit_code=1)
@@ -296,12 +292,21 @@ def test_watch_holds_the_status_endpoint_before_exiting() -> None:
 def test_sidecar_is_not_given_the_phone_only_device_argument() -> None:
     """实测事故：role=sidecar 带 --device 会被 sidecar 自身判 SIDECAR_UNEXPECTED_DEVICE_ARG
     并 fail-closed 退出（config.js:64 / rtc.js:364），导致容器崩溃重启。
-    --device 只属于 role=phone，因此**对端**不得传——但手机模拟器必须传。"""
+
+    `--device` 只属于 role=phone。产品运行期里**没有**任何 phone 角色子进程了
+    （手机模拟器已于 2026-09-17 整体移除，见 test_bridge_sim_phone_removed_contract.py），
+    所以这里只剩一条：sidecar 不得带 --device=；`--role=phone` 在 supervisor 里
+    必须一个都不剩。
+    """
     text = (CLOUDBRIDGE / "supervisor.py").read_text(encoding="utf-8")
     sidecar_block = text.split("self.sidecar = Child(", 1)[1].split(")", 1)[0]
     assert "--device=" not in sidecar_block, "sidecar 启动参数里不得出现 --device="
-    sim_block = text.split("self.sim_phone = Child(", 1)[1].split("liveness=False", 1)[0]
-    assert "--device=" in sim_block, "手机模拟器必须以 --device 指定自己的 device_id"
+    code = ast.parse(text)  # 看代码构造，不看注释（注释里解释历史是允许的）
+    literals = {n.value for n in ast.walk(code)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "--role=phone" not in literals, (
+        "容器内不得再以 phone 角色起 Electron —— 那会抢 sidecar 唯一的会话位")
+    assert "sim-phone" not in literals, "容器内不得再有名为 sim-phone 的子进程"
 
 
 def test_bridge_health_port_stays_loopback_only() -> None:
@@ -311,7 +316,13 @@ def test_bridge_health_port_stays_loopback_only() -> None:
     assert "127.0.0.1:19093" in text
 
 
-# --- 6. 云端手机模拟（无真机的端到端验证）----------------------------------
+# --- 6. 手机模拟的**遗留部分**（模块保留给容器外的本地 harness）-------------
+#
+# 2026-09-17：容器内的手机模拟器已从产品运行期整体移除
+# （supervisor 的启动路径 / `SIM_*` 环境变量 / `/status.simulation` 全部删掉），
+# 这里剩下的只有 `sim_phone.py` 的**离线解析**契约 —— 模块仍由
+# `scripts/sim/run-phone.py` 使用，是容器之外唯一的端到端验证手段。
+# 移除本身的契约在 test_bridge_sim_phone_removed_contract.py。
 
 
 def _load_sim_phone():
@@ -387,29 +398,45 @@ def test_phone_log_parsing_detects_no_reply_and_failures() -> None:
     assert module.parse_phone_log(["PHONE 进房失败 -1002"]).state == "failed"
 
 
-def test_sim_phone_is_not_a_liveness_child() -> None:
-    """模拟器跑完即退出是预期：绝不能因此把容器判死（否则会无限重启）。"""
+def test_sim_phone_can_no_longer_affect_container_liveness() -> None:
+    """**移除**：以前要论证"sim 是一次性（liveness=False）子进程、它退出不算死"。
+
+    容器里现在根本没有这样的子进程了 —— `_first_dead()` 只看 rtc_bridge / sidecar /
+    audio 三个 liveness 子进程，所以那个风险点连同 sim 子进程一起消失了。
+    """
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
     sup.shutting_down = False
     sup.sidecar_enabled = False
     sup.crash_grace_s = 0
-    sup.sim_enabled = False
     sup.bridge = _StubChild(alive=True)
     sup.sidecar = _StubChild(alive=True)
-    dead_sim = _StubChild(alive=False, exit_code=0, name="sim-phone")
-    dead_sim.liveness = False
-    sup.sim_phone = dead_sim
+    sup.audio = None
 
-    # 一次性子进程已退出，但 liveness 子进程都健康 → 不得抛 SystemExit
-    assert sup._first_dead() is None
+    assert not hasattr(sup, "sim_phone"), (
+        "容器里不得再有 sim 子进程句柄 —— 它存在就意味着那条执行路径回来了")
+    assert not hasattr(sup, "sim_enabled"), "sim_enabled 这个开关本身也必须消失"
+    assert sup._first_dead() is None, "liveness 子进程都健康时不得判死"
 
 
-def test_sim_phone_launches_in_the_phone_role_with_prompt_and_recording() -> None:
+def test_no_phone_role_child_survives_in_the_supervisor() -> None:
+    """**移除**：supervisor 不再有任何 phone 角色的启动参数，也不再构造 sim 子进程。
+
+    删掉的是**执行路径**（以及 `--device` 这类 phone-only 参数），不是模块 ——
+    模块仍由容器外的 `scripts/sim/run-phone.py` 使用。
+    """
     text = (CLOUDBRIDGE / "supervisor.py").read_text(encoding="utf-8")
-    for flag in ("--role=phone", "--wav=", "--out-wav=", "--hold=", "--device="):
-        assert flag in text, f"手机模拟启动参数缺少 {flag}"
-    assert "liveness=False" in text, "模拟器必须标记为非存活子进程"
+    code = ast.parse(text)  # 只看代码构造：注释里解释历史是允许的
+    literals = {n.value for n in ast.walk(code)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    for gone in ("--role=phone", "--wav=", "--out-wav=", "--hold=", "--join-grace=",
+                 "--device=", "sim-phone"):
+        assert gone not in literals, f"supervisor 里仍残留 phone 角色的启动参数：{gone!r}"
+    funcs = {n.name for n in ast.walk(code)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for gone in ("_start_sim_phone", "_reap_sim_phone", "_sim_lines"):
+        assert gone not in funcs, f"supervisor 里仍有模拟器方法 {gone}()"
+    assert "self.sim_phone = Child(" not in text
 
 
 def test_image_can_synthesise_the_prompt_audio_in_cloud() -> None:
@@ -422,29 +449,31 @@ def test_image_can_synthesise_the_prompt_audio_in_cloud() -> None:
     assert "edge-tts" in dockerfile
 
 
-def test_status_reports_simulation_when_enabled() -> None:
+def test_status_no_longer_reports_simulation() -> None:
+    """**移除**：`/status` 不再有 `simulation` 段 —— 无论环境变量怎么设。
+
+    部署门禁读的是 ok / rtc_bridge / sidecar / rtc_bridge_health / trtc_sdk_version，
+    移除 simulation 不得动它们；残留的模拟器环境变量则改由 `ignored_env`（只列名字）
+    报出来，配置漂移仍然是"看得见、但不照做"。
+    """
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
-    sup.sim_enabled = False
     sup.bridge_health_url = "http://127.0.0.1:19093/health"
     sup.sign_url = ""
     sup.device_id = "jax-cloud-bridge"
     sup.sidecar_enabled = True
-    sup.sim_enabled = True
+    sup.ignored_env = ["BRIDGE_SIM_PHONE", "SIM_DEVICE_ID"]
     sup.bridge = _StubChild(alive=True)
     sup.sidecar = _StubChild(alive=True)
     object.__setattr__(sup, "_probe_bridge_health", lambda: "ok")
-    import threading as _threading
-    sup._sim_lock = _threading.Lock()
-    sim = _load_sim_phone()
-    sup.sim_metrics = sim.parse_phone_log(REAL_PHONE_LOG)
 
     payload = sup.status()
-    assert payload["simulation"]["state"] == "replied"
-    assert payload["simulation"]["reply_bytes"] == 96640
-    # 对外报出的口径也要一起守住：状态端点是别人读数的唯一入口。
-    assert payload["simulation"]["utterance_ms"] == 3120
-    assert payload["simulation"]["speech_ms"] == 3120
+    assert "simulation" not in payload, "产品运行期不再有模拟器，也就没有 simulation 可报"
+    assert not hasattr(sup, "sim_metrics"), "sim_metrics 这个状态对象也必须消失"
+    for key in ("ok", "rtc_bridge", "sidecar", "rtc_bridge_health", "trtc_sdk_version"):
+        assert key in payload, f"/status 少了部署门禁依赖的键：{key}"
+    assert payload["ok"] is True, "两个 liveness 子进程都活着时 ok 必须为 True"
+    assert payload["ignored_env"] == ["BRIDGE_SIM_PHONE", "SIM_DEVICE_ID"]
 
 
 # --- 7. TLS 材料：PEM 走环境变量、启动时落受限临时文件（私钥绝不烘进镜像）------
@@ -560,7 +589,6 @@ def test_supervisor_does_not_override_explicit_bridge_base_url(monkeypatch) -> N
 def test_status_surfaces_tls_material_failure() -> None:
     module = _load_supervisor()
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
-    sup.sim_enabled = False
     sup.bridge_health_url = "http://127.0.0.1:19093/health"
     sup.sign_url = ""
     sup.device_id = "jax-cloud-bridge"

@@ -7,19 +7,22 @@
 1. provisioning 的三步顺序、认证归属与 URL 段名（privacy 段名尤其容易写错）；
 2. 任何阶段的失败都只暴露「阶段:错误码」，**绝不**泄露 owner 凭证 / pairing_code /
    credential_secret（凭证一旦进了日志或状态端点就等于泄露）；
-3. supervisor 的接线：显式 token 时不重复 provisioning；凭证走 env 而非 argv；
-   provisioning 失败时状态端点必须自证（state=failed, failure=provision:*）。
+3. **supervisor 不再接线**（2026-09-17）：容器内的手机模拟器已从产品运行期整体移除，
+   supervisor 里不再有 provisioning 调用、sim 子进程与 `/status.simulation`。
 
 另附 sim_phone 新日志行（签发失败带码 / 远端就绪毫秒 / 远端超时）的解析断言。
+
+⚠️ 模块**没有**被删：`scripts/sim/run-phone.py` 仍在容器外用它做端到端验证，
+   所以第 1、2 节的口径与第 4、5 节的解析契约必须一直有效。
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import json
 import re
 import sys
-import threading
 import urllib.error
 from pathlib import Path
 from unittest import mock
@@ -302,120 +305,56 @@ def test_phone_log_keeps_the_legacy_sign_failure_line() -> None:
     assert legacy.failure == "PHONE_SESSION_SIGN_FAILED"
 
 
-# --- 6. supervisor 接线 -----------------------------------------------------
+# --- 6. supervisor 接线：**已移除**（2026-09-17）-----------------------------
+#
+# 容器内的手机模拟器已从产品运行期整体移除：supervisor 不再调用 provisioning、
+# 不再构造 sim 子进程、`/status` 不再有 simulation 段（移除本身的契约在
+# `test_bridge_sim_phone_removed_contract.py`）。于是"supervisor 怎么接线"这一节
+# 失去了对象，这里改成断言**反面**。
+#
+# 但原来那条安全口径**没有失效、也不许失效**：任何阶段的失败只暴露「阶段:码」，
+# 绝不泄露 owner 凭证 / pairing_code / credential_secret —— 那是 `sim_provision.py`
+# 自己的契约（上面 1~5 节仍在守），与"容器跑不跑它"无关。
 
 
-class _FakeChild:
-    def __init__(self, name, argv, cwd, extra_env, **kwargs) -> None:
-        self.name = name
-        self.argv = argv
-        self.cwd = cwd
-        self.extra_env = extra_env
-        self.kwargs = kwargs
-        self.started = False
+def test_supervisor_no_longer_wires_the_sim_device_provisioner() -> None:
+    """supervisor 既不再 import provisioning，也不再有拉起模拟器的方法/状态。"""
+    module = _load_supervisor()
+    text = (CLOUDBRIDGE / "supervisor.py").read_text(encoding="utf-8")
+    code = ast.parse(text)  # 只看代码构造：注释里解释"这里曾经有什么"是允许的
 
-    def start(self) -> None:
-        self.started = True
+    imported: set[str] = set()
+    for node in ast.walk(code):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    assert "sim_provision" not in imported, (
+        "supervisor 不得再 import sim_provision —— 那是模拟器设备 provisioning 的入口")
+    assert "sim_phone" not in imported, "supervisor 不得再 import sim_phone"
 
+    funcs = {n.name for n in ast.walk(code)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for gone in ("_start_sim_phone", "_reap_sim_phone", "_sim_lines"):
+        assert gone not in funcs, f"supervisor 仍有 {gone}()"
 
-class _AliveChild:
-    liveness = True
-    exit_code = None
-    pid = 4242
-    starts = 1
-
-    def __init__(self, alive: bool = True) -> None:
-        self._alive = alive
-
-    def alive(self) -> bool:
-        return self._alive
-
-    def reap(self):
-        return None
-
-    def describe(self) -> dict:
-        return {"alive": self._alive, "pid": self.pid, "starts": self.starts,
-                "exit_code": None, "output_tail": []}
-
-    def signal(self, _sig) -> None:
-        self._alive = False
-
-
-def _bare_supervisor(module):
-    """用 __new__ 构造、只补模拟相关属性的 supervisor（不真的起子进程）。"""
     sup = module.BridgeSupervisor.__new__(module.BridgeSupervisor)
-    sup.sign_url = "https://cp.example"
-    sup.sim_owner_credential = ""
-    sup.sim_device_credential = ""
-    sup.sim_device_name = "jax-sim-phone"
-    sup.sim_join_grace_s = 8
-    sup.sim_prompt_wav = Path("/tmp/sim/prompt.wav")
-    sup.sim_out_wav = Path("/tmp/sim/reply.wav")
-    sup.sim_hold_s = 45
-    sup.sim_prompt_text = ""
-    sup.sim_device_id = "jax-sim-phone"
-    sup.sim_phone = None
-    sup.sim_enabled = True
-    sup.sim_metrics = module.sim_phone.PhoneSimMetrics()
-    sup._sim_lock = threading.Lock()
-    return sup
+    for gone in ("sim_enabled", "sim_phone", "sim_metrics", "sim_owner_credential",
+                 "sim_device_credential", "sim_device_id", "sim_log_dir",
+                 "sim_device_name", "sim_join_grace_s", "sim_prompt_wav",
+                 "sim_out_wav", "sim_hold_s", "sim_prompt_text"):
+        assert not hasattr(sup, gone), f"supervisor 仍持有模拟器状态 {gone}"
 
 
-def test_supervisor_with_explicit_token_skips_provisioning_and_keeps_secret_out_of_argv() -> None:
-    module = _load_supervisor()
-    sup = _bare_supervisor(module)
-    sup.sim_device_credential = f"{DEVICE_ID}.{CRED_SECRET}"
+def test_provisioning_failure_still_exposes_stage_and_code_only() -> None:
+    """安全口径不因移除而失效：失败只暴露「阶段:码」，凭证绝不进异常文本。
 
-    created = {}
-
-    def fake_child(name, argv, cwd, extra_env, **kwargs):
-        child = _FakeChild(name, argv, cwd, extra_env, **kwargs)
-        created["child"] = child
-        return child
-
-    with mock.patch.object(module.sim_provision, "provision_sim_device",
-                           side_effect=AssertionError("已有显式 token，不得再 provisioning")):
-        with mock.patch.object(module.sim_phone, "ensure_prompt_wav",
-                               return_value=Path("/tmp/sim/prompt.wav")):
-            with mock.patch.object(module, "Child", fake_child):
-                sup._start_sim_phone()
-
-    child = created["child"]
-    # --device 必须是注册返回的 UUID，而不是 "jax-sim-phone" 这种提示名
-    assert f"--device={DEVICE_ID}" in child.argv
-    assert "--join-grace=8" in child.argv
-    assert "--device=jax-sim-phone" not in child.argv
-    # 凭证走 env，不进 argv（argv 会被 Child.start 打印进容器日志）
-    # 凭证仍只走环境变量（不进 argv）；另外必须注入日志目录 ——
-    # 无头环境下渲染进程 stdout 不可靠（sidecar/logger.js），不指定目录就取不到死因。
-    assert child.extra_env["VOICE_SIM_DEVICE_CREDENTIAL"] == f"{DEVICE_ID}.{CRED_SECRET}"
-    assert child.extra_env["JAX_SIDECAR_LOG_DIR"].endswith("sim-logs")
-    assert all(CRED_SECRET not in arg for arg in child.argv)
-    assert child.kwargs.get("liveness") is False
-    assert child.started is True
-
-
-def test_supervisor_provisioning_failure_self_reports_and_leaks_nothing() -> None:
-    module = _load_supervisor()
-    sup = _bare_supervisor(module)
-    sup.sim_owner_credential = OWNER_SECRET
-    sup.bridge_health_url = "https://127.0.0.1:19093/health"
-    sup.device_id = "jax-cloud-bridge"
-    sup.sidecar_enabled = False
-    sup.bridge = _AliveChild(True)
-    sup.sidecar = _AliveChild(True)
-    object.__setattr__(sup, "_probe_bridge_health", lambda: "ok")
-
-    err = module.sim_provision.SimProvisionError("privacy", 40301)
-    with mock.patch.object(module.sim_provision, "resolve_sim_device", side_effect=err):
-        with mock.patch.object(module, "Child",
-                               side_effect=AssertionError("provisioning 失败时不得拉起模拟器")):
-            sup._start_sim_phone()
-
-    simulation = sup.status()["simulation"]
-    assert simulation["state"] == "failed"
-    assert simulation["failure"].startswith("provision:")
-    assert "40301" in simulation["failure"]
-    dumped = json.dumps(simulation, ensure_ascii=False)
-    assert OWNER_SECRET not in dumped, "状态端点绝不能泄露 owner 凭证"
+    这是上面第 3 节口径的**直读版**（不经过 supervisor）：模块仍由容器外的本地
+    harness 使用，凭证泄露在任何调用方都不可接受。
+    """
+    sp = _load_sim_provision()
+    err = sp.SimProvisionError("privacy", 40301)
+    assert str(err) == "privacy:40301", f"异常文本必须只是「阶段:码」，实得 {str(err)!r}"
+    dumped = json.dumps({"failure": str(err)}, ensure_ascii=False)
+    assert OWNER_SECRET not in dumped, "异常文本绝不能泄露 owner 凭证"
     assert CRED_SECRET not in dumped

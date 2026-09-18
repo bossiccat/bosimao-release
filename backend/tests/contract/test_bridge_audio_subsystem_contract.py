@@ -464,7 +464,6 @@ def _bare_supervisor() -> sup.BridgeSupervisor:
     s = sup.BridgeSupervisor.__new__(sup.BridgeSupervisor)
     s.shutting_down = False
     s.sidecar_enabled = True
-    s.sim_enabled = False
     s.crash_grace_s = 0
     s.bridge = _StubChild(alive=True)
     s.sidecar = _StubChild(alive=True)
@@ -593,36 +592,38 @@ def test_status_reports_audio_state() -> None:
 # --- 5. 手机模拟器：同容器同 TRTC，同样要拿到音频环境 -----------------------
 
 
-def test_audio_environment_reaches_the_phone_simulator(monkeypatch, tmp_path: Path) -> None:
+def test_audio_module_no_longer_has_a_phone_simulator_to_reach(monkeypatch, tmp_path: Path) -> None:
+    """**移除**：音频 env 曾经要一并注入容器内的手机模拟器（同容器、同走 TRTC 原生层）。
+
+    模拟器已从产品运行期整体移除（见 `test_bridge_sim_phone_removed_contract.py`），
+    所以"给模拟器注入音频 env"这件事不再存在。这里断言的是**反面**：
+    supervisor 上没有那条路径，而音频计划本身照常可用（产品链路一字未动）。
+    """
     captured: dict = {}
 
     class _Capture(_RecordingChild):
         def __init__(self, name, argv, cwd, extra_env, **kwargs):
             super().__init__(name, argv, cwd, extra_env, **kwargs)
-            captured["env"] = dict(extra_env)
-            captured["argv"] = list(argv)
+            captured.setdefault("names", []).append(name)
+            captured.setdefault("argv", {}).setdefault(name, list(argv))
 
-    s = sup.BridgeSupervisor()
-    s.sim_enabled = True
-    s.sign_url = "https://control-plane.example"
-    s.sim_log_dir = tmp_path / "logs"
-    s._audio_plan = _plan(tmp_path)
-    monkeypatch.setattr(
-        sup.sim_provision, "resolve_sim_device",
-        lambda **kwargs: sup.sim_provision.SimDevice(
-            device_id="dev-9", credential_token="dev-9.secret", expires_at=""
-        ),
-    )
-    monkeypatch.setattr(sup.sim_phone, "ensure_prompt_wav",
-                        lambda *a, **k: tmp_path / "p.wav")
     monkeypatch.setattr(sup, "Child", _Capture)
+    s = sup.BridgeSupervisor()
+    s.sign_url = "https://control-plane.example"
+    s._audio_plan = _plan(tmp_path)
 
-    s._start_sim_phone()
+    assert not hasattr(s, "_start_sim_phone"), (
+        "音频 env 的注入点随模拟器一起移除了；它若回来，sim 子进程与 /status.simulation 也会跟着回来")
+    assert not hasattr(s, "sim_phone"), "容器里不得再有 sim 子进程句柄"
+    assert captured["names"] == ["rtc_bridge", "sidecar"], (
+        f"构造 supervisor 只能造这两个子进程，实得 {captured['names']}")
+    assert not any("--role=phone" in a
+                   for argv in captured["argv"].values() for a in argv), (
+        "产品运行期不得再以 phone 角色起 Electron")
 
-    assert captured["env"]["PULSE_SERVER"] == s._audio_plan.server
-    assert captured["env"]["XDG_RUNTIME_DIR"] == str(tmp_path)
-    # 凭证仍然只走 env，不得因这次改动泄进 argv。
-    assert not any("dev-9.secret" in str(a) for a in captured.get("argv", []))
+    # 产品链路（音频计划）本身必须一字未动：env 仍然完整、路径仍然钉死。
+    assert s._audio_plan.env["PULSE_SERVER"] == f"unix:{tmp_path / 'pulse' / 'native'}"
+    assert s._audio_plan.env["XDG_RUNTIME_DIR"] == str(tmp_path)
 
 
 # --- 6. 观测：真实 sidecar 的渲染进程日志必须能出来 -------------------------

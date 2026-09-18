@@ -465,7 +465,6 @@ def _bare_supervisor() -> sup.BridgeSupervisor:
     s = sup.BridgeSupervisor.__new__(sup.BridgeSupervisor)
     s.shutting_down = False
     s.sidecar_enabled = True
-    s.sim_enabled = False
     s.crash_grace_s = 0
     s.bridge = _StubChild(name="rtc_bridge")
     s.sidecar = _StubChild(name="sidecar")

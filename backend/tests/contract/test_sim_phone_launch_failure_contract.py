@@ -1,15 +1,25 @@
-"""契约：模拟器「启动失败」必须被记录，绝不能静默停在 pending。
+"""契约：手机模拟器**已从产品运行期移除**；它的离线解析仍然可靠（容器外 harness 用）。
 
-为什么需要
-----------
+历史（为什么曾经有这个文件）
+----------------------------
 2026-09-12 云端实测：`jax-voice-bridge` 部署后 `simulation.state` 长期停在 `pending`，
 而 PG 里 `control_plane_sessions` / `pending_session_claims` / `session_events` **全是 0 行**
 ——即模拟器从未发起过 `/api/v1/voice/session`。根因是 `_start_sim_phone` 里
 `self.sim_phone.start()`（Popen）抛错后**没有兜住**，后台线程静默死掉，状态永远停在
-`pending`，与「正在跑」完全无法区分。这正是本项目反复吃过的静默失败模式。
+`pending`，与「正在跑」完全无法区分。当时本文件锁死两点：启动异常必须落成
+`failed` + `launch:<类型名>`；`status()` 必须把子进程输出暴露出来。
 
-本测试锁死两点：启动异常必须落成 `failed` + `launch:<类型名>`；`status()` 必须把子进程
-输出暴露出来，让死因可读。
+现在（2026-09-17）
+------------------
+容器内的手机模拟器已**整体移除**（它会在生产容器里起第二个 `--role=phone` Electron，
+抢 sidecar 唯一的会话位）；上面那套"启动失败要能被看见"的契约随之失去了对象
+——连启动路径都不存在了，也就不存在"静默停在 pending"。移除本身的契约（无启动路径、
+环境变量被忽略且可见、`/status` 无 `simulation`）在
+`test_bridge_sim_phone_removed_contract.py`。
+
+本文件保留的是**另一半**：`sim_phone.py` 的离线日志解析仍然必须正确 —— 模块没删，
+`scripts/sim/run-phone.py` + `scripts/sim/measure-rate-repeat.py` 仍在用它做容器外
+唯一的端到端验证。所以这里断言：supervisor 没有那条路径，而模块的解析口径照旧。
 """
 from __future__ import annotations
 
@@ -23,124 +33,31 @@ import sim_provision  # noqa: E402
 import supervisor as sup  # noqa: E402
 
 
-class _BoomChild:
-    """start() 直接抛错的替身：模拟容器内缺 xvfb-run / electron 的情况。"""
-
-    def __init__(self, *args, **kwargs) -> None:
-        self.tail: list[str] = []
-        self.exit_code = None
-
-    def start(self) -> None:
-        raise OSError("xvfb-run missing")
-
-    def describe(self) -> dict:
-        return {"alive": False, "pid": None, "starts": 0, "exit_code": self.exit_code,
-                "output_tail": list(self.tail)}
+# --- 移除：启动路径不存在 ----------------------------------------------------
 
 
-def test_launch_failure_is_recorded_not_silent(monkeypatch, tmp_path):
-    s = sup.BridgeSupervisor()
-    s.sim_enabled = True
-    monkeypatch.setattr(
-        sim_provision, "resolve_sim_device",
-        lambda **kwargs: sim_provision.SimDevice(
-            device_id="dev-1", credential_token="dev-1.secret", expires_at=""
-        ),
-    )
-    monkeypatch.setattr(sim_phone, "ensure_prompt_wav", lambda *a, **k: tmp_path / "prompt.wav")
-    monkeypatch.setattr(sup, "Child", _BoomChild)
+def test_supervisor_no_longer_has_the_sim_phone_launch_path() -> None:
+    """那条会静默停在 pending 的后台线程启动路径，已经不存在了。
 
-    s._start_sim_phone()
-
-    assert s.sim_metrics.state == "failed", "启动异常必须落成 failed，而不是留在 pending"
-    assert s.sim_metrics.failure == "launch:OSError"
-    # 配对成功的证据要能被读到（非敏感）
-    assert getattr(s, "_sim_device_id", "") == "dev-1"
-
-
-def test_status_exposes_simulation_child_output(monkeypatch, tmp_path):
-    """status() 必须暴露 sim 子进程的 exit_code/output_tail，否则静默失败无从归因。"""
-    s = sup.BridgeSupervisor()
-    s.sim_enabled = True
-    s.sim_phone = _BoomChild()
-    s.sim_phone.tail = ["PHONE 签发失败 code=40101"]
-
-    payload = s.status()
-
-    sim = payload["simulation"]
-    assert "child" in sim, "simulation 必须含 child 段"
-    assert sim["child"]["output_tail"] == ["PHONE 签发失败 code=40101"]
-    assert "device_id" in sim
-
-
-def test_sim_argv_carries_control_plane_url(monkeypatch, tmp_path):
-    """必须显式传 --sign-url：config.js 默认值是本地 https://127.0.0.1:8000。
-
-    2026-09-12 实测漏传该参数 → 模拟器去连容器本机 8000，/session 从未发出
-    （PG 里 control_plane_sessions 为 0 行）。
+    这不是"把断言调松"：删除执行路径本身就是修法（测试装置不该住在生产容器里）。
     """
-    captured: dict = {}
+    for gone in ("_start_sim_phone", "_reap_sim_phone", "_sim_lines",
+                 "_sim_log_dirs", "_sim_log_files"):
+        assert not hasattr(sup.BridgeSupervisor, gone), f"supervisor 仍有 {gone}()"
 
-    class _Capture:
-        def __init__(self, name, argv, cwd, extra_env, **kwargs):
-            captured["argv"] = argv
-            captured["env"] = extra_env
-            self.tail: list[str] = []
-            self.exit_code = None
-
-        def start(self) -> None:
-            captured["started"] = True
-
-        def describe(self) -> dict:
-            return {"alive": False, "pid": None, "starts": 0, "exit_code": None, "output_tail": []}
-
-    s = sup.BridgeSupervisor()
-    s.sim_enabled = True
-    s.sign_url = "https://control-plane.example"
-    s.sim_log_dir = tmp_path / "logs"
-    monkeypatch.setattr(
-        sim_provision, "resolve_sim_device",
-        lambda **kwargs: sim_provision.SimDevice(
-            device_id="dev-9", credential_token="dev-9.secret", expires_at=""
-        ),
-    )
-    monkeypatch.setattr(sim_phone, "ensure_prompt_wav", lambda *a, **k: tmp_path / "p.wav")
-    monkeypatch.setattr(sup, "Child", _Capture)
-
-    s._start_sim_phone()
-
-    argv = captured["argv"]
-    assert f"--sign-url={s.sign_url}" in argv, "argv 必须带控制面地址"
-    assert "--device=dev-9" in argv, "device 必须是注册返回的 UUID"
-    assert captured["env"]["JAX_SIDECAR_LOG_DIR"] == str(s.sim_log_dir)
-    # 凭证不得出现在 argv（会进 Child.start 的日志）
-    assert not any("dev-9.secret" in str(a) for a in argv)
+    s = sup.BridgeSupervisor.__new__(sup.BridgeSupervisor)
+    for gone in ("sim_enabled", "sim_phone", "sim_metrics"):
+        assert not hasattr(s, gone), f"supervisor 仍持有模拟器状态 {gone}"
 
 
-def test_sim_lines_unions_stdout_and_renderer_log(tmp_path):
-    """渲染进程日志走文件，指标解析必须把文件并进来，否则永远解析不到。"""
-    s = sup.BridgeSupervisor()
-    s.sim_log_dir = tmp_path
-    (tmp_path / "sidecar-phone.log").write_text(
-        "[t] [PHONE] 进房成功 123ms\n[t] [PHONE] 上行 60帧 / 回复 12帧\n", encoding="utf-8"
-    )
-    child = _BoomChild()
-    child.tail = ["[PHONE] 远端就绪 @900ms"]
+def test_sim_modules_survive_for_the_local_harness() -> None:
+    """模块不许删：容器外的本地 harness（`scripts/sim/`）仍 `import` 它们。"""
+    assert callable(sim_phone.parse_phone_log)
+    assert callable(sim_phone.measure_speech_seconds)
+    assert hasattr(sim_provision, "resolve_sim_device")
 
-    lines = s._sim_lines(child)
 
-    assert any("远端就绪" in l for l in lines)
-    assert any("进房成功" in l for l in lines)
-    metrics = sim_phone.parse_phone_log(lines)
-    assert metrics.enter_room_ms == 123
-    assert metrics.up_frames == 60 and metrics.reply_frames == 12
-    # 缺口只有这一行：夹具从一开始就是**真实落盘形态**（带 `[PHONE] ` 前缀），
-    # 但此前只断言了 enter_room/up/reply 三项，把 `remote_ready_ms` 漏在断言之外，
-    # 于是正则要求裸 `PHONE ` 这个缺陷一直没有用例会红（实测 e2e-summary.json 里恒为 null）。
-    assert metrics.remote_ready_ms == 900, (
-        "真实落盘是 sidecar/logger.js:19 的 `[scope] ` 前缀形态 `[PHONE] 远端就绪 @…`；"
-        "正则若要求裸 `PHONE `，这里恒为 None"
-    )
+# --- 模块级（仍然有效）：真实落盘形态的解析 ----------------------------------
 
 
 def test_sign_fail_code_is_parsed_from_the_real_prefixed_format() -> None:
@@ -178,3 +95,23 @@ def test_remote_not_ready_note_is_parsed_from_the_real_prefixed_format() -> None
     )
     assert "remote_not_ready" in m.notes, f"必须记下超时 note，实得 {m.notes}"
 
+
+def test_stdout_and_renderer_log_are_both_parsed_by_the_module() -> None:
+    """渲染进程日志走文件、stdout 只有噪声 —— 两路并起来才解析得出指标。
+
+    这条并线逻辑原先在 supervisor 的 `_sim_lines()` 里（已随模拟器移除），
+    现在只在容器外的 harness（`scripts/sim/run-phone.py`）里；这里守住**模块侧**
+    的口径：两路行合起来喂进来，指标必须解析出来（harness 正是这么用的）。
+    """
+    lines = [
+        "[2026-09-16T00:44:20.815Z] [PHONE] 进房成功 123ms",
+        "[2026-09-16T00:44:20.818Z] [PHONE] 远端就绪 @900ms",
+        "[2026-09-16T00:44:21.182Z] [PHONE] 上行 60帧 / 回复 12帧",
+    ]
+    metrics = sim_phone.parse_phone_log(lines)
+    assert metrics.enter_room_ms == 123
+    assert metrics.up_frames == 60 and metrics.reply_frames == 12
+    assert metrics.remote_ready_ms == 900, (
+        "真实落盘是 sidecar/logger.js:19 的 `[scope] ` 前缀形态 `[PHONE] 远端就绪 @…`；"
+        "正则若要求裸 `PHONE `，这里恒为 None"
+    )

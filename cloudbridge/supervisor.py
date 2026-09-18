@@ -40,11 +40,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 # supervisor.py 以脚本方式启动（python cloudbridge/supervisor.py）；显式把本目录放入
-# sys.path，使 `import sim_phone` 在"脚本运行"与"被测试 importlib 加载"两种方式下都成立。
+# sys.path，使同目录模块（audio_env / tls_material）在"脚本运行"与"被测试 importlib
+# 加载"两种方式下都成立。
+#
+# ⚠️ 这里**不再** import sim_phone / sim_provision：容器内的手机模拟器已从产品运行期
+#    整体移除（见 _REMOVED_SIM_ENV）。两个模块本身仍留在仓库里，由**容器外**的本地
+#    harness `scripts/sim/run-phone.py` 使用（它自己 sys.path.insert 后再 import）。
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audio_env  # noqa: E402
-import sim_phone  # noqa: E402
-import sim_provision  # noqa: E402
 import tls_material  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -56,12 +59,34 @@ SIDECAR_DIR = SERVER_ROOT / "sidecar"
 
 START_MONO = time.monotonic()
 
-# 手机模拟器「专有」日志文件名——解析指标时**只认这两个**。
-# 绝不按 *.log 通配读整个目录：容器里 sidecar（同容器另一子进程）也会写
-# `sidecar-sidecar.log` / 同名 `sidecar-main-diag.log`，混读会解析出**假的成功指标**
-# （实测：在开发机上直接读 sidecar/logs 的历史日志，得出了「replied / reply 103 帧」
-# 这种与本次运行无关的结论——比看不见日志更危险）。
-_SIM_LOG_FILES = ("sidecar-phone.log", "sidecar-main-diag.log")
+# ---------------------------------------------------------------------------
+# 已从产品运行期移除：容器内的手机模拟器（2026-09-17）
+# ---------------------------------------------------------------------------
+# 这里曾经会按 `BRIDGE_SIM_PHONE=true` 起**第二个** Electron（`--role=phone`，xvfb
+# 无头）：它走控制面 provisioning、以真实设备身份进同一个 TRTC 房间，于是和真实
+# sidecar 抢**唯一**的会话位。那是把测试装置塞进了商用生产容器 —— 已整体移除：
+# 启动路径、`/status.simulation` 状态段、以及下面这些环境变量的读取。
+#
+# 两个模块**不删**：本地 harness `scripts/sim/run-phone.py` 仍
+# `import sim_phone, sim_provision`，做容器外唯一的端到端验证。出问题的从来不是
+# 模块，是**容器在跑它们**。
+#
+# 残留配置不静默：这些变量只要还在环境里，启动时就告警、并在 `/status.ignored_env`
+# 里报出**变量名**（容器 stdout 不进可检索日志，只打一行日志等于没报；
+# 取值一律不带出，尤其 SIM_*_CREDENTIAL）。
+_REMOVED_SIM_ENV = (
+    "BRIDGE_SIM_PHONE",
+    "SIM_DEVICE_ID",
+    "SIM_DEVICE_NAME",
+    "SIM_JOIN_GRACE_S",
+    "SIM_PROMPT_WAV",
+    "SIM_OUT_WAV",
+    "SIM_LOG_DIR",
+    "SIM_HOLD_S",
+    "SIM_PROMPT_TEXT",
+    "SIM_OWNER_CREDENTIAL",
+    "SIM_DEVICE_CREDENTIAL",
+)
 
 # 子进程输出里的纯噪声：Chromium 无 D-Bus 总线时的连接错误，条数极多且从不携带
 # 有效信息（容器里没有 system bus）。不过滤掉会把真正的死因挤出尾部窗口。
@@ -294,26 +319,18 @@ class BridgeSupervisor:
             self.crash_grace_s = 120.0
         self.shutting_down = False
 
-        # 云端手机模拟（不依赖真机）：用真实 TRTC 链路跑一次完整语音往返并量化。
-        # 默认关闭；开启后由本进程在容器内生成中文提示音、拉起 phone 角色 Electron。
-        self.sim_enabled = _env("BRIDGE_SIM_PHONE", "false").lower() in {"1", "true", "yes"}
-        self.sim_device_id = _env("SIM_DEVICE_ID", "jax-sim-phone")
-        # 设备凭证：显式 token 优先（复用已注册设备，不发 provisioning）；否则用 owner
-        # 凭证走一遍真实配对。两者都缺时由 sim_provision 报 config 阶段失败。
-        self.sim_owner_credential = _env("SIM_OWNER_CREDENTIAL", "")
-        self.sim_device_credential = _env("SIM_DEVICE_CREDENTIAL", "")
-        self.sim_device_name = _env("SIM_DEVICE_NAME", "jax-sim-phone")
-        self.sim_join_grace_s = int(_env("SIM_JOIN_GRACE_S", "8") or 8)
-        self.sim_prompt_wav = Path(_env("SIM_PROMPT_WAV", "/srv/sim/prompt.wav"))
-        self.sim_out_wav = Path(_env("SIM_OUT_WAV", "/srv/sim/reply.wav"))
-        # 渲染进程在无头环境里 stdout 不可靠（见 sidecar/logger.js），日志写文件；
-        # 指定目录后由 status() 回读，否则模拟器死因只能靠猜。
-        self.sim_log_dir = Path(_env("SIM_LOG_DIR", "/tmp/sim-logs"))
-        self.sim_hold_s = int(_env("SIM_HOLD_S", "45") or 45)
-        self.sim_prompt_text = _env("SIM_PROMPT_TEXT", "")
-        self.sim_phone: Child | None = None
-        self.sim_metrics = sim_phone.PhoneSimMetrics()
-        self._sim_lock = threading.Lock()
+        # 已移除的手机模拟器：这里只**报告**残留配置，绝不据此做任何事（见
+        # _REMOVED_SIM_ENV）。不 raise、不 exit —— 一个陈旧的平台环境变量不得把生产
+        # 打成崩溃重启循环；但它也不能是静默的（本项目"no silent anything"规则用在
+        # 配置漂移上，就是"看得见、但不照做"）。
+        self.ignored_env = [name for name in _REMOVED_SIM_ENV if name in os.environ]
+        if self.ignored_env:
+            logger.warning(
+                "手机模拟器已从产品运行期移除，以下变量被**忽略**：%s"
+                "（它会在生产容器里起第二个 phone 角色 Electron，抢 sidecar 唯一的"
+                "会话位）。请从服务配置里删掉它们；本条告警不影响启动。",
+                ", ".join(self.ignored_env),
+            )
 
         # 音频子系统（PulseAudio）：TRTC 的 Linux 原生层没有它就不能初始化音频设备，
         # EnterRoom 永远完不成 ⇒ 手机与云端媒体面从不共处一室（2026-09-16 事故，
@@ -509,154 +526,8 @@ class BridgeSupervisor:
             self.sidecar.start()
         else:
             logger.warning("sidecar disabled by BRIDGE_SIDECAR_ENABLED")
-        if self.sim_enabled:
-            threading.Thread(target=self._start_sim_phone, daemon=True).start()
-
-    def _start_sim_phone(self) -> None:
-        """拉起手机模拟器：先生成中文提示音，再以 phone 角色进同一个 TRTC 房间。
-
-        它会先 `POST /api/v1/voice/session` 建立会话并把待领意图排给控制面，
-        云端 sidecar 轮询领取后进入同一房间 —— 两端由此会合，全程无需真机。
-        """
-        # 先备好设备身份：真实手机是先配对再进房，模拟器走同一条路（服务端要求一致）。
-        # 失败只记录「阶段:码」，绝不把凭证写进日志或状态。
-        try:
-            device = sim_provision.resolve_sim_device(
-                base_url=self.sign_url,
-                explicit_token=self.sim_device_credential,
-                owner_credential=self.sim_owner_credential,
-                device_name=self.sim_device_name,
-            )
-        except Exception as exc:  # str(exc) 只会是 "stage:code"
-            logger.error("sim provisioning failed: %s", exc)
-            with self._sim_lock:
-                self.sim_metrics.state = "failed"
-                self.sim_metrics.failure = f"provision:{exc}"
-            return
-
-        # 非敏感信息：回报 device_id，用于确认「配对确实成功」这一步。
-        self._sim_device_id = device.device_id
-
-        try:
-            prompt = sim_phone.ensure_prompt_wav(
-                self.sim_prompt_wav,
-                text=self.sim_prompt_text or sim_phone.DEFAULT_PROMPT_TEXT,
-            )
-        except Exception as exc:
-            logger.error("sim prompt generation failed: %s", exc)
-            with self._sim_lock:
-                self.sim_metrics.state = "failed"
-                self.sim_metrics.failure = f"prompt_generation:{type(exc).__name__}"
-            return
-
-        # 凭证只走环境变量：argv 会进日志（Child.start 会打印整条命令），env 不会。
-        sim_env = {
-            "VOICE_SIM_DEVICE_CREDENTIAL": device.credential_token,
-            "JAX_SIDECAR_LOG_DIR": str(getattr(self, "sim_log_dir", "/tmp/sim-logs")),
-        }
-        # 模拟器与 sidecar 同容器、同走 TRTC 原生层，音频子系统变量必须一并注入。
-        if getattr(self, "_audio_plan", None) is not None:
-            sim_env.update(self._audio_plan.env)
-        self.sim_phone = Child(
-            "sim-phone",
-            [
-                "xvfb-run", "-a",
-                str(SIDECAR_DIR / "node_modules" / ".bin" / "electron"),
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-                # 让 Chromium 把渲染进程 console 直接写到 stderr：无头环境里渲染进程
-                # 日志既不进 stdout 也不一定落文件（实测注入目录一个文件都没生成，
-                # stdout 只有 dbus 噪声），死因必须有个出口。真实 sidecar 也已同款打开。
-                "--enable-logging=stderr",
-                ".",
-                "--role=phone",
-                # --device 必须是**注册返回的 device_id（UUID）**：服务端按它索引设备，
-                # 用 "jax-sim-phone" 这种名字会被判未知设备而在 /session 被拒。
-                f"--device={device.device_id}",
-                # 必须显式传控制面地址：config.js 的默认值是本地 https://127.0.0.1:8000，
-                # 漏传会让模拟器去连容器本机的 8000（那里什么都没有），/session 永远发不出去。
-                f"--sign-url={self.sign_url}",
-                f"--wav={prompt}",
-                f"--out-wav={self.sim_out_wav}",
-                f"--hold={self.sim_hold_s}",
-                f"--join-grace={self.sim_join_grace_s}",
-            ],
-            SIDECAR_DIR,
-            sim_env,
-            liveness=False,  # 跑完即退出是预期
-        )
-        try:
-            self.sim_phone.start()
-        except Exception as exc:  # noqa: BLE001 - 启动失败必须能被 status 读到
-            # 这里曾经没有兜住：Popen 抛错会静默杀死后台线程，status 永远停在
-            # "pending"，与「正在跑」无法区分——正是本项目反复吃过的静默失败模式。
-            logger.error("sim phone launch failed: %s", type(exc).__name__)
-            with self._sim_lock:
-                self.sim_metrics.state = "failed"
-                self.sim_metrics.failure = f"launch:{type(exc).__name__}"
-
-    def _reap_sim_phone(self) -> None:
-        """模拟器结束（或仍在跑）时刷新指标；失败只记录，不影响容器存活。
-
-        指标同时取自**子进程 stdout** 与**日志文件**（`sidecar-phone.log`）：
-        无头容器里渲染进程的 stdout 不可靠（`sidecar/logger.js` 的既有结论），
-        只抓 stdout 会永远解析不到任何指标。
-        """
-        child = self.sim_phone
-        if child is None:
-            return
-        child.reap()  # 记录退出码（若已退出）
-        with self._sim_lock:
-            metrics = sim_phone.parse_phone_log(self._sim_lines(child))
-            if child.exit_code is not None and metrics.state in ("pending", "joined"):
-                metrics.state = "no_reply"
-                metrics.notes.append(f"exited={child.exit_code}")
-            if metrics.state != "pending":
-                self.sim_metrics = metrics
-
-    def _sim_lines(self, child: Child) -> list[str]:
-        """stdout 尾部 ∪ 模拟器日志目录下的全部 `*.log`。
-
-        为什么读整个目录、而不是只读 `sidecar-phone.log`：渲染进程若在**加载阶段**就
-        失败，`sidecar-phone.log` 根本不会被创建，真正的死因（`[console:...]`、
-        `net::ERR_*`）写在 `main.js` 的 `sidecar-main-diag.log` 里。只认一个文件名会
-        把「渲染器没起来」和「起来了但业务失败」混为一谈——实测两者都表现为 `pending`。
-        """
-        lines = list(child.tail)
-        for log_dir in self._sim_log_dirs():
-            for name in _SIM_LOG_FILES:
-                log_file = log_dir / name
-                try:
-                    if log_file.is_file():
-                        lines.append(f"===== {name} =====")
-                        lines.extend(
-                            log_file.read_text(encoding="utf-8", errors="replace").splitlines()
-                        )
-                except OSError:
-                    continue
-        return lines
-
-    def _sim_log_dirs(self) -> list[Path]:
-        """**只认注入目录**，不做任何兜底。
-
-        曾经兜底 `sidecar/logs`，实测被历史 `sidecar-phone.log` 污染，解析出与本次运行
-        无关的「replied / reply 103 帧」。宁可看到 `log_files: []`（明确表示注入变量
-        没传到位，是个可修的问题），也不要读来路不明的日志冒充证据。
-        """
-        return [Path(getattr(self, "sim_log_dir", "/tmp/sim-logs"))]
-
-    def _sim_log_files(self) -> list[str]:
-        """回报实际存在的手机日志文件——用来确认日志究竟落在哪个目录。"""
-        found: list[str] = []
-        for log_dir in self._sim_log_dirs():
-            for name in _SIM_LOG_FILES:
-                try:
-                    if (log_dir / name).is_file():
-                        found.append(f"{log_dir}/{name}")
-                except OSError:
-                    continue
-        return found
+        # 这里曾经按 BRIDGE_SIM_PHONE 起第二个 phone 角色 Electron（见 _REMOVED_SIM_ENV）。
+        # 产品运行期**没有**任何模拟器子进程：容器里只跑 rtc_bridge + sidecar + audio。
 
     def _children(self) -> list[Child]:
         """接受监督的全部子进程（含音频子系统）。容器内没有自愈，退出即整体退出。"""
@@ -686,8 +557,6 @@ class BridgeSupervisor:
         """
         while not self.shutting_down:
             dead = self._first_dead()
-            if self.sim_enabled:
-                self._reap_sim_phone()
             if dead is None:
                 time.sleep(1.0)
                 continue
@@ -702,7 +571,7 @@ class BridgeSupervisor:
             raise SystemExit(1)
 
     def _first_dead(self) -> Child | None:
-        """只把 liveness 子进程的死当失败；模拟器等一次性子进程退出不算。"""
+        """只把 liveness 子进程的死当失败（本容器里三个都是 liveness 子进程）。"""
         # 音频子系统死掉同样是致命的：TRTC 的原生层随后会退化成 `GetDevices wait`，
         # 进房永远完不成——这种"进程都活着但媒体面死了"的状态最难查，所以直接整体退出。
         audio = getattr(self, "audio", None)
@@ -749,25 +618,18 @@ class BridgeSupervisor:
             # 没有它，TRTC 的 EnterRoom 会卡在 `GetDevices wait` 上永不完成。
             "audio": getattr(self, "_audio_status",
                              {"ok": False, "state": "not-started", "error": ""}),
+            # 配置漂移也必须可读：容器 stdout 不进可检索日志，所以"已移除的模拟器环境
+            # 变量还在"这件事如果只打日志就等于没报。这里只列**变量名**，不含取值。
+            # 空的时段（正常）也为空列表 —— 与"没检查"不会混淆。
+            "ignored_env": list(getattr(self, "ignored_env", [])),
         }
         payload["ok"] = bool(
             self.bridge.alive()
             and bridge_health == "ok"
             and (self.sidecar.alive() if self.sidecar_enabled else True)
         )
-        if self.sim_enabled:
-            with self._sim_lock:
-                simulation = self.sim_metrics.to_dict()
-            # 子进程输出必须可见：sim-phone 是唯一 liveness=False 的子进程，它若静默
-            # 死掉，只暴露指标会看到 "pending" 而无从知道为什么。
-            sim_child = getattr(self, "sim_phone", None)
-            simulation["child"] = sim_child.describe() if sim_child is not None else None
-            if sim_child is not None:
-                # 渲染进程日志尾部：无头环境 stdout 拿不到，死因只能从这里读。
-                simulation["log_tail"] = self._sim_lines(sim_child)[-30:]
-                simulation["log_files"] = self._sim_log_files()
-            simulation["device_id"] = getattr(self, "_sim_device_id", "")
-            payload["simulation"] = simulation
+        # 这里曾经按 `BRIDGE_SIM_PHONE` 挂一个 `simulation` 段。容器内手机模拟器已从
+        # 产品运行期移除，`/status` 不再有任何 simulation 指标（见 _REMOVED_SIM_ENV）。
         return payload
 
 
