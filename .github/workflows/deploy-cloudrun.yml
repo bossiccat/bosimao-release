@@ -182,7 +182,14 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for name in TENCENTCLOUD_SECRETID TENCENTCLOUD_SECRETKEY TCR_REGISTRY \
+          # 这一组必须**非空**，两类理由：
+          # · ENV_ID（来源 vars.CLOUDBASE_ENV_ID）是部署目标环境的唯一标识。
+          #   为空时后续 tcb 调用会打到空目标；必须在任何 tcb 调用之前挡住。
+          # · VPC_ID / VPC_CIDR / SUBNET_ID / SUBNET_CIDR 为空时，deploy 步骤的
+          #   --vpcConfig 会变成"字段全空"的对象，把 jax-voice-api **已配置**的
+          #   VpcConf 整块抹掉（bridge 的本就是空的，无影响）。api 失去内网通路
+          #   就连不到 PG，而控制面是端侧唯一依赖 → 产品整体不可用。
+          for name in ENV_ID TENCENTCLOUD_SECRETID TENCENTCLOUD_SECRETKEY TCR_REGISTRY \
                       TCR_NAMESPACE TCR_USERNAME TCR_PASSWORD VOICE_OWNER_CREDENTIAL \
                       VPC_ID VPC_CIDR SUBNET_ID SUBNET_CIDR; do
             if [ -z "${!name:-}" ]; then
@@ -192,6 +199,7 @@ jobs:
           done
           if [ "$missing" -ne 0 ]; then
             echo "::error::部署所需的基础配置不完整，拒绝继续（fail-closed）"
+            echo "::error::缺失项来源: ENV_ID<-vars.CLOUDBASE_ENV_ID; VPC_ID/VPC_CIDR/SUBNET_ID/SUBNET_CIDR<-同名 Vars; TCR_*/TENCENTCLOUD_*<-同名 Secrets"
             exit 1
           fi
 
