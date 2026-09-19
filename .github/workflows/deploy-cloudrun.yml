@@ -11,10 +11,17 @@
 #       jax-voice-api    → /api/v1/voice/cloud/status（生产位 + 存储分步探针）+ /cloud/selfcheck
 #       jax-voice-bridge → /api/v1/voice/bridge/status（两个子进程存活 + rtc_bridge 健康）
 #     不看日志、不靠人解读。
+#   - 产品自证之外，部署后还会**回读 VpcConf** 并与本轮要注入的值硬比：preflight 只
+#     保证**输入**非空，保证不了管控面真的写进去了；被抹掉的 VpcConf 会让控制面失去
+#     内网 PG 通路（产品级下线），所以那一步用 if: always() 执行，且不匹配即非零退出。
 #
 # ⚠️ VpcConf 必须由本流水线注入：它此前只存在于云端控制台，全仓无记录；一旦丢失，
 #    实例就连不到内网 PostgreSQL。api 与 bridge 挂同一 VPC/子网——bridge 内的
 #    rtc_bridge 要经 VPC 出口回调控制面，出口源 IP 才能落进控制面的窄白名单。
+#    由此可知：部署步骤对**两条**腿都带 --vpcConfig，所以 bridge 原本为空的 VpcConf
+#    在流水线跑过一次之后就变成已填充——这是既定意图下的**已知**变更，不是故障。
+#    （人工部署没带 --vpcConfig，从未动过 bridge 的配置：CI 路径与人工路径在这一点上
+#    故意不同。）
 #
 # =============================================================================
 # ⚠️ 已知缺口（显式记录，**未修复**——是否修复需要单独决策，本流水线不自行发明回滚）
@@ -376,6 +383,7 @@ jobs:
           PY
 
       - name: Deploy image with VPC attachment
+        id: deploy
         env:
           SERVICE: ${{ matrix.service }}
           PORT: ${{ matrix.port }}
@@ -478,4 +486,107 @@ jobs:
 
           else:
               sys.exit(f"未知的 gate: {gate}")
+          PY
+
+      - name: Read back VpcConf and assert it matches this run
+        # 【为什么必须无条件执行】Verify 失败时，被抹掉的 VpcConf 可能正是病因；两个信号
+        # 都要拿到，不能让其中一个把另一个盖住。这里用 always() 而不是省略 if —— 省略 if
+        # 会让本步在前序步骤失败时被**跳过**，等于把这条最关键的守卫变成静默缺席。
+        if: always()
+        env:
+          SERVICE: ${{ matrix.service }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+        run: |
+          set -euo pipefail
+          # 部署后回读 VpcConf，并与**本轮要注入的值**硬比。
+          # ---------------------------------------------------------------
+          # 为什么 preflight 不够：preflight 只证明**输入**非空，证明不了管控面真的写进去了。
+          # `--vpcConfig` 若被拼成「字段全空」的对象，会把 jax-voice-api **已配置**的
+          # VpcConf 整块抹掉 → 控制面失去内网 PG 通路 → 控制面是端侧唯一依赖 →
+          # **产品整体不可用**。这是产品级下线状态，不是告警级条件：本仓库的规矩是
+          # 「不准静默」，产品下线状态绝不允许产出绿色运行，所以不匹配一律非零退出。
+          #
+          # 判据是「与本轮注入的值相等」，**不是**「非空」：只判非空会漏掉「被写成错误但
+          # 非空的值」，而那种情况 preflight 永远看不到。
+          #
+          # 已知的、**有意**的配置变更（记录在案，避免日后被当成故障）：
+          #   部署步骤对**两条**矩阵腿都带 --vpcConfig，所以**首次 CI 运行**会把
+          #   jax-voice-bridge 原本为空的 VpcConf 变成已填充。这正是文件顶部写明的既定
+          #   意图（bridge 内的 rtc_bridge 要经 VPC 出口回调控制面，出口源 IP 才能落进
+          #   控制面的窄白名单）。它是对**在线服务**的一次真实配置变更，因此必须是
+          #   被**知道**的，而不是被撞见的 —— 本步会把 bridge 的回读结论一并打出来。
+          #   也要注意：CI 路径与人工路径在这一点上**故意不同**——人工部署没带
+          #   --vpcConfig，从未动过 bridge 的配置。
+          #
+          # 边界：本步只对**决定连通性的两个 id** 做硬相等；网段字段只要求**齐备非空**，
+          # 值不同则打 warning 不判红 —— 网段的表述形式可能被管控面归一化，硬比会产生
+          # 假红，而假红会削弱这条守卫的可信度。
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+
+          API_VERSION = "2022-02-17"
+          env_id = os.environ["ENV_ID"]
+          service = os.environ["SERVICE"]
+
+          # 0) Deploy 根本没跑时，读回反映的是**部署前**的既有配置，不构成本次部署的结论。
+          #    这种情况只可能出现在更早的步骤已经失败之后（Deploy 没有 if，不会被主动
+          #    跳过），所以那时 job 已经是红的。这里把话说清楚，避免把旧状态误读成本次
+          #    结果，也避免制造第二条误导性报错把真正的原因盖住。
+          if os.environ.get("DEPLOY_OUTCOME") == "skipped":
+              print("::warning::Deploy 步骤未执行，本次回读反映的是部署前状态，不构成本次部署结论")
+              sys.exit(0)
+
+          # 期望值：全部取自本步的 job env（来源为 Secrets，preflight 已保证非空）。
+          # **只用于比对，绝不打印。**
+          expected = {
+              "vpcid": os.environ.get("VPC_ID", "").strip(),
+              "vpccidr": os.environ.get("VPC_CIDR", "").strip(),
+              "subnetid": os.environ.get("SUBNET_ID", "").strip(),
+              "subnetcidr": os.environ.get("SUBNET_CIDR", "").strip(),
+          }
+          # 决定连通性的两个 id：硬相等。
+          HARD = ("vpcid", "subnetid")
+          # 其余两个网段字段：只要求齐备非空。
+          SOFT = ("vpccidr", "subnetcidr")
+
+          def tcb_api(action, body):
+              raw = subprocess.run(
+                  ["tcb", "api", "tcbr", action, "--api-version", API_VERSION,
+                   "--body", json.dumps(body), "--json"],
+                  capture_output=True, text=True, check=True).stdout
+              return json.loads(raw[raw.find("{"):])     # 首行是 "i → TCBR.xxx" 提示
+
+          detail = tcb_api("DescribeCloudRunServerDetail",
+                           {"EnvId": env_id, "ServerName": service})["data"]
+          raw_conf = (detail.get("ServerConfig") or {}).get("VpcConf") or {}
+          if isinstance(raw_conf, str):          # 与 EnvParams 一样，可能以字符串形式返回
+              raw_conf = json.loads(raw_conf) if raw_conf.strip() else {}
+
+          # 字段名做**大小写无关**归一：CLI 的 --vpcConfig 用小驼峰，而管控面返回的
+          # ServerConfig 用的是 PascalCase（同层的 EnvParams 就是 PascalCase）。本机无
+          # 凭据、MCP 未连接，无法核实线上返回的具体拼写，故两种都接受。这不放松判定：
+          # 键是否齐备、是否非空、以及值是否等于本轮注入值，全部照旧严格比对。
+          norm = {str(k).lower(): v for k, v in dict(raw_conf).items()}
+
+          problems = []
+          for field in HARD:
+              got = str(norm.get(field) or "").strip()
+              if not got:
+                  problems.append(f"{field}: 为空（未配置）")
+              elif got != expected[field]:
+                  problems.append(f"{field}: 已配置但与本轮要注入的值不同")
+          for field in SOFT:
+              if not str(norm.get(field) or "").strip():
+                  problems.append(f"{field}: 为空（未配置）")
+              elif str(norm[field]).strip() != expected[field]:
+                  print(f"::warning::{service} {field} 与本轮注入值不同（不判红：该字段不决定连通性）")
+
+          if problems:
+              for item in problems:
+                  print(f"::error::{service} VpcConf 回读校验失败: {item}")
+              print(f"::error::{service} 拒绝静默：VpcConf 与本次部署期望值不一致（fail-loud）")
+              sys.exit(1)
+
+          print(f"{service}: VpcConf 回读通过（{' '.join(HARD)} 与本轮注入值一致，"
+                f"{' '.join(SOFT)} 齐备非空）")
           PY

@@ -396,11 +396,27 @@ def test_pre_deploy_gate_has_no_bypass_path() -> None:
 
     两条：门禁步骤不得带 if（可被条件跳过）或 continue-on-error（失败被吞掉）。
     顺带把这条不变量推广到**所有**步骤——目前确实如此，保持住就不可能出现旁路。
+
+    2026-09-19 收窄（是收窄，不是放松）：部署后新增的 VpcConf 回读步骤**必须**带
+    `if: always()` 才能做到「Verify 失败时仍然执行」——它不能改成省略 if，否则前序
+    失败时它会被跳过，这条最关键的守卫反而变成**静默缺席**。于是不变量精确化为：
+      · 带 if 的步骤**只能**位于 Deploy 之后。门禁、构建、注入、部署全在它前面，
+        所以它不可能跳过其中任何一步，也就无法制造旁路；
+      · 且 if 只能恰好是 `always()`（一个不可能跳过它的条件），不得是任何可跳过它的条件。
+    原不变量「不存在测试没跑却照常部署的路径」完整保留，并额外新增
+    「回读不得缺席」这一条。
     """
-    for step in _steps():
+    order = _step_order()
+    deploy_at = order[_DEPLOY_STEP]
+    for index, step in enumerate(_steps()):
         label = step.get("name") or step.get("uses", "<unnamed>")
-        assert "if" not in step, f"{label} 带了 if：可能被条件跳过"
         assert not step.get("continue-on-error"), f"{label} 吞掉了失败：后续步骤会照走"
+        if "if" not in step:
+            continue
+        assert index > deploy_at, (
+            f"{label} 带了 if 且不在 {_DEPLOY_STEP} 之后：可能跳过构建、门禁、注入或部署")
+        assert str(step["if"]).strip() == "always()", (
+            f"{label} 的 if 只能恰好是 always()（不得带任何可跳过它的条件）: {step['if']!r}")
     for name in (_GATE_BACKEND, _GATE_SIDECAR):
         _step(name)  # 必须真实存在，而不是被改名或删掉
 
@@ -591,3 +607,76 @@ def test_no_rollback_gap_is_documented_and_ordering_matches() -> None:
     assert not any(
         "rollback" in str(s.get("name", "")).lower() for s in _steps()
     ), "本批不引入自动回滚；若确实要加，需先与用户确认"
+
+
+# ── 部署后 VpcConf 回读（2026-09-19）──────────────────────────────────────────
+# preflight 只能证明**输入**非空，证明不了管控面真的写进去了。部署步骤的 --vpcConfig
+# 若被拼成「字段全空」的对象，会把 jax-voice-api **已配置**的 VpcConf 整块抹掉 →
+# 控制面失去内网 PG 通路 → 控制面是端侧唯一依赖 → **产品整体不可用**。
+# 这是产品级下线状态，不允许产出绿色运行，所以回读不匹配必须非零退出。
+_READBACK_STEP = "Read back VpcConf and assert it matches this run"
+
+
+def test_vpc_readback_exists_after_verify_and_is_loud() -> None:
+    order = _step_order()
+    assert _READBACK_STEP in order, "缺少部署后 VpcConf 回读步骤"
+    assert order[_READBACK_STEP] > order[_VERIFY_STEP], "回读必须排在 Verify 之后"
+    run = _step(_READBACK_STEP)["run"]
+    assert "set -euo pipefail" in run, "回读未声明 fail-closed"
+    assert "sys.exit(1)" in run, "回读不匹配必须非零退出（产品级下线状态不得产出绿色运行）"
+    assert "DescribeCloudRunServerDetail" in run, "必须真的读回管控面配置"
+    assert "VpcConf" in run, "读回的目标字段是 ServerConfig.VpcConf"
+
+
+def test_vpc_readback_runs_even_when_verify_fails() -> None:
+    """Verify 失败时，被抹掉的 VpcConf 可能正是病因：要两个信号，不是一个盖住另一个。"""
+    declared = str(_step(_READBACK_STEP).get("if", "")).strip()
+    assert declared == "always()", (
+        "回读必须用 if: always()；省略 if 会让它在前序失败时被跳过，"
+        f"这条最关键的守卫就变成静默缺席: {declared!r}")
+
+
+def test_vpc_readback_compares_against_this_runs_ids_not_merely_nonempty() -> None:
+    """断言「与本轮要注入的值相等」，**不是**「非空」。
+
+    只判非空会漏掉「被写成错误但非空的值」——preflight 永远看不到那种情况。
+
+    变异检验抓出过一版过松的写法：只断言 `"!= expected" in run` 是不够的，因为网段那
+    一支也含这个子串——把两个 id 的判据弱化成「非空」后该断言仍然通过。所以这里**逐个
+    精确锁定** id 的比较式本身，并锁定 id 与网段的分组不得互换。
+    """
+    run = _step(_READBACK_STEP)["run"]
+    for key in INFRA_IDENTIFIER_KEYS:
+        assert f'os.environ.get("{key}"' in run, f"回读必须取本轮的 {key} 作为期望值"
+    assert 'HARD = ("vpcid", "subnetid")' in run, "两个 id 必须归在硬比较那一组"
+    assert 'SOFT = ("vpccidr", "subnetcidr")' in run, "两个网段字段必须归在只判非空那一组"
+    assert "got != expected[field]" in run, (
+        "两个 id 必须与本轮注入值逐一相等，不能退化成只判非空")
+    assert "为空（未配置）" in run, "字段缺失/为空必须单独判出来（抹掉的签名）"
+
+
+def test_vpc_readback_does_not_judge_a_deploy_that_never_ran() -> None:
+    """Deploy 未执行时，读回的是**部署前**的既有配置，不构成本次部署的结论。"""
+    assert _step(_DEPLOY_STEP).get("id") == "deploy", \
+        "Deploy 步骤必须有 id，回读才能引用它的 outcome"
+    declared = (_step(_READBACK_STEP).get("env") or {}).get("DEPLOY_OUTCOME")
+    assert declared == "${{ steps.deploy.outcome }}", f"实际: {declared!r}"
+    assert "skipped" in _step(_READBACK_STEP)["run"], "必须显式处理 Deploy 被跳过的情况"
+
+
+def test_vpc_readback_prints_only_field_names_never_values() -> None:
+    """回读失败只能打印**字段名**，不得把 VPC/子网标识值打进 CI 日志。"""
+    for line in _step(_READBACK_STEP)["run"].splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("print("):
+            continue
+        assert "expected[" not in stripped and "norm[" not in stripped, \
+            f"回读的打印语句里插入了标识值: {stripped}"
+
+
+def test_vpc_readback_records_the_intended_bridge_vpc_population() -> None:
+    """首次 CI 会把 bridge 原本为空的 VpcConf 变成已填充：既定意图，但必须是**已知**的。"""
+    run = _step(_READBACK_STEP)["run"]
+    assert "jax-voice-bridge" in run, "必须点名会发生变化的是 bridge"
+    assert "原本为空" in run and "首次 CI 运行" in run, \
+        "必须写明这是一次对在线服务的已知配置变更，而不是让运维撞见"
