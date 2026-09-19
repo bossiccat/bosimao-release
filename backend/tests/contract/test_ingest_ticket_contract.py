@@ -358,6 +358,13 @@ def test_device_id_must_match_bearer_subject(fx: IngestFixture) -> None:
 # ------------------------------------------------------- 5. 认证前置 / 不泄露 schema
 
 def test_endpoint_requires_bearer(fx: IngestFixture) -> None:
+    """端点内兜底：无 Bearer 时 subject 缺失 ⇒ 401/40101。
+
+    注意这条**不覆盖**「未认证不得泄露 body schema」——变异 M3（守卫不再拒绝）下它
+    仍然全绿，因为端点自身的 subject_id 兜底也返回 40101。schema 泄露只由
+    test_unauthenticated_request_does_not_leak_body_schema 钉住（它才是 GuardedAPIRoute
+    这一层的唯一守卫）。别把这条当成 401 优先的证明。
+    """
     session = fx.create_session()
     resp = fx.client.post(
         INGEST_ENDPOINT, json={"device_id": DEVICE_A, "session_id": session["session_id"]},
