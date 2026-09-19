@@ -136,6 +136,24 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
      '  DetailPrint "Provisioning sidecar credential (O-018 slice 2)..."',
      '  DetailPrint "Provisioning sidecar credential (O-018 slice 2)..."',
      "o018_installer_contract"),
+
+    # ---- 2026-09-19 PE 信任判据（发布路径上的生产可信门）----
+    # isPeBinary 初版只读前 2 字节判 "MZ"，实测 40,000 字节 0x41 + 开头 MZ 就能过，
+    # 即注释里声称的 "PE provenance" 实际只验了魔数。守护住在
+    # scripts/test/sidecar-trust-pe.test.js（node 套件），由
+    # backend/tests/contract/test_sidecar_trust_pe_contract.py 拉起 —— 少了这座桥
+    # 那些 node 用例不在任何 workflow 的收集范围内，等于没跑。
+    ("PE 信任判据退回「只看得到 MZ 就算 PE」（4MB 任意 blob 又能通过）",
+     "scripts/lib/sidecar-trust.js",
+     "    return magic === OPTIONAL_MAGIC_PE32 || magic === OPTIONAL_MAGIC_PE32_PLUS;",
+     '    return true;  // MUTATED: 退回「只看得到 MZ 就算 PE」',
+     "sidecar_trust_pe_contract"),
+
+    ("sidecar 源码闭集漏登记一个被 require 的文件（随包 app 运行期会 require 失败）",
+     "scripts/lib/sidecar-package-common.js",
+     "  'main.js', 'phone.js', 'resample.js', 'rtc-startup.js', 'rtc-termination.js',",
+     "  'main.js', 'phone.js', 'rtc-startup.js', 'rtc-termination.js',  # MUTATED",
+     "sidecar_trust_pe_contract"),
 ]
 
 
