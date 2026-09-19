@@ -43,8 +43,18 @@ KEYWORDS = [
 ]
 
 # 本次 0 命中所引用的阳性对照（事先固定，场景里只做"确实存在"的核对）
+# 注：这条 sha256 原先**手抄错了**——写成 66 字符的 `b6fa7f8f8fa5fdd2…`，与实际文件不符。
+# 2026-09-19 用 hashlib 重新核算并更正。声明里带哈希就必须能被验：一个抄错的哈希
+# 比"不写哈希"更糟，因为它看起来像已经核过。
 POSCTRL_REF = ("outputs/2026-09-19-stderr-channel-positive-control.txt "
-               "(2,973 B / sha256 b6fa7f8f8fa5fdd23df340da04514e4cb799937f7c847ab1f285ebb45334121909)")
+               "(2,973 B / sha256 b6fa7f8fa5fdd23df340da04514e4cb799937f7c847ab1f285ebb45334121909)")
+
+# 采集工具的取证副本（是**工具本体**、不是数据）。读数写成字面量而不是 import 时现算：
+# 干净检出时 `outputs/` 不存在（`.gitignore:134`），现算会直接抛异常；写成读数则文档里
+# 的那句话始终可被验证。二者字节相同，2026-09-19 用 hashlib 核过。
+TOOL_COPY_REL = "outputs/2026-09-19-installed-e2e-tools/win_popup_capture.py"
+TOOL_COPY_SIZE = 15333
+TOOL_COPY_SHA = "8cb80eb6979b1c0fdd6058e9599d50d00c115240b5f4e93642e5405737b2050e"
 
 samples = []       # 全部快照（原始读数）
 report = []        # 人读的报告
@@ -169,7 +179,9 @@ def _run():
     w()
     w("### 采集工具与「0 命中」的证据等级")
     w()
-    w("- 工具：`outputs/2026-09-19-installed-e2e-tools/win_popup_capture.py`（只读、脱敏、不 spawn node）")
+    w(f"- 工具：`{TOOL_COPY_REL}`（只读、脱敏、不 spawn node）")
+    w(f"  - 与 `scripts/field-evidence/win_popup_capture.py` **字节相同**："
+      f"{TOOL_COPY_SIZE:,} B / sha256 {TOOL_COPY_SHA}")
     w("  - **窗口尺子已自证**：显式拉一个可见控制台 → 计数 +2（`PseudoConsoleWindow` +")
     w("    `CASCADIA_HOSTING_WINDOW_CLASS`）；关掉 → 回落 −2。见「尺子自检」一节。")
     w(f"  - app stderr 通道的阳性对照：`{POSCTRL_REF}`")
