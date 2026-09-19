@@ -276,7 +276,8 @@ GitHub Secrets/Vars 注入，且 **preflight 对本次矩阵服务需要的每�
 |---|---|---|
 | `TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` | Secrets | `tcb login` |
 | `TCR_REGISTRY` / `TCR_NAMESPACE` / `TCR_USERNAME` / `TCR_PASSWORD` | Secrets | 镜像构建推送 |
-| `VPC_ID` / `VPC_CIDR` / `SUBNET_ID` / `SUBNET_CIDR` | Vars | CloudRun 出网接入内网 PG |
+| `VPC_ID` / `VPC_CIDR` / `SUBNET_ID` / `SUBNET_CIDR` | Secrets | CloudRun 出网接入内网 PG。**基础设施标识必须走 Secrets**：本仓库是公开仓库，GitHub variables 不加密、机密性无法验证；这四项也正是从全部提交历史中清理掉的那批标识 |
+| `CLOUDBASE_ENV_ID` | Vars | 部署目标环境 id（workflow 内即 `ENV_ID`）。非敏感：已推送分支 `ci/android-gates` 上 6 个文件含它，端侧默认端点也是该域名 |
 
 `jax-voice-api` 必需键（15 项，缺一即 fail-closed）：
 
@@ -315,8 +316,8 @@ EnvParams 里，必须在 GitHub 侧补齐，否则 preflight 会拦住这次部
 `jax-voice-api` 的 `VpcConf = REPLACE_WITH_VPC_ID / REPLACE_WITH_SUBNET_ID` 此前**只存在于云端
 控制台**，仓库内无记录；整包覆盖式发布一旦丢失它，实例就连不到
 `REPLACE_WITH_PG_PRIVATE_IP:5432`，存储探针必然不绿。现在 api 与 bridge **都**在部署命令里通过
-`--vpcConfig` 注入（值取自 `vars.VPC_ID` / `vars.VPC_CIDR` / `vars.SUBNET_ID` /
-`vars.SUBNET_CIDR`，不硬编码）。bridge 也需要它：其 `rtc_bridge` 要经 VPC 出口回调
+`--vpcConfig` 注入（值取自 `secrets.VPC_ID` / `secrets.VPC_CIDR` / `secrets.SUBNET_ID` /
+`secrets.SUBNET_CIDR`，未定义时回退同名 `vars.*`，不硬编码）。bridge 也需要它：其 `rtc_bridge` 要经 VPC 出口回调
 控制面，出口源 IP 才能落进控制面的窄白名单。
 
 ### 10.3 Dockerfile 固化生产开关

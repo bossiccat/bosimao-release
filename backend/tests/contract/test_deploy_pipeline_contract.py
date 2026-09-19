@@ -260,6 +260,28 @@ def test_preflight_manifest_is_the_single_source_of_injection() -> None:
             assert key in job_env, f"{key} 在 required_env 里但没有来源声明（会取到空值）"
 
 
+# ── 基础设施标识的存放通道（2026-09-18 修正）───────────────────────────────────
+# VPC id / 子网 id / 网段这四项是**内网拓扑标识**，已从全部提交历史中清理掉。
+# 本仓库是公开仓库：GitHub variables 不加密，且其机密性无法验证（匿名读 Actions
+# variables 返回 401，但没有任何证据表明已认证的非协作者读不到）。若这四项只从
+# vars 取，等于把刚清理掉的标识又放回一个机密性不可验证的通道——清理白做。
+# 因此它们必须经 secrets 取（允许回退同名 vars，但 secrets 优先）。
+INFRA_IDENTIFIER_KEYS = ("VPC_ID", "VPC_CIDR", "SUBNET_ID", "SUBNET_CIDR")
+
+
+def test_infra_identifiers_are_sourced_from_secrets_not_vars() -> None:
+    """四项基础设施标识不得只从 vars 取，必须先经 secrets。"""
+    job_env = _doc()["jobs"]["deploy"].get("env", {}) or {}
+    for key in INFRA_IDENTIFIER_KEYS:
+        assert key in job_env, f"{key} 没有来源声明"
+        declared = str(job_env[key])
+        assert declared.startswith("${{ secrets."), (
+            f"{key} 必须先取 secrets（公开仓库的 variables 不加密，"
+            f"机密性不可验证）: {declared}")
+        assert "vars." in declared, (
+            f"{key} 应保留同名 Vars 回退，与其余运行时键的写法一致: {declared}")
+
+
 _HARDCODED_SECRET_PATTERNS = (
     re.compile(r"postgres(?:ql)?://", re.IGNORECASE),
     re.compile(r"\bsk-[A-Za-z0-9]{8,}"),

@@ -55,8 +55,13 @@
 #   Secrets: TENCENTCLOUD_SECRETID / TENCENTCLOUD_SECRETKEY   tcb 登录
 #            TCR_REGISTRY / TCR_NAMESPACE / TCR_USERNAME / TCR_PASSWORD  镜像推送
 #            VOICE_OWNER_CREDENTIAL  自检端点鉴权（与 CloudRun 上同一值）
+#            VPC_ID / VPC_CIDR / SUBNET_ID / SUBNET_CIDR  CloudRun 出网接入 PG 内网
+#            —— 这四项是**基础设施标识**（VPC / 子网 / 网段），必须走 Secrets：
+#               本仓库是公开仓库，GitHub variables 是**不加密**的，且其机密性无法验证；
+#               它们也正是从全部提交历史中清理掉的那批标识，放进 Vars 等于让清理白做。
 #            其余运行时键（见 job env）可放 Secrets，亦可放 Vars
-#   Vars:    VPC_ID / VPC_CIDR / SUBNET_ID / SUBNET_CIDR  CloudRun 出网接入 PG 内网
+#   Vars:    CLOUDBASE_ENV_ID  部署目标环境 id（本身就是公开值：已推送分支
+#            ci/android-gates 上 6 个文件含它，且端侧默认端点就是这个域名 —— 非敏感）
 # =============================================================================
 name: deploy-cloudrun
 
@@ -121,11 +126,13 @@ jobs:
               RTC_BRIDGE_CONTROL_PLANE_BASE_URL RTC_BRIDGE_SERVICE_CREDENTIAL
               RTC_BRIDGE_GATEWAY_ASSERTION RTC_BRIDGE_CLIENT_CERT_PEM
               RTC_BRIDGE_CLIENT_KEY_PEM RTC_BRIDGE_CONTROL_PLANE_CA_FILE
-    # 运行时配置来源：值一律不落仓库。优先 Secrets；该键未定义时回退同名 Vars
-    # （非敏感开关如 VOICE_PRODUCTION / VPC_* 可放 Vars）。
+    # 运行时配置来源：值一律不落仓库。优先 Secrets；该键未定义时回退同名 Vars。
+    # 只有**非敏感开关**（如 VOICE_PRODUCTION）才可以只放 Vars；基础设施标识
+    # （VPC_ID / VPC_CIDR / SUBNET_ID / SUBNET_CIDR）必须走 Secrets —— 公开仓库的
+    # variables 不加密，机密性无法验证。
     # 这里声明的是**来源映射**，preflight 会对本次矩阵服务实际需要的键逐个校验非空；
     # 若某个在 required_env 里的键没有在这里声明来源，它会因取到空值而被拦住
-    # （契约测试 test_required_env_manifest_matches_injection 会静态锁死这一点）。
+    # （契约测试 test_preflight_manifest_is_the_single_source_of_injection 会静态锁死这一点）。
     env:
       TENCENTCLOUD_SECRETID: ${{ secrets.TENCENTCLOUD_SECRETID }}
       TENCENTCLOUD_SECRETKEY: ${{ secrets.TENCENTCLOUD_SECRETKEY }}
@@ -133,10 +140,10 @@ jobs:
       TCR_NAMESPACE: ${{ secrets.TCR_NAMESPACE }}
       TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
       TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
-      VPC_ID: ${{ vars.VPC_ID }}
-      VPC_CIDR: ${{ vars.VPC_CIDR }}
-      SUBNET_ID: ${{ vars.SUBNET_ID }}
-      SUBNET_CIDR: ${{ vars.SUBNET_CIDR }}
+      VPC_ID: ${{ secrets.VPC_ID || vars.VPC_ID }}
+      VPC_CIDR: ${{ secrets.VPC_CIDR || vars.VPC_CIDR }}
+      SUBNET_ID: ${{ secrets.SUBNET_ID || vars.SUBNET_ID }}
+      SUBNET_CIDR: ${{ secrets.SUBNET_CIDR || vars.SUBNET_CIDR }}
       VOICE_PRODUCTION: ${{ secrets.VOICE_PRODUCTION || vars.VOICE_PRODUCTION }}
       VOICE_STORAGE_BACKEND: ${{ secrets.VOICE_STORAGE_BACKEND || vars.VOICE_STORAGE_BACKEND }}
       VOICE_DATABASE_URL: ${{ secrets.VOICE_DATABASE_URL || vars.VOICE_DATABASE_URL }}
@@ -199,7 +206,7 @@ jobs:
           done
           if [ "$missing" -ne 0 ]; then
             echo "::error::部署所需的基础配置不完整，拒绝继续（fail-closed）"
-            echo "::error::缺失项来源: ENV_ID<-vars.CLOUDBASE_ENV_ID; VPC_ID/VPC_CIDR/SUBNET_ID/SUBNET_CIDR<-同名 Vars; TCR_*/TENCENTCLOUD_*<-同名 Secrets"
+            echo "::error::缺失项来源: ENV_ID<-vars.CLOUDBASE_ENV_ID; VPC_ID/VPC_CIDR/SUBNET_ID/SUBNET_CIDR<-同名 Secrets; TCR_*/TENCENTCLOUD_*<-同名 Secrets"
             exit 1
           fi
 
