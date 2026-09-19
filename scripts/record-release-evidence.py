@@ -106,6 +106,12 @@ def main() -> int:
 
     claims_dir = ROOT / args.claims_dir
     target_claim = claims_dir / f"{args.claim_id}.json"
+    # 既有声明要**合并**进新声明，不能整体覆盖：`risk`（在断言什么）、
+    # `required_scenarios`（必须演示哪些场景）、`legacy_tasks` / `superseded_by`（溯源）、
+    # `target.artifact`（绑定哪条产物链）、`attempts`（同一失败指纹的重试历史，
+    # 见 verify._validate_attempt_circuit）都不是本工具该改写的字段。
+    # 只整体覆盖会让声明"门禁变绿但语义消失"——审计者再也看不出原本要证明什么。
+    existing = {}
     if target_claim.is_file():
         try:
             existing = json.loads(target_claim.read_text(encoding="utf-8"))
@@ -120,21 +126,26 @@ def main() -> int:
     hours = int(policy.get("max_evidence_age_hours", 72))
     ts = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
 
-    claim = {
-        "claim_id": args.claim_id,
-        "state": "Verified",
-        "owner": args.owner,
-        "reviewer": args.reviewer,
-        "target": {"artifact_commit": commit, "artifact_sha256": artifact_sha},
-        "evidence": [{
-            "kind": args.kind,
-            "collected_at": ts(now),
-            "expires_at": ts(now + timedelta(hours=hours)),
-            "path": args.evidence,
-            "raw_sha256": _sha256_file(evidence),
-        }],
-        "attempts": [],
-    }
+    # 从既有声明起手再覆写本工具负责的字段 —— 其余治理元数据原样留下。
+    claim = dict(existing) if isinstance(existing, dict) else {}
+    claim["claim_id"] = args.claim_id
+    claim["state"] = "Verified"
+    claim["owner"] = args.owner
+    claim["reviewer"] = args.reviewer
+    prior_target = claim.get("target")
+    target = dict(prior_target) if isinstance(prior_target, dict) else {}
+    target["artifact_commit"] = commit
+    target["artifact_sha256"] = artifact_sha
+    claim["target"] = target
+    claim["evidence"] = [{
+        "kind": args.kind,
+        "collected_at": ts(now),
+        "expires_at": ts(now + timedelta(hours=hours)),
+        "path": args.evidence,
+        "raw_sha256": _sha256_file(evidence),
+    }]
+    # attempts 已有就保留（电路判据依赖历史）；只有缺省时才补空列表。
+    claim.setdefault("attempts", [])
 
     # ---- 写盘前用治理层自己的校验器验证（不是自己再写一遍规则） ----
     try:

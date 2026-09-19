@@ -124,3 +124,60 @@ def test_refuses_overwriting_an_already_verified_claim(tmp_path: Path) -> None:
     assert "--allow-reverify" in proc.stderr
     # 原文件未被改动
     assert json.loads((claims / "android-duplex-audio.json").read_text(encoding="utf-8"))["owner"] == "impl-team"
+
+
+def test_records_merge_and_preserve_claim_governance_metadata(tmp_path: Path) -> None:
+    """记录证据必须**合并**而非整体覆盖既有声明。
+
+    声明的 `risk` 是"在断言什么"、`required_scenarios` 是"必须演示哪些场景"，
+    `legacy_tasks` / `superseded_by` 是溯源，`target.artifact` 描述绑定的是
+    哪条产物链，`attempts` 是同一失败指纹的重试历史（`max_attempts_same_fingerprint`
+    的电路判据就靠它）。这些都不是本工具该改写的字段，一旦被整体覆盖，
+    声明会"门禁变绿但语义消失"——审计者再也看不出原本要证明什么。
+    """
+    policy, claims, evidence, artifact = _fixture(tmp_path)
+    prior = {
+        "claim_id": "android-duplex-audio",
+        "state": "EvidencePending",
+        "owner": "impl-team",
+        "reviewer": "independent-qa",
+        "risk": "客户现场出现回声/双讲撕裂",
+        "target": {
+            "artifact_commit": "",
+            "artifact_sha256": "",
+            "artifact": "packaged app.apk -> AudioEngine -> CapturePath",
+        },
+        "required_scenarios": ["首次启动", "App 重启", "relay 故障恢复"],
+        "legacy_tasks": ["Jax-Audio-1", "jax-audio-2"],
+        "evidence": [],
+        "superseded_by": "android-duplex-audio-v2",
+        "attempts": [
+            {"fingerprint": "fp:deadbeef", "outcome": "failed", "note": "第一次现场取证未复现回声"}
+        ],
+    }
+    (claims / "android-duplex-audio.json").write_text(
+        json.dumps(prior, ensure_ascii=False), encoding="utf-8")
+
+    proc = _run(*_base(policy, claims, evidence, artifact))
+    assert proc.returncode == 0, proc.stderr
+
+    written = json.loads((claims / "android-duplex-audio.json").read_text(encoding="utf-8"))
+
+    # 必须原样保留的治理元数据（本缺陷的判据）
+    for key in ("risk", "required_scenarios", "legacy_tasks", "superseded_by"):
+        assert written.get(key) == prior[key], f"{key} 被覆盖丢失"
+    assert written["target"]["artifact"] == prior["target"]["artifact"], \
+        "target.artifact 描述被覆盖丢失"
+    assert written["attempts"] == prior["attempts"], "attempts 重试历史被清空"
+
+    # 本工具应当改写的字段确实被更新
+    assert written["claim_id"] == "android-duplex-audio"
+    assert written["state"] == "Verified"
+    assert written["owner"] == "impl-team"
+    assert written["reviewer"] == "independent-qa"
+    assert written["target"]["artifact_commit"] == COMMIT
+    assert written["target"]["artifact_sha256"] == (
+        "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest())
+    assert len(written["evidence"]) == 1
+    assert written["evidence"][0]["raw_sha256"] == (
+        "sha256:" + hashlib.sha256(evidence.read_bytes()).hexdigest())
