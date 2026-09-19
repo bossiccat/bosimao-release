@@ -13,6 +13,11 @@ from rtc_bridge.config import BridgeConfig, load_bridge_config
 from rtc_bridge.server import BridgeServer
 from rtc_bridge.shaper import DownlinkShaper
 
+# 本文件所有 websockets.connect 都打本机（127.0.0.1 上由测试自己起的 bridge/server）。
+# `websockets` 的 `proxy` 默认是 `True`（= 按环境代理），设了 HTTP_PROXY 的机器上
+# loopback 请求会被交给代理 ⇒ **服务活着却连不上**（同 docs/OPS-003-live-test.md:98-100）。
+# 故每处显式 `proxy=None`。契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
+
 # 关闭无关日志噪音
 logging.disable(logging.WARNING)
 
@@ -223,7 +228,7 @@ async def test_bridge_consumes_approval_from_independent_registry_and_restarts(t
 async def test_hello_and_ready(fake_apm):
     bridge, state, server, port = await _start_server()
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(_hello("session-001", "dev-001", "jax-dev-001")))
             msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             assert msg["type"] == "ready"
@@ -239,7 +244,7 @@ async def test_hello_and_ready(fake_apm):
 async def test_up_audio_feeds_apm(fake_apm):
     bridge, state, server, port = await _start_server()
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(_hello("session-001", "dev-001", "jax-dev-001")))
             await ws.recv()  # ready
             pcm = b"\x12\x34" * 3200
@@ -256,7 +261,7 @@ async def test_down_audio_roundtrip(fake_apm):
     """假 APM 触发 on_audio_out → sidecar 应收到 down_audio"""
     bridge, state, server, port = await _start_server()
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(_hello("session-001", "dev-001", "jax-dev-001")))
             await ws.recv()  # ready
             reply = b"\xab\xcd" * 320  # 640B = 20ms @16k（一个整形帧）
@@ -273,7 +278,7 @@ async def test_down_audio_roundtrip(fake_apm):
 async def test_peer_enter_leave_lifecycle(fake_apm):
     bridge, state, server, port = await _start_server()
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(_hello("session-001", "dev-001", "jax-dev-001")))
             await ws.recv()  # ready
             await ws.send(json.dumps({"type": "peer_state", "state": "enter", "user_id": "dev-001"}))
@@ -383,7 +388,7 @@ async def test_health_metrics_serializable(fake_apm):
     bridge, state, server, port = await _start_server()
     try:
         health = HealthServer("127.0.0.1", 0, state)
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(_hello("session-001", "dev-001", "jax-dev-001")))
             await ws.recv()  # ready
             # 连接中（有 _session_ref 指向 PeerVoiceSession）→ metrics 仍可序列化
@@ -400,7 +405,7 @@ async def test_health_metrics_serializable(fake_apm):
 async def test_terminate_device_closes_existing_bridge_session(fake_apm):
     bridge, state, server, port = await _start_server()
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(_hello("session-revoke", "dev-revoke", "room-revoke")))
             await ws.recv()
             assert await bridge.terminate_device("dev-revoke", ["session-revoke"]) == ["session-revoke"]
@@ -422,12 +427,12 @@ async def test_failed_candidate_keeps_active_session_and_replies_on_candidate(fa
     bridge, state, server, port = await _start_server()
     url = f"ws://127.0.0.1:{port}"
     try:
-        async with websockets.connect(url) as ws_a:
+        async with websockets.connect(url, proxy=None) as ws_a:
             await ws_a.send(json.dumps(_hello("session-a", "dev-a", "r-a")))
             assert json.loads(await ws_a.recv())["type"] == "ready"
             active_ws, active_session = bridge._ws, bridge._session
             bridge._redemption = RejectingRedemption()
-            async with websockets.connect(url) as ws_b:
+            async with websockets.connect(url, proxy=None) as ws_b:
                 malformed = _hello("session-b", "dev-b", "r-b")
                 malformed["proof"] = ""
                 await ws_b.send(json.dumps(malformed))
@@ -449,13 +454,13 @@ async def test_redeem_rejection_keeps_active_session_and_replies_candidate(fake_
     bridge._redemption = RejectingRedemption()
     url = f"ws://127.0.0.1:{port}"
     try:
-        async with websockets.connect(url) as ws_a:
+        async with websockets.connect(url, proxy=None) as ws_a:
             bridge._redemption = FakeRedemption()
             await ws_a.send(json.dumps(_hello("session-a", "dev-a", "r-a")))
             assert json.loads(await ws_a.recv())["type"] == "ready"
             active_ws, active_session = bridge._ws, bridge._session
             bridge._redemption = RejectingRedemption()
-            async with websockets.connect(url) as ws_b:
+            async with websockets.connect(url, proxy=None) as ws_b:
                 await ws_b.send(json.dumps(_hello("session-b", "dev-b", "r-b")))
                 failure = json.loads(await asyncio.wait_for(ws_b.recv(), timeout=5))
                 assert failure == {"type": "ctrl", "action": "exit", "reason": "hello_redemption_failed"}
@@ -474,7 +479,10 @@ async def test_concurrent_candidates_activate_in_completion_order(fake_apm):
     bridge._redemption = redemption
     url = f"ws://127.0.0.1:{port}"
     try:
-        async with websockets.connect(url) as ws_a, websockets.connect(url) as ws_b:
+        async with (
+            websockets.connect(url, proxy=None) as ws_a,
+            websockets.connect(url, proxy=None) as ws_b,
+        ):
             await ws_a.send(json.dumps(_hello("session-a", "dev-a", "r-a")))
             await ws_b.send(json.dumps(_hello("session-b", "dev-b", "r-b")))
             await asyncio.wait_for(redemption.ready.wait(), timeout=5)
@@ -498,7 +506,7 @@ async def test_replace_semantics_old_cleanup_does_not_kill_new(fake_apm):
 
     async def conn_a():
         try:
-            async with websockets.connect(url, open_timeout=5) as ws:
+            async with websockets.connect(url, open_timeout=5, proxy=None) as ws:
                 await ws.send(json.dumps(_hello("session-a", "dev-a", "r-a")))
                 await asyncio.wait_for(ws.recv(), timeout=5)  # ready
                 try:
@@ -514,7 +522,7 @@ async def test_replace_semantics_old_cleanup_does_not_kill_new(fake_apm):
     await asyncio.sleep(0.5)
 
     # B 连接（顶替 A）
-    async with websockets.connect(url, open_timeout=5) as ws_b:
+    async with websockets.connect(url, open_timeout=5, proxy=None) as ws_b:
         await ws_b.send(json.dumps(_hello("session-b", "dev-b", "r-b")))
         ready = json.loads(await asyncio.wait_for(ws_b.recv(), timeout=5))
         assert ready["type"] == "ready"

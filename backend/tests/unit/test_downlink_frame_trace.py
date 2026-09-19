@@ -24,6 +24,11 @@ from rtc_bridge.server import BridgeServer
 from rtc_bridge.session import PeerVoiceSession
 from rtc_bridge.shaper import DownlinkShaper
 
+# 本文件所有 websockets.connect 都打本机（127.0.0.1 上由测试自己起的 bridge/server）。
+# `websockets` 的 `proxy` 默认是 `True`（= 按环境代理），设了 HTTP_PROXY 的机器上
+# loopback 请求会被交给代理 ⇒ **服务活着却连不上**（同 docs/OPS-003-live-test.md:98-100）。
+# 故每处显式 `proxy=None`。契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
+
 logging.disable(logging.WARNING)
 
 FRAME = b"\xab\xcd" * 320  # 640B = 20ms @16k s16 mono
@@ -165,7 +170,7 @@ async def test_down_audio_carries_trace_fields(fake_apm):
     """down_audio 必须带 reply_id / frame_seq / src_seq / t_enq / t_send"""
     bridge, state, server, port = await _start_server()
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(_hello("session-001", "dev-001", "jax-dev-001")))
             await ws.recv()  # ready
             await fake_apm[0].on_audio_out(FRAME)
@@ -189,7 +194,7 @@ async def test_consecutive_chunks_share_reply_id(fake_apm):
     """同一轮回复的连续 chunk → 同一 reply_id，frame_seq 递增"""
     bridge, state, server, port = await _start_server()
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(_hello("session-002", "dev-002", "jax-dev-002")))
             await ws.recv()  # ready
             await fake_apm[0].on_audio_out(FRAME)

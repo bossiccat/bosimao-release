@@ -18,6 +18,11 @@ import websockets
 from rtc_bridge.config import BridgeConfig
 from rtc_bridge.server import BridgeServer
 
+# 本文件所有 websockets.connect 都打本机（127.0.0.1 上由测试自己起的 bridge/server）。
+# `websockets` 的 `proxy` 默认是 `True`（= 按环境代理），设了 HTTP_PROXY 的机器上
+# loopback 请求会被交给代理 ⇒ **服务活着却连不上**（同 docs/OPS-003-live-test.md:98-100）。
+# 故每处显式 `proxy=None`。契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
+
 logging.disable(logging.WARNING)
 
 
@@ -116,7 +121,7 @@ async def _start_server(reporter):
 
 
 async def _connect(port: int, session_id: str):
-    ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+    ws = await websockets.connect(f"ws://127.0.0.1:{port}", proxy=None)
     await ws.send(json.dumps(_hello(session_id)))
     ready = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
     assert ready["type"] == "ready"

@@ -13,6 +13,11 @@ import rtc_bridge.server as server_module
 from rtc_bridge.config import BridgeConfig
 from rtc_bridge.server import BridgeServer
 
+# 本文件所有 websockets.connect 都打本机（127.0.0.1 上由测试自己起的 bridge/server）。
+# `websockets` 的 `proxy` 默认是 `True`（= 按环境代理），设了 HTTP_PROXY 的机器上
+# loopback 请求会被交给代理 ⇒ **服务活着却连不上**（同 docs/OPS-003-live-test.md:98-100）。
+# 故每处显式 `proxy=None`。契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
+
 
 class AcceptingRedemption:
     async def redeem(self, hello: dict[str, Any]) -> dict[str, Any]:
@@ -80,7 +85,7 @@ async def test_incomplete_session_hello_is_rejected_before_session_creation(
         hello[field] = value
 
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(hello))
             response = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             assert response == {
@@ -127,7 +132,7 @@ async def test_hello_without_generation_is_rejected_before_session_creation(
     }
 
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(hello))
             response = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             assert response == {
@@ -176,7 +181,7 @@ async def test_hello_without_proof_and_nonce_is_rejected_before_session_creation
     }
 
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(hello))
             response = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             assert response == {
@@ -215,7 +220,7 @@ async def test_candidate_start_failure_closes_candidate_and_preserves_active_sta
     monkeypatch.setattr(server_module, "PeerVoiceSession", FailingSession)
     bridge, state, server, port = await _start_server()
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws_a:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws_a:
             await ws_a.send(json.dumps({
                 "type": "hello", "proof": "proof-a", "nonce": "nonce-a-current-1", "jti": "jti-a",
                 "session_id": "session-a", "device_id": "device-a", "room_id": "room-a",
@@ -248,12 +253,12 @@ async def test_failed_candidate_does_not_overwrite_sdk_version(
     bridge, state, server, port = await _start_server()
     bridge._redemption = AcceptingRedemption()
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws_a:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws_a:
             hello = {"type": "hello", "proof": "proof-a", "nonce": "nonce-a-current", "jti": "jti-a", "session_id": "session-a", "device_id": "device-a", "room_id": "room-a", "sidecar_user_id": "jax-pc-sidecar", "generation": 0, "protocol_version": "1.0", "audio_format": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1, "frame_ms": 20, "frame_bytes": 640}}
             await ws_a.send(json.dumps(hello))
             await ws_a.recv()
             bridge._redemption = FailingRedemption()
-            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws_b:
+            async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws_b:
                 candidate = dict(hello, session_id="session-b", device_id="device-b", room_id="room-b", sdk_version="candidate-sdk")
                 await ws_b.send(json.dumps(candidate))
                 await ws_b.recv()
@@ -312,7 +317,7 @@ async def test_redemption_succeeds_before_session_creation_and_ready(
         },
     }
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(hello))
             assert json.loads(await asyncio.wait_for(ws.recv(), timeout=5)) == {"type": "ready"}
             assert events == ["redeem", "session", "start"]
@@ -356,7 +361,7 @@ async def test_redemption_failure_never_creates_session_or_ready(
         },
     }
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps(hello))
             response = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             assert response == {
@@ -379,7 +384,7 @@ async def test_disconnect_cleanup_has_no_python_process_owner() -> None:
     assert not hasattr(bridge, "_spawn_sidecar")
 
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{port}", proxy=None) as ws:
             await ws.send(json.dumps({
                 "type": "hello", "proof": "proof-current", "nonce": "nonce-current-1234",
                 "jti": "jti-current", "session_id": "session-current",

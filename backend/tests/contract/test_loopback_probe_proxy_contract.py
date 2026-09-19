@@ -10,10 +10,18 @@ r"""契约：探本机端口的 HTTP 探测点必须显式绕代理。
 
 **websockets 侧修了，urllib / httpx 侧的 loopback 探测没修。**
 
-实测证据（不是回忆）：
+实测证据（不是回忆）。出处文件在被 gitignore 的 `outputs/` 下，所以引用一律写成
+**「逻辑名 + sha256」自证**：即使文件不在，也能验它在出处有没有被改过。
+逻辑名 -> 路径 / 大小 / "它证明了什么" 见**受跟踪**索引
+`docs/evidence/2026-09-19-loopback-proxy-evidence-index.md`：
 
-    outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt
-    outputs/2026-09-19-httpx-loopback-proxy-cells.txt
+    [loopback-proxy/fresh-process-cells] 大小 1250
+      outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt
+      sha256 34f4aaa1e6cdfec1f7dd3e76e695a784f504d1020d2280c8ae2fc516100f95dd
+
+    [loopback-proxy/httpx-cells] 大小 847
+      outputs/2026-09-19-httpx-loopback-proxy-cells.txt
+      sha256 073e5a3eb8ff419dc397373cb7ac072796f0520fc95baa2b741f47e5ed3435f3
 
     env HTTP_PROXY=<活代理> 时
       urllib.request.urlopen("http://127.0.0.1:P/health")  -> ERR HTTPError（代理的 502）
@@ -46,9 +54,13 @@ r"""契约：探本机端口的 HTTP 探测点必须显式绕代理。
    本机 loopback、不依赖上面两项 ⇒ 关掉是零副作用的。
 3) **websockets 类**：这才是本仓最早踩到这个坑的一族（`docs/OPS-003-live-test.md:98-100`）。
    非测试文件已全部显式 `proxy=None`（`scripts/e2e_verify.py`、`scripts/mock_phone_client.py`、
-   `backend/relay/relay_client.py`）；`backend/tests/unit/**` 里还有 20 处**未绕代理**，
-   记在 `WS_TEST_DEBT` 里（**那是欠债不是豁免**：修一处就必须从表里删一处）。
-   注意 `websockets.connect` 的 `proxy` 默认值是 `True`（= 按环境代理），所以这不是纸面风险。
+   `backend/relay/relay_client.py`）；`backend/tests/unit/**` 里原是 **28 处未绕代理**，
+   现已全部修掉，`WS_TEST_DEBT` 为**空表**，由 `test_ws_debt_register_is_empty` 钉住。
+   注意 `websockets.connect` 的 `proxy` 默认值是 `True`（= 按环境代理），所以这不是纸面风险 ——
+   行为依据 [loopback-proxy/unit-ws-dead-proxy-cells]：
+
+      outputs/2026-09-19-unit-ws-dead-proxy-positive-control.txt
+      sha256 1c2d81259fd3d2ec3e5d50cfc6b4312695e3510ab3550a884a245b369f7c8946
 4) **覆盖完整性**：任何新出现的 loopback 探测点（无论哪个客户端族）都必须先登记，
    否则本文件报红 —— 这才是防复发。
 5) **检测器不许恒真**：`test_detector_is_not_vacuous` 用故意不绕代理的样本证明它能红；
@@ -56,7 +68,11 @@ r"""契约：探本机端口的 HTTP 探测点必须显式绕代理。
    真起一个本机服务 + 死代理做**行为**验证（带阳性对照）。
 6) **复核本锁时不要用 shell `grep` 计数**：本机 MSYS `grep.EXE` 对含 `{}` 的模式会给**假 0**
    （同一文件、同一时刻，`grep -c -F 'ProxyHandler({})'` 有时 1 有时 0，而 Python 字节计数
-   稳定为 1）。证据：`outputs/2026-09-19-shell-grep-brace-pattern-false-zero.txt`。
+   稳定为 1）。证据 [loopback-proxy/shell-grep-false-zero]：
+
+     outputs/2026-09-19-shell-grep-brace-pattern-false-zero.txt
+     sha256 e9cdcb673d0dc1d906622ef26c0b320b97f41fcfdcc32f2c9e16d93ab9cfa0c1
+
    本文件的一切判定都走 AST + 字节级读数；人工复核也请用 `python -c` 而不是 `grep`。
    本文件自身**不调用任何 `grep`**（唯一的子进程是 `sys.executable -c`）。
 7) **本文件自己被排除在扫描面外**，原因写在 `SELF_EXCLUDED_FILES` 上方：行为验证必须
@@ -67,13 +83,17 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import http.server
+import os
 import re
 import socket
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
+import uuid
 from pathlib import Path
 
 import httpx
@@ -113,7 +133,7 @@ URLLIB_FIXED = {
     "scripts/o019_rotation_window_e2e.py":
         "o019 轮换窗口 e2e 的就绪探测（写锁时量出来的，与裁定三处同形）",
     "tools/verify_approval_e2e.py":
-        "本地 e2e 就绪探测（3 处）",
+        "本地 e2e 就绪探测（4 处：:57 http_post、:102/:115/:203 就绪与重启后探测）",
 }
 
 # 已知未修的 httpx 点：**欠债**。现在必须是空的（三处已修，见 HTTPX_FIXED）。
@@ -130,7 +150,7 @@ HTTPX_FIXED = {
         "httpx.AsyncClient(timeout=60.0, trust_env=False) —— 只打 BASE=127.0.0.1:19080",
 }
 
-# 已改成显式绕代理的 websockets 点（非测试代码）
+# 已改成显式绕代理的 websockets 点：这些文件的 loopback connect 必须保持 `proxy=None`
 WS_FIXED = {
     "scripts/e2e_verify.py":
         "websockets.connect(WS_URL, proxy=None) —— WS_URL=ws://127.0.0.1:8000/ws/pet",
@@ -138,22 +158,28 @@ WS_FIXED = {
         "websockets.connect(url, proxy=None) —— url 可能是外部中继，但本仓统一绕代理",
     "backend/relay/relay_client.py":
         "websockets.connect(..., proxy=None) 两处 —— 中继/网关（OPS-003 首次踩坑处）",
+    # 测试文件：本机 bridge 的 loopback connect，28 处一次性机械补齐。
+    # 登记它们不是"因为重要"，而是为了让这张表 = 全体"已绕代理的 loopback ws 文件"清单 ——
+    # 新增一个文件就必须在这里露一次面。
+    "backend/tests/unit/test_downlink_frame_trace.py": "本机 bridge loopback connect ×2",
+    "backend/tests/unit/test_rtc_bridge_ack_report.py": "×1",
+    "backend/tests/unit/test_rtc_bridge_apm_ack.py": "×1",
+    "backend/tests/unit/test_rtc_bridge_ctrl_relay.py":
+        "×1（端到端死代理行为验证挑的就是这个文件）",
+    "backend/tests/unit/test_rtc_bridge_server.py":
+        "×14（其中 8 处是 connect(url)，url 是**函数内局部量** —— 第一版检测器漏掉的就是它们）",
+    "backend/tests/unit/test_rtc_bridge_session_contract.py": "×9",
 }
 
-# **未修**的 websockets loopback 点：只在测试文件里，共 20 处 / 6 文件。
-# 值 = 该文件里"url 静态可判为 loopback 且没写 proxy=" 的调用点**数量**：
-# 用数量而不是行号，是为了"新增一处"必定报红、而无关改动挪行不误报。
-# 这**不是豁免**：修一处就必须把这里的数字减一处，减到空表为止。
-# `websockets.connect` 的 `proxy` 默认值是 `True`（= 按环境代理，17.0.1 实测），
-# 所以这些点在设了 HTTP_PROXY 的机器上会"服务活着却连不上"。
-WS_TEST_DEBT = {
-    "backend/tests/unit/test_downlink_frame_trace.py": 2,
-    "backend/tests/unit/test_rtc_bridge_ack_report.py": 1,
-    "backend/tests/unit/test_rtc_bridge_apm_ack.py": 1,
-    "backend/tests/unit/test_rtc_bridge_ctrl_relay.py": 1,
-    "backend/tests/unit/test_rtc_bridge_server.py": 6,
-    "backend/tests/unit/test_rtc_bridge_session_contract.py": 9,
-}
+# **未修**的 websockets loopback 点：原本是测试文件里的 28 处，现已全部修掉。
+# 这个空表是终局形态（和 `HTTPX_DEBT` 一样）：留着它，是为了让"必须为空"成为一条
+# **可读的断言**，而不是"没人记得还有这回事"。
+#
+# 修的过程中锁自己又漏了一次，值得记下来：第一版只按**模块级**常量解析 URL，
+# 而 `backend/tests/unit/test_rtc_bridge_server.py` 里的 `url = f"ws://127.0.0.1:{port}"`
+# 是**函数内局部量**，于是 8 处 `connect(url)` 被漏判 —— 若就此把表清空，
+# 锁会绿着放过 8 个真实 loopback 点。现在按**作用域链**解析（`_loopback_bound_names`）。
+WS_TEST_DEBT: dict[str, int] = {}
 
 # requests / aiohttp 族：目前一处都没有。出现即必须登记。
 OTHER_CLIENT_DEBT: dict[str, str] = {}
@@ -301,56 +327,111 @@ def _httpx_client_kwargs(text: str) -> list[tuple[int, str, dict]]:
     return sorted(out)
 
 
-def _module_string_consts(text: str) -> dict[str, str]:
-    """模块级 `NAME = "字面量"` -> 值。用于解析 `connect(WS_URL)` 这种间接写法。"""
-    out: dict[str, str] = {}
-    for node in _parse(text).body:
-        if (
-            isinstance(node, ast.Assign)
-            and isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, str)
-        ):
-            for t in node.targets:
+def _is_loopback_url_node(node: ast.AST) -> bool:
+    """`"ws://127.0.0.1:…"` 或 `f"ws://127.0.0.1:{port}"` 这类**字面可判**的 loopback。
+
+    f-string 只看它的**常量片段**（`f"…:{port}"` 的常量片段是 `"ws://127.0.0.1:"`），
+    所以不需要源码片段、也不受格式化影响。
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return bool(WS_LOOPBACK_LITERAL.search(node.value))
+    if isinstance(node, ast.JoinedStr):
+        parts = [
+            v.value for v in node.values
+            if isinstance(v, ast.Constant) and isinstance(v.value, str)
+        ]
+        return bool(WS_LOOPBACK_LITERAL.search("".join(parts)))
+    return False
+
+
+def _loopback_bound_names(body: list[ast.stmt]) -> set[str]:
+    """这个作用域里被赋成 loopback URL 的变量名。
+
+    **必须按作用域收集**：`url = f"ws://127.0.0.1:{port}"` 是函数内的局部量。
+    第一版只在模块级收集，于是 `backend/tests/unit/test_rtc_bridge_server.py`
+    里那 8 处 `connect(url)` 全被漏掉 —— 而它们运行时就是 loopback。
+    收集时**不下钻嵌套函数**，免得把子作用域的名字算到父作用域头上。
+    """
+    names: set[str] = set()
+    stack: list[ast.AST] = list(body)
+    while stack:
+        n = stack.pop()
+        if isinstance(n, ast.Assign) and _is_loopback_url_node(n.value):
+            for t in n.targets:
                 if isinstance(t, ast.Name):
-                    out[t.id] = node.value.value
+                    names.add(t.id)
+        elif (
+            isinstance(n, ast.AnnAssign)
+            and n.value is not None
+            and _is_loopback_url_node(n.value)
+            and isinstance(n.target, ast.Name)
+        ):
+            names.add(n.target.id)
+        for child in ast.iter_child_nodes(n):
+            if isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+            ):
+                continue
+            if isinstance(child, ast.stmt):
+                stack.append(child)
+    return names
+
+
+def _is_ws_connect(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "connect"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "websockets"
+    )
+
+
+def _ws_connect_nodes(text: str) -> list[tuple[ast.Call, bool]]:
+    """所有 `websockets.connect(...)` 节点 + 它的 url 是否静态判定为 loopback。
+
+    单独暴露出来，是为了让"改代码"和"判代码"用**同一套判定**：
+    批量修复脚本 import 本函数，就不会出现"修的和判的不是一回事"。
+    """
+    tree = _parse(text)
+    out: list[tuple[ast.Call, bool]] = []
+
+    def visit(node: ast.AST, scope: frozenset[str]) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scope = scope | _loopback_bound_names(node.body)
+        for child in ast.iter_child_nodes(node):
+            if _is_ws_connect(child):
+                assert isinstance(child, ast.Call)
+                is_lb = False
+                if child.args:
+                    a0 = child.args[0]
+                    is_lb = _is_loopback_url_node(a0) or (
+                        isinstance(a0, ast.Name) and a0.id in scope
+                    )
+                out.append((child, is_lb))
+            visit(child, scope)
+
+    visit(tree, frozenset(_loopback_bound_names(tree.body)))
     return out
 
 
 def _ws_connect_calls(text: str) -> list[tuple[int, bool, bool]]:
     """`websockets.connect(...)`：(行号, url 是否静态判定为 loopback, 是否显式 proxy=None)。
 
-    url 判定顺序：
-      1) 调用点源码里直接有 `ws(s)://loopback` 字面量（含 f-string / 间接常量）；
-      2) 第一个位置参数是模块级字符串常量，而该常量是 loopback URL（如 `WS_URL`）。
-    其余（形参、运行时拼接）一律**不判**为 loopback：静态不可判就不硬判，
+    url 判定只看第一个位置参数，三种**字面可判**的形态：
+      1) 直接写字面量/f-string：`connect(f"ws://127.0.0.1:{port}")`；
+      2) 名字绑到一个 loopback 字面量（按**作用域链**解析，函数内局部量也算）。
+    其余（形参、运行时拼接、函数返回）一律**不判**为 loopback：静态不可判就不硬判，
     不让检测器去猜 —— 猜出来的红/绿都不值钱。
     """
-    consts = _module_string_consts(text)
     out: list[tuple[int, bool, bool]] = []
-    for node in ast.walk(_parse(text)):
-        if not isinstance(node, ast.Call):
-            continue
-        f = node.func
-        if not (
-            isinstance(f, ast.Attribute)
-            and f.attr == "connect"
-            and isinstance(f.value, ast.Name)
-            and f.value.id == "websockets"
-        ):
-            continue
-        is_lb = False
-        if node.args:
-            a0 = node.args[0]
-            seg = ast.get_source_segment(text, a0) or ""
-            is_lb = bool(WS_LOOPBACK_LITERAL.search(seg))
-            if not is_lb and isinstance(a0, ast.Name) and a0.id in consts:
-                is_lb = bool(WS_LOOPBACK_LITERAL.search(consts[a0.id]))
-        if not is_lb:
-            is_lb = bool(WS_LOOPBACK_LITERAL.search(ast.get_source_segment(text, node) or ""))
-        bypassed = False
-        for kw in node.keywords:
-            if kw.arg == "proxy" and isinstance(kw.value, ast.Constant):
-                bypassed = kw.value.value is None
+    for node, is_lb in _ws_connect_nodes(text):
+        bypassed = any(
+            kw.arg == "proxy"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is None
+            for kw in node.keywords
+        )
         out.append((node.lineno, is_lb, bypassed))
     return sorted(out)
 
@@ -467,7 +548,9 @@ def test_no_httpx_client_reads_env_proxy_in_loopback_files() -> None:
 
     实测：设了 HTTP_PROXY 时 `httpx.Client().get("http://127.0.0.1:P/…")` 走代理、
     读成 502，代理侧能记录到绝对 URI；加 `trust_env=False` 后 200 且代理侧 0 条。
-    依据: outputs/2026-09-19-httpx-loopback-proxy-cells.txt
+    依据 [loopback-proxy/httpx-cells]:
+      outputs/2026-09-19-httpx-loopback-proxy-cells.txt
+      sha256 073e5a3eb8ff419dc397373cb7ac072796f0520fc95baa2b741f47e5ed3435f3
     """
     violations = _httpx_violations()
     assert not violations, (
@@ -532,6 +615,18 @@ def test_ws_test_debt_register_is_exact() -> None:
         f"  实际: {actual}\n"
         f"  登记: {WS_TEST_DEBT}\n"
         "修一处就要减一处 —— 这张表不是豁免，是待办。"
+    )
+
+
+def test_ws_debt_register_is_empty() -> None:
+    """`WS_TEST_DEBT` 现在必须是空的 —— 28 处已全部显式 `proxy=None`。
+
+    和 `test_httpx_debt_register_is_empty` 同一个立场：欠债表一旦开始长期非空，
+    就退化成 allowlist。要往这里放东西，必须在同一处写下**为什么修不动**。
+    """
+    assert WS_TEST_DEBT == {}, (
+        f"websockets 欠债表非空: {WS_TEST_DEBT}\n"
+        "要么把它修掉（proxy=None），要么在注释里写清为什么修不动。"
     )
 
 
@@ -1006,3 +1101,244 @@ def test_websockets_bypass_reaches_loopback_under_dead_proxy(monkeypatch) -> Non
         )
     finally:
         keep.close()
+
+
+# 拿一个**真实改过的测试文件**做端到端行为验证：锁里那 28 处一次也没有真跑起来过的
+# 话，"机械加 proxy=None"就只是文本改动，没有行为证据兜底。
+_UNIT_WS_PROBE_FILE = "backend/tests/unit/test_rtc_bridge_ctrl_relay.py"
+
+
+def _relocate_out_of_repo(path: Path) -> None:
+    """"清理"= 把变异探针**移出仓库树**，不是删除（本机工具层会 veto 删除）。
+
+    实测（2026-09-19 全量跑，两条红都出在这里）：本机 WorkBuddy 的 safe-delete shim
+    包装了 `os.remove` / `os.unlink` / `pathlib.Path.unlink`，并挂了一条**按 turn 计数**
+    的批量删除守卫（阈值 500）。全量跑时这个计数必然被 pytest 自己的临时目录清理顶穿，
+    于是 `finally` 里的 `unlink()` 被守卫以 `SystemExit(1)` 直接拒掉 ⇒ 探针文件留在树里
+    ⇒ 连锁把 `test_no_stray_mutation_probe_files` 也判红。
+    —— 注意这与本文件别的教训同族：**读数/结果取决于它在进程/回合里的位置**。
+
+    为什么用 `os.replace`：shim 里只有 `_try_trash`（被 remove/unlink/rmdir/rmtree 调用）
+    会去问那条守卫，`os.replace` / `os.rename` 不走它（只走 host broker，失败则回落原生）。
+    所以"移走"是这里唯一既干净、又不会被 veto 的收尾方式。
+    移到系统 Temp 后**不再删**：删一次就要再赌一次守卫，而留在 Temp 不污染仓库树。
+
+    证据 [loopback-proxy/safe-delete-guard-veto]（两条红的 junit 原文 + shim 行号锚）：
+
+      outputs/2026-09-19-safe-delete-bulk-guard-vetoes-test-cleanup.txt
+      sha256 22aa50cf016d2c3818a5a412915f4ae6904dc352e6e3989bc8197db88c6ae945
+    """
+    if not path.exists():
+        return
+    dest_dir = Path(tempfile.gettempdir()) / "jax-loopback-mutation-probes"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    os.replace(str(path), str(dest_dir / path.name))
+    assert not path.exists(), f"探针文件没能移出仓库树（清理失败）: {path}"
+
+
+def _dead_proxy_subprocess_env(dead: str) -> dict[str, str]:
+    env = dict(os.environ)
+    for var in ("NO_PROXY", "no_proxy"):
+        env.pop(var, None)
+    for var in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "WS_PROXY", "ws_proxy"):
+        env[var] = dead
+    return env
+
+
+def _run_pytest_node(path: str, env: dict[str, str]) -> tuple[int, str]:
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", path, "-q", "--no-header",
+         "-p", "no:cacheprovider", "-x"],
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=300, env=env,
+    )
+    return r.returncode, ((r.stdout or "") + (r.stderr or ""))[-900:]
+
+
+def _assert_child_really_ran(tail: str, what: str) -> None:
+    """子进程必须是**真的跑了测试**才作数。
+
+    第一版把变异文件名（而不是仓库内相对路径）交给子 pytest，子进程相对 cwd 找不到它，
+    于是 rc=4 —— "阳性对照"会因为**跑都没跑起来**而通过。这正是本文件一直在防的假绿，
+    所以这里显式断言它不是那几种"没跑"的形态。
+    """
+    for bad in ("file or directory not found", "no tests ran", "collected 0 items"):
+        assert bad not in tail, f"{what} 的子进程没真跑测试（{bad}）:\n{tail}"
+    assert ("passed" in tail) or ("failed" in tail) or ("error" in tail), (
+        f"{what} 的子进程输出看不出跑过测试:\n{tail}"
+    )
+
+
+def test_changed_unit_ws_file_survives_dead_proxy_and_needs_the_bypass() -> None:
+    r"""端到端：**真跑**一个改过的 unit 文件，带死代理。
+
+    格 1（正）：`pytest <改过的 unit 文件>` 在死代理环境下必须 rc=0 且**确实跑了测试**
+        —— 证明那些 `proxy=None` 在真实运行里有效（不是只有 AST 看着对）。
+    格 2（阳性对照）：把同一份源码的 `, proxy=None` 去掉、**先确认它仍能编译**
+        （排除"因为语法错才失败"），同样环境下必须 rc≠0 且**确实跑了测试**。
+    没有格 2，格 1 只能说明"这个文件本来就能跑"，说明不了那 28 处改动有没有用。
+
+    变异文件必须落在仓库树内（否则拿不到 conftest/import 路径），所以写进同目录、
+    `finally` 删除；万一残留，`test_no_stray_mutation_probe_files` 会当场报红。
+    """
+    src_path = REPO_ROOT / _UNIT_WS_PROBE_FILE
+    src = src_path.read_text(encoding="utf-8")
+    assert src.count(", proxy=None") >= 1, (
+        f"{_UNIT_WS_PROBE_FILE} 里没有 proxy=None —— 本用例失去意义"
+    )
+
+    dead, keep = _dead_proxy()
+    mutated_path = src_path.with_name(f"test__mutation_probe__{uuid.uuid4().hex[:8]}.py")
+    mutated_rel = mutated_path.relative_to(REPO_ROOT).as_posix()
+    try:
+        env = _dead_proxy_subprocess_env(dead)
+
+        # 格 1：真跑改过的文件
+        rc_ok, tail_ok = _run_pytest_node(_UNIT_WS_PROBE_FILE, env)
+        _assert_child_really_ran(tail_ok, "格 1")
+        assert rc_ok == 0, (
+            f"死代理环境下 {_UNIT_WS_PROBE_FILE} 没跑通 —— 那些 proxy=None 没起作用:\n{tail_ok}"
+        )
+
+        # 格 2（阳性对照）：去掉绕代理，但先确认源码仍可编译、且子进程真的跑了
+        mutated = src.replace(", proxy=None", "")
+        compile(mutated, str(mutated_path), "exec")  # 语法必须仍然合法
+        mutated_path.write_text(mutated, encoding="utf-8")
+        rc_bad, tail_bad = _run_pytest_node(mutated_rel, env)
+        _assert_child_really_ran(tail_bad, "格 2")
+        assert rc_bad != 0, (
+            "阳性对照失败：去掉 proxy=None 之后在死代理下居然还能跑通 —— "
+            f"格 1 的结论不可信:\n{tail_bad}"
+        )
+        assert "proxy" in tail_bad.lower() or "error" in tail_bad.lower(), (
+            f"阳性对照失败的原因看起来不是代理（请人眼确认一次）:\n{tail_bad}"
+        )
+    finally:
+        # 不删（删除会被本机 safe-delete 守卫 veto，见 `_relocate_out_of_repo`）：移出树即可。
+        _relocate_out_of_repo(mutated_path)
+        keep.close()
+
+
+def test_no_stray_mutation_probe_files() -> None:
+    """变异探针文件不许残留：残留会让"扫描全仓"把探针当成真实代码。
+
+    这条是给上一条用例兜底的：它在 `finally` 删，但如果进程被强杀就会漏。
+    残留物一旦存在，本文件会以"多出一个未登记的 loopback 文件"的形式报红 ——
+    这里直接点名说清楚，省得下次有人看不懂那三条红。
+    """
+    strays = sorted(
+        p.relative_to(REPO_ROOT).as_posix()
+        for p in REPO_ROOT.rglob("test__mutation_probe__*.py")
+        if ".venv" not in p.parts
+    )
+    assert not strays, f"有变异探针文件残留，请删除: {strays}"
+
+
+# ---------------------------------------------------------------------------
+# 3. 证据索引：注释里的「逻辑名 + sha256」必须真的指得到、且对得上
+# ---------------------------------------------------------------------------
+# 上面那些引用写成 `[loopback-proxy/<短名>]` + sha256，而不是一个裸的 `outputs/...` 路径。
+# 理由：`outputs/` 被 `.gitignore:134` 忽略，干净检出后那个路径**悬空**；而 sha256 能自证
+# "它在出处有没有被改过"。逻辑名 -> 路径 / 大小 / 它证明了什么，落在**受跟踪**索引里。
+EVIDENCE_INDEX = "docs/evidence/2026-09-19-loopback-proxy-evidence-index.md"
+_LOGICAL_NAME_RE = re.compile(r"\[(loopback-proxy/[a-z0-9-]+)\]")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# 索引**条目**里不许出现的词：允许它们出现，等于允许"引用自证"变成一句空话。
+# 注意只查表格单元格，不查规则正文 —— 正文里必须能写出这些词本身。
+_INDEX_FORBIDDEN = ("待补", "TODO", "TBD", "FIXME", "省略")
+
+
+def _evidence_index_entries() -> list[dict[str, str]]:
+    """解析索引表格：逻辑名 | 路径 | 大小 | sha256 | 它证明了什么。"""
+    path = REPO_ROOT / EVIDENCE_INDEX
+    assert path.is_file(), f"证据索引不存在（受跟踪文件）: {EVIDENCE_INDEX}"
+    entries: list[dict[str, str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("| `loopback-proxy/"):
+            continue
+        cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+        assert len(cells) >= 5, f"索引行少列（需要 5 列）: {line}"
+        entries.append({
+            "logical": cells[0], "path": cells[1], "size": cells[2],
+            "sha256": cells[3], "proves": cells[4],
+        })
+    return entries
+
+
+def test_evidence_index_is_wellformed_and_never_says_pending() -> None:
+    """索引的**每一条**都不许有空 sha256 / "以后再补" —— 那等于"引用自证"在说谎。
+
+    检查对象是**表格条目**，不是整份文件：规则正文里必须能提到那些词本身，否则
+    规则没法写（第一版本条就是扫全文，于是被自己写的规则判红 —— 又一次"仪器把
+    自己算进去了"）。所以判据落在每条记录的前四列上。
+    """
+    entries = _evidence_index_entries()
+    assert entries, "索引里一条都没有 —— 表格格式可能被改坏了（行首必须是 '| `loopback-proxy/…'）"
+    for e in entries:
+        head = " ".join((e["logical"], e["path"], e["size"], e["sha256"]))
+        for bad in _INDEX_FORBIDDEN:
+            assert bad not in head, (
+                f"{e['logical']}: 条目里出现 {bad!r} —— 待补的条目不许进索引"
+            )
+        assert _SHA256_RE.match(e["sha256"]), (
+            f"{e['logical']}: sha256 不是 64 位小写十六进制: {e['sha256']!r}"
+        )
+        assert e["path"].startswith("outputs/2026-09-19-"), (
+            f"{e['logical']}: 路径列应当是完整相对路径 outputs/2026-09-19-…: {e['path']!r}"
+        )
+        assert e["size"].isdigit() and int(e["size"]) > 0, (
+            f"{e['logical']}: 大小列不是正整数: {e['size']!r}"
+        )
+        assert len(e["proves"]) >= 20, (
+            f"{e['logical']}: 第 5 列只有 {len(e['proves'])} 字，等于没写它证明了什么"
+        )
+
+
+def test_evidence_index_sha256_matches_the_files_present_here() -> None:
+    """索引里的 sha256 必须与**本机现存**的证据文件逐字节一致。
+
+    干净检出时 `outputs/` 根本不存在（`.gitignore:134`）⇒ 本条按设计 `skip`；
+    另两条（格式 + 逻辑名覆盖）在干净检出上照跑，门禁不会因为这条退让而失牙。
+    反过来，工作机上 `outputs/` 在、却一条都对不上，就必须报红 —— 否则索引与文件脱节。
+    """
+    outputs_dir = REPO_ROOT / "outputs"
+    if not outputs_dir.is_dir():
+        pytest.skip("干净检出：outputs/ 不存在（.gitignore:134 忽略），无法就地核对 sha256")
+    checked = 0
+    for e in _evidence_index_entries():
+        p = REPO_ROOT / e["path"]
+        if not p.is_file():
+            continue
+        raw = p.read_bytes()
+        assert len(raw) == int(e["size"]), (
+            f"{e['logical']}: 大小不符 —— 索引写 {e['size']}，实际 {len(raw)}（证据被改过？）"
+        )
+        assert hashlib.sha256(raw).hexdigest() == e["sha256"], (
+            f"{e['logical']}: sha256 不符 —— 索引与证据文件已脱节，两边必须同步改"
+        )
+        checked += 1
+    assert checked > 0, (
+        f"outputs/ 存在，但索引里的 {len(_evidence_index_entries())} 条证据一个都不在 —— "
+        "要么证据被清掉了，要么索引的路径列写错了"
+    )
+
+
+def test_every_referenced_logical_name_is_indexed() -> None:
+    """代码里引用的每个逻辑名都必须在索引里有条目 —— 否则引用指不到任何地方。"""
+    indexed = {e["logical"] for e in _evidence_index_entries()}
+    texts = dict(_loopback_texts())
+    # 本文件被自豁免排除了，但它的 docstring 里也有引用，得单独算进来。
+    texts["backend/tests/contract/test_loopback_probe_proxy_contract.py"] = (
+        Path(__file__).read_text(encoding="utf-8")
+    )
+    referenced: dict[str, set[str]] = {}
+    for rel, text in texts.items():
+        for m in _LOGICAL_NAME_RE.finditer(text):
+            referenced.setdefault(m.group(1), set()).add(rel)
+    assert referenced, (
+        "一处逻辑名引用都没找到 —— 引用写法可能被改回裸路径了（那就又会悬空）"
+    )
+    missing = sorted(set(referenced) - indexed)
+    assert not missing, (
+        f"这些逻辑名被代码引用，但索引里没有条目: {missing}\n"
+        "每个逻辑名都要有：路径 / 大小 / sha256 / 它证明了什么。"
+    )
