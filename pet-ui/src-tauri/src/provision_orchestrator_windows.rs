@@ -18,7 +18,7 @@ use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
+    WaitForSingleObject, CREATE_NO_WINDOW, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
     PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 pub struct WindowsProvisionTransport;
@@ -169,6 +169,14 @@ impl ChildProcess {
         startup.lpAttributeList = attributes.pointer;
         let mut info = PROCESS_INFORMATION::default();
         let inherit_handles = true;
+        // 2026-09-19 弹窗修复：与 sidecar.rs spawn 同口径，这里也强制 CREATE_NO_WINDOW。
+        // 今天 provision_sidecar_credential.exe 是 GUI 子系统，单靠子系统就够；
+        // 但 std 不会隐式补这个 flag，helper 一旦被翻成 console 子系统（CUI），
+        // GUI 父进程拉起的 CUI 子进程就会在客户桌面上弹命令窗——那是本 claim 的风险本身。
+        // 显式带上 CREATE_NO_WINDOW，让「无弹窗」由构造保证，而不是靠子系统巧合。
+        // EXTENDED_STARTUPINFO_PRESENT 必须保留：STARTUPINFOEXW.lpAttributeList 的
+        // 句柄白名单（PROC_THREAD_ATTRIBUTE_HANDLE_LIST）依赖它才生效。
+        let creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW;
         unsafe {
             CreateProcessW(
                 PCWSTR(helper.as_ptr()),
@@ -176,7 +184,7 @@ impl ChildProcess {
                 None,
                 None,
                 inherit_handles,
-                EXTENDED_STARTUPINFO_PRESENT,
+                creation_flags,
                 None,
                 PCWSTR::null(),
                 &startup.StartupInfo,
