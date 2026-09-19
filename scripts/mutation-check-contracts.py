@@ -98,6 +98,44 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
      "    result = verify_claims(\n        policy=policy,",
      '    result = {"verdict": "pass", "errors": []}  # MUTATED: 硬编码放行\n    _ignored = verify_claims(\n        policy=policy,',
      "release_blockers"),
+
+    # ---- 2026-09-19 PE 子系统门禁（claim windows-popup-free）----
+    # 这个脚本此前是**假门禁**：--expect-gui 是装饰参数、扫描非递归、没有机器标记，
+    # 于是"顶层 5 个 exe 全 GUI"被当成"产品无 CUI"。下面三个变异分别把三类缺陷
+    # 退回去，守护测试 backend/tests/contract/test_pe_subsystem_gate_contract.py
+    # 必须变红（隔离树实测 3/3 捕获）。
+    ("PE 门禁判定恒真（永远 PASS ⇒ 门禁无法变红）",
+     "scripts/pe-subsystem-verify.py",
+     "    if non_gui == 0:",
+     "    if True:  # MUTATED: 永远 PASS",
+     "pe_subsystem_gate"),
+
+    ("PE 排除清单退回深度不限（会把随包 resources 的 CUI 一起剪掉 ⇒ 假绿）",
+     "scripts/pe-subsystem-verify.py",
+     "if prune_root_children and at_root and d in CARGO_ARTIFACT_DIRS:",
+     "if prune_root_children and d in CARGO_ARTIFACT_DIRS:  # MUTATED",
+     "pe_subsystem_gate"),
+
+    ("PE 模式检查被去掉（--expect-gui 退回装饰参数 ⇒ 输入口径不设防）",
+     "scripts/pe-subsystem-verify.py",
+     "    if args.expect_gui == args.report_only:",
+     "    if False:  # MUTATED: 模式不再必需，退回初版装饰参数",
+     "pe_subsystem_gate"),
+
+    # ---- legacy watchdog 计划任务清理的静态锁（同一 claim）----
+    # 清理逻辑在 pet-ui/src-tauri/installer/o018-installer-hooks.nsh，由
+    # scripts/verify-o018-installer-contract.py 的 5 条新 check 锁住。
+    ("安装器 legacy 清理改回 NSIS 内建 Exec（会给 CUI 子进程分配可见控制台）",
+     "pet-ui/src-tauri/installer/o018-installer-hooks.nsh",
+     "nsExec::ExecToLog '\"$SYSDIR", "Exec '\"$SYSDIR",
+     "o018_installer_contract"),
+
+    ("安装器 legacy 清理挪到 fail-closed Abort 之后（安装中止时不再清理）",
+     "pet-ui/src-tauri/installer/o018-installer-hooks.nsh",
+     '  !insertmacro JAX_LEGACY_WATCHDOG_TASK_CLEANUP\n\n'
+     '  DetailPrint "Provisioning sidecar credential (O-018 slice 2)..."',
+     '  DetailPrint "Provisioning sidecar credential (O-018 slice 2)..."',
+     "o018_installer_contract"),
 ]
 
 
