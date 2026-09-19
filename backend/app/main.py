@@ -166,6 +166,8 @@ def _build_secured_session_router(store=None):
         hello_certificate_binding=hello_runtime.certificate_binding,
         hello_gateway_assertion_hash=hello_runtime.gateway_assertion_hash,
         user_sig_cipher=user_sig_cipher,
+        # 外带上行 ingest ticket：与 hello 同一把私钥（aud 区分），不新增密钥材料。
+        ingest_ticket_signer=hello_runtime.ingest_signer,
     )
     secured_router.include_router(create_agent_thread_router(
         registry=AgentThreadRegistry(), validator=validator,

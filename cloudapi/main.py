@@ -183,6 +183,11 @@ secured_router = create_secured_voice_router(
     hello_gateway_assertion_hash=(
         hello_runtime.gateway_assertion_hash if hello_runtime is not None else ""
     ),
+    # 外带上行 ingest ticket 签发器：与 hello 同一把私钥（aud 区分），不新增密钥材料。
+    # 装配在此即生效的前提是 hello 运行时可用；未装配时端点返回 503（惰性，不外泄语义）。
+    ingest_ticket_signer=(
+        hello_runtime.ingest_signer if hello_runtime is not None else None
+    ),
     # privacy 用容器内默认（no-op actions）
 )
 

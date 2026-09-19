@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 class SecuredVoiceDeps:
     def __init__(self, store, service, validator, nonces, limiter, security, devices,
-                 privacy: PrivacyService, hello_service, user_sig_cipher=None) -> None:
+                 privacy: PrivacyService, hello_service, user_sig_cipher=None,
+                 ingest_ticket_signer=None) -> None:
         self.store = store
         self.service = service
         self.validator = validator
@@ -27,6 +28,9 @@ class SecuredVoiceDeps:
         self.security = security
         self.devices = devices
         self.privacy = privacy
+        # 外带上行 ingest ticket 签发器（用 hello 同一把私钥，aud 区分）。
+        # 未装配 → 端点 503，绝不静默降级。
+        self.ingest_ticket_signer = ingest_ticket_signer
         self.sidecar_sign = (
             SidecarSignService(store.pending_sessions, service, hello_service)
             if hello_service is not None else None

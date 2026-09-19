@@ -21,7 +21,7 @@ def create_secured_voice_router(
     nonces: NonceService, limiter: RateLimiter, security: VoiceSecurityConfig,
     devices=None, privacy: PrivacyService | None = None, hello_service=None,
     hello_certificate_binding: str = "", hello_gateway_assertion_hash: str = "",
-    user_sig_cipher=None,
+    user_sig_cipher=None, ingest_ticket_signer=None,
 ) -> APIRouter:
     production_gate(security)
     if privacy is None:
@@ -30,6 +30,9 @@ def create_secured_voice_router(
         store, service, validator, nonces, limiter, security,
         devices, privacy, hello_service,
         user_sig_cipher=user_sig_cipher,
+        # 外带上行 ingest ticket 签发器（hello 同一把密钥，aud 区分）。
+        # 不传 = 端点 503（惰性装配，见 routes_voice_ingest_ticket.py）。
+        ingest_ticket_signer=ingest_ticket_signer,
     )
     router = APIRouter(tags=["voice"])
 
@@ -65,4 +68,9 @@ def create_secured_voice_router(
     ))
     router.include_router(build_session_router(deps))
     router.include_router(build_status_stream_router(deps))
+
+    # 外带上行取票端点：无条件挂载。未装配签名器时端点自身返回 503——
+    # 这样「端点存在但不可用」是显式的，不会退化成 404（那会被误读成「没这个功能」）。
+    from .routes_voice_ingest_ticket import build_ingest_ticket_router
+    router.include_router(build_ingest_ticket_router(deps))
     return router
