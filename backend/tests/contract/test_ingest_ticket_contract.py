@@ -32,8 +32,11 @@ from app.api.routes_voice_secured import create_secured_voice_router
 from app.voice.auth import CredentialValidator
 from app.voice.config import VoiceSecurityConfig, build_sidecar_credential_hashes
 from app.voice.hello_proof import (
-    HELLO_KID, HelloProofError, HelloProofSigner, verify_hello_proof,
+    HELLO_KID, ISSUER, HelloProofError, HelloProofSigner, verify_hello_proof,
 )
+# 模块级导入：下面 _ingest_claims 等模块级 helper 需要它。若该模块缺失，本文件在
+# **收集期**就红（比 fixture 期更早），这比把 import 藏进函数体更符合 RED-first。
+from app.voice.ingest_ticket import INGEST_AUDIENCE
 from app.voice.nonce import NonceService
 from app.voice.rate_limit import RateLimitConfig, RateLimiter
 from app.voice.rtc_session import RtcSessionConfig, RtcSessionService
@@ -232,25 +235,58 @@ def test_ingest_ticket_is_not_accepted_as_hello_proof(fx: IngestFixture) -> None
         verify_hello_proof(ticket, fx.public_pem)
 
 
-def _forge(fx: IngestFixture, *, audience: str, ttl_seconds: int, now: int) -> str:
+def _sign_claims(fx: IngestFixture, claims: dict, *,
+                 key_pem: str | None = None,
+                 header: dict | None = None) -> str:
+    """用真实（或指定的）私钥签任意声明 dict，供逐判据隔离测试使用。"""
+    import jwt as pyjwt
+
+    return pyjwt.encode(
+        claims, key_pem or fx.private_pem, algorithm="EdDSA",
+        headers=header or {"alg": "EdDSA", "typ": "JWT", "kid": HELLO_KID},
+    )
+
+
+def _ingest_claims(*, audience: object = None, ttl_seconds: int = 300,
+                   now: int | None = None, **overrides: object) -> dict:
+    """一枚「形状全对」的 ingest 声明集；各项可单独覆盖/删除。
+
+    默认值与 _REQUIRED_CLAIMS 对齐，因此除被测的那一条外没有别的拒签理由。
+    """
+    now = int(time.time()) if now is None else now
+    claims: dict = {
+        "iss": ISSUER,
+        "aud": INGEST_AUDIENCE if audience is None else audience,
+        "jti": uuid.uuid4().hex,
+        "sid": "s-forged", "did": DEVICE_A, "rid": f"jax-{DEVICE_A}", "gen": 0,
+        "iat": now, "exp": now + ttl_seconds,
+    }
+    for key, value in overrides.items():
+        if value is _DROP:
+            claims.pop(key, None)
+        else:
+            claims[key] = value
+    return claims
+
+
+class _Drop:
+    """覆盖时用它表示「删掉这个声明」。"""
+
+    def __repr__(self) -> str:  # pragma: no cover - 仅调试可读性
+        return "<DROP>"
+
+
+_DROP = _Drop()
+
+
+def _forge(fx: IngestFixture, *, audience: object, ttl_seconds: int, now: int) -> str:
     """用**真实私钥**手工签一枚 token，用于把单一判据隔离出来测。
 
     声明形状与 ingest ticket 完全一致（sid/did/rid/gen/jti 齐全、TTL 可控），
     因此除了被测的那一条（aud 或 TTL），没有任何其他理由该被拒。
     """
-    import jwt as pyjwt
+    return _sign_claims(fx, _ingest_claims(audience=audience, ttl_seconds=ttl_seconds, now=now))
 
-    return pyjwt.encode(
-        {
-            "iss": "commercial-control-plane",
-            "aud": audience,
-            "jti": uuid.uuid4().hex,
-            "sid": "s-forged", "did": DEVICE_A, "rid": f"jax-{DEVICE_A}", "gen": 0,
-            "iat": now, "exp": now + ttl_seconds,
-        },
-        fx.private_pem, algorithm="EdDSA",
-        headers={"alg": "EdDSA", "typ": "JWT", "kid": HELLO_KID},
-    )
 
 
 def test_ingest_shaped_token_with_hello_audience_is_rejected(fx: IngestFixture) -> None:
@@ -263,6 +299,23 @@ def test_ingest_shaped_token_with_hello_audience_is_rejected(fx: IngestFixture) 
 
     now = int(time.time())
     forged = _forge(fx, audience="rtc_bridge", ttl_seconds=300, now=now)
+
+    with pytest.raises(IngestTicketError) as exc:
+        verify_ingest_ticket(forged, fx.public_pem, now=now)
+    assert exc.value.code == 40111
+
+
+def test_audience_as_list_containing_the_right_value_is_rejected(fx: IngestFixture) -> None:
+    """**精确相等，不是集合成员**：aud 写成 ["rtc_bridge_ingest"] 也必须拒。
+
+    这是 M1 教训的正面钉子。JWT 的 aud 允许是数组，而 PyJWT 的 `audience=` 语义正是
+    「集合内任一匹配」——若沿用库语义，这条会**被接受**。我们把库校验关掉改成 `!=`，
+    换来的就是它必须被拒。这条一旦变红，说明有人把精确比对退回了成员判定。
+    """
+    from app.voice.ingest_ticket import INGEST_AUDIENCE, IngestTicketError, verify_ingest_ticket
+
+    now = int(time.time())
+    forged = _sign_claims(fx, _ingest_claims(audience=[INGEST_AUDIENCE], now=now))
 
     with pytest.raises(IngestTicketError) as exc:
         verify_ingest_ticket(forged, fx.public_pem, now=now)
@@ -421,3 +474,187 @@ def test_router_still_assembles_without_ingest_signer(tmp_path: Path) -> None:
     """可选装配不得破坏既有路由（回归护栏）。"""
     unfitted = IngestFixture(tmp_path, with_signer=False)
     assert unfitted.client.get("/api/v1/voice/status", headers=unfitted.auth_headers()).status_code in (200, 503)
+
+
+# --------------------------------------- 7. 验签侧 fail-closed 分支覆盖（阶段 2）
+#
+# 这一节是**桥侧验签**（verify_ingest_ticket，纯函数、无 store）的契约。它是惰性的：
+# 没有任何实时路径调用它，下面的 test_verifier_is_not_wired_into_any_live_path
+# 把「惰性」从承诺变成被测试钉住的不变式。
+
+def test_ticket_matching_expected_session_id_is_accepted(fx: IngestFixture) -> None:
+    """正向对照：会话绑定**恰好匹配**时必须放行。
+
+    没有这条，一个「把什么都拒掉」的过度绑定实现也能让下面所有负向测试变绿——
+    这正是本仓库反复踩的「假绿」形态，负向断言必须有正向对照。
+    """
+    from app.voice.ingest_ticket import verify_ingest_ticket
+
+    session = fx.create_session()
+    ticket = fx.request_ticket(session["session_id"]).json()["data"]["ticket"]
+
+    claims = verify_ingest_ticket(
+        ticket, fx.public_pem, expected_session_id=session["session_id"],
+    )
+    assert claims["sid"] == session["session_id"]
+
+
+def test_ticket_without_aud_is_rejected(fx: IngestFixture) -> None:
+    """承重：aud 缺失必须拒。缺 aud 的票在语义上根本不是本类凭证。"""
+    from app.voice.ingest_ticket import IngestTicketError, verify_ingest_ticket
+
+    now = int(time.time())
+    forged = _sign_claims(fx, _ingest_claims(aud=_DROP, now=now))
+
+    with pytest.raises(IngestTicketError) as exc:
+        verify_ingest_ticket(forged, fx.public_pem, now=now)
+    assert exc.value.code == 40111
+
+
+def test_ticket_signed_by_a_different_key_is_rejected(fx: IngestFixture) -> None:
+    """承重：**换一把私钥**签的票必须拒（签名校验真的在跑，不是只看形状）。
+
+    形状与真票逐字段相同，唯一差别是签名者。若这条绿着，说明验签只看声明不看签名。
+    """
+    from app.voice.ingest_ticket import IngestTicketError, verify_ingest_ticket
+
+    other_private_pem, _ = _pems()
+    now = int(time.time())
+    forged = _sign_claims(fx, _ingest_claims(now=now), key_pem=other_private_pem)
+
+    with pytest.raises(IngestTicketError) as exc:
+        verify_ingest_ticket(forged, fx.public_pem, now=now)
+    assert exc.value.code == 40111
+
+
+def test_ticket_signed_by_the_hello_key_still_verifies(fx: IngestFixture) -> None:
+    """对照：同一把 hello 私钥签的**同形**声明可以验过。
+
+    与上一条成对：证明上一条红是因为密钥不对，不是因为 helper 本身签坏了。
+    """
+    from app.voice.ingest_ticket import verify_ingest_ticket
+
+    now = int(time.time())
+    good = _sign_claims(fx, _ingest_claims(now=now))
+
+    assert verify_ingest_ticket(good, fx.public_pem, now=now)["aud"] == "rtc_bridge_ingest"
+
+
+def test_tampered_ticket_payload_is_rejected(fx: IngestFixture) -> None:
+    """改写 payload（如把 sid 换掉）但保留原签名 ⇒ 必须拒。
+
+    这是「拿到票之后改内容」的最直接攻击面，也顺带证明 sid 绑定不能靠改 JSON 绕开。
+    """
+    import base64
+    import json
+
+    from app.voice.ingest_ticket import IngestTicketError, verify_ingest_ticket
+
+    session = fx.create_session()
+    ticket = fx.request_ticket(session["session_id"]).json()["data"]["ticket"]
+    header_b64, payload_b64, signature_b64 = ticket.split(".")
+    payload = json.loads(
+        base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4))
+    )
+    payload["sid"] = "s-tampered"
+    forged_payload = base64.urlsafe_b64encode(
+        json.dumps(payload).encode()
+    ).rstrip(b"=").decode()
+    tampered = f"{header_b64}.{forged_payload}.{signature_b64}"
+
+    with pytest.raises(IngestTicketError) as exc:
+        verify_ingest_ticket(tampered, fx.public_pem, expected_session_id="s-tampered")
+    assert exc.value.code == 40111
+
+
+@pytest.mark.parametrize("dead", ["", "not-a-jwt", "a.b.c", "....", "eyJhbGciOiJIUzI1NiJ9"])
+def test_malformed_ticket_is_rejected(fx: IngestFixture, dead: str) -> None:
+    """畸形输入一律 40111，且**不抛裸异常**（验签方是 fail-closed 边界）。"""
+    from app.voice.ingest_ticket import IngestTicketError, verify_ingest_ticket
+
+    with pytest.raises(IngestTicketError) as exc:
+        verify_ingest_ticket(dead, fx.public_pem)
+    assert exc.value.code == 40111
+
+
+def test_ticket_with_foreign_header_is_rejected(fx: IngestFixture) -> None:
+    """header 必须**逐字段**等于本族 header（alg/typ/kid）。
+
+    换个 kid 就说明这不是我们这一代的票——轮换期尤其要挡住「上一代密钥签的票」混进来。
+    """
+    from app.voice.ingest_ticket import IngestTicketError, verify_ingest_ticket
+
+    now = int(time.time())
+    forged = _sign_claims(
+        fx, _ingest_claims(now=now),
+        header={"alg": "EdDSA", "typ": "JWT", "kid": "cp-hello-ed25519-v2"},
+    )
+
+    with pytest.raises(IngestTicketError) as exc:
+        verify_ingest_ticket(forged, fx.public_pem, now=now)
+    assert exc.value.code == 40111
+
+
+@pytest.mark.parametrize("key", ["sid", "did", "rid", "jti"])
+def test_missing_string_claim_is_rejected(fx: IngestFixture, key: str) -> None:
+    """承重：sid/did/rid/jti 缺失即拒（会话绑定与可追溯性都依赖它们）。"""
+    from app.voice.ingest_ticket import IngestTicketError, verify_ingest_ticket
+
+    now = int(time.time())
+    forged = _sign_claims(fx, _ingest_claims(now=now, **{key: _DROP}))
+
+    with pytest.raises(IngestTicketError) as exc:
+        verify_ingest_ticket(forged, fx.public_pem, now=now)
+    assert exc.value.code == 40111
+
+
+@pytest.mark.parametrize("value", [12345, None, ["sid"], {"a": 1}])
+def test_non_string_sid_is_rejected(fx: IngestFixture, value: object) -> None:
+    """sid 必须是**非空字符串**：类型混淆会让 `claims["sid"] != expected` 静默成立或报错。"""
+    from app.voice.ingest_ticket import IngestTicketError, verify_ingest_ticket
+
+    now = int(time.time())
+    forged = _sign_claims(fx, _ingest_claims(now=now, sid=value))
+
+    with pytest.raises(IngestTicketError) as exc:
+        verify_ingest_ticket(forged, fx.public_pem, now=now)
+    assert exc.value.code == 40111
+
+
+def test_ticket_issued_in_the_future_is_rejected(fx: IngestFixture) -> None:
+    """iat 晚于当前时刻 ⇒ 拒（控制面时钟错乱或伪造的时序凭证）。"""
+    from app.voice.ingest_ticket import IngestTicketError, verify_ingest_ticket
+
+    now = int(time.time())
+    forged = _sign_claims(fx, _ingest_claims(now=now, iat=now + 60, exp=now + 300))
+
+    with pytest.raises(IngestTicketError) as exc:
+        verify_ingest_ticket(forged, fx.public_pem, now=now)
+    assert exc.value.code == 40112
+
+
+def test_verifier_is_not_wired_into_any_live_path() -> None:
+    """把「惰性」变成被测试钉住的结构不变式，而不是一句承诺。
+
+    阶段 2 只交付**纯函数 + 契约测试**。一旦有人在实时路径里调用它（监听器、桥、
+    控制面），这条立刻变红——「不接线」就不能被后人无意破坏。
+    sidecar/ 不在扫描范围：Node 无法 import Python 符号。
+    """
+    repo = Path(__file__).resolve().parents[3]
+    defining = repo / "backend" / "app" / "voice" / "ingest_ticket.py"
+    live_roots = ("backend/app", "backend/rtc_bridge", "cloudapi", "cloudbridge", "scripts")
+    offenders: list[str] = []
+    for rel in live_roots:
+        base = repo / rel
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.py"):
+            if path == defining or "__pycache__" in path.parts:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:  # pragma: no cover - 权限边缘
+                continue
+            if "verify_ingest_ticket" in text:
+                offenders.append(str(path.relative_to(repo)))
+    assert not offenders, f"验签函数被接线到实时路径: {offenders}"
