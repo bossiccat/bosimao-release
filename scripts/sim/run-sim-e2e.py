@@ -164,7 +164,12 @@ def main() -> int:
         # 用来与手机侧"到达帧数"逐级对账 —— 判定音频是丢在我们这层还是模型本来就短。
         try:
             import urllib.request
-            with urllib.request.urlopen("http://127.0.0.1:19093/metrics", timeout=5) as resp:
+            # 探本机端口必须显式绕代理：裸 urlopen 会信任 HTTP_PROXY，把 127.0.0.1 也交给代理，
+            # 于是"桥是活的"被读成读取失败 ⇒ bridge_metrics=None ⇒ 下游 `or {}` ⇒ 字段整体缺失。
+            # 实测与契约锁：outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt、
+            # backend/tests/contract/test_loopback_probe_proxy_contract.py
+            _loopback_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with _loopback_opener.open("http://127.0.0.1:19093/metrics", timeout=5) as resp:
                 summary["bridge_metrics"] = json.loads(resp.read().decode("utf-8", "replace"))
             print("bridge /metrics =", json.dumps(summary["bridge_metrics"], ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001

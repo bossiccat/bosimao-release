@@ -53,6 +53,18 @@ import tls_material  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("jax-voice-bridge")
 
+# 探本机端口必须**显式绕代理**。
+#
+# 为什么：`urllib.request.urlopen` 用进程级全局 opener 且信任 `HTTP_PROXY`，设了代理时
+# 会把 `http://127.0.0.1:19093/...` 也交给代理 —— 于是**桥活着、`rtc_bridge_health` 却报死**。
+# 实测（代理侧记录到绝对 URI，活端口读成 `ERR HTTPError`）：
+#     outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt
+# 另一层原因：`urllib.request._opener` 是进程级全局，代理地址在**进程内第一次 urlopen**
+# 时被冻结，所以读数会依赖"进程里第一次 urlopen 发生在什么环境"。自己建 opener 顺带
+# 把这个不确定性一起消掉。
+# 契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
+LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 SERVER_ROOT = Path(__file__).resolve().parent.parent  # 容器内 = /srv
 BACKEND_DIR = SERVER_ROOT / "backend"
 SIDECAR_DIR = SERVER_ROOT / "sidecar"
@@ -587,7 +599,7 @@ class BridgeSupervisor:
 
     def _probe_bridge_health(self) -> str:
         try:
-            with urllib.request.urlopen(self.bridge_health_url, timeout=2) as resp:
+            with LOOPBACK_OPENER.open(self.bridge_health_url, timeout=2) as resp:
                 return "ok" if resp.status == 200 else f"http_{resp.status}"
         except Exception as exc:  # 探测失败只报类型，不阻断状态端点
             return type(exc).__name__

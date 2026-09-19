@@ -33,6 +33,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PORT = 8901
 BASE = f"http://127.0.0.1:{PORT}"
+# 探本机端口必须显式绕代理：裸 urlopen 信任 HTTP_PROXY，设了代理时会把 127.0.0.1 也交给
+# 代理，于是活端口读成死（就绪探测永远 False）。实测与契约锁：
+#   outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt
+#   backend/tests/contract/test_loopback_probe_proxy_contract.py
+LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 VENV_PY = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
 ENV_KEYS = (
     "VOICE_SIDECAR_CREDENTIAL",
@@ -89,7 +94,7 @@ class Instance:
 
     def health(self) -> bool:
         try:
-            with urllib.request.urlopen(f"{BASE}/health", timeout=2) as resp:
+            with LOOPBACK_OPENER.open(f"{BASE}/health", timeout=2) as resp:
                 return resp.status == 200
         except Exception:
             return False
@@ -114,7 +119,7 @@ def request_pending(credential: str, nonce: str | None = None) -> tuple[int, str
     req = urllib.request.Request(f"{BASE}/api/v1/voice/session/pending",
                                  headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with LOOPBACK_OPENER.open(req, timeout=5) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")

@@ -19,6 +19,13 @@ from pathlib import Path
 import urllib.request
 import urllib.error
 
+# 探本机端口必须显式绕代理：本脚本所有 HTTP 都是打 127.0.0.1 上的验证实例，而裸
+# urlopen 信任 HTTP_PROXY，设了代理时会把 127.0.0.1 也交给代理 —— 于是活端口读成死，
+# 40 次就绪重试全部失败，脚本报"启动失败"而其实服务是好的。
+# 实测与契约锁：outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt、
+# backend/tests/contract/test_loopback_probe_proxy_contract.py
+LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
 VENV_PY = Path(r"C:/Users/Administrator/WorkBuddy/监视app/.venv/Scripts/python.exe")
@@ -47,7 +54,7 @@ def http_post(url: str, body: dict, headers: dict) -> tuple[int, dict]:
         headers={"Content-Type": "application/json", **headers},
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with LOOPBACK_OPENER.open(req, timeout=10) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
@@ -92,7 +99,7 @@ def main() -> int:
         api_ready = False
         for _ in range(40):
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{API_PORT}/healthz", timeout=2) as r:
+                with LOOPBACK_OPENER.open(f"http://127.0.0.1:{API_PORT}/healthz", timeout=2) as r:
                     if r.status == 200:
                         api_ready = True
                         break
@@ -105,7 +112,7 @@ def main() -> int:
         health_body = ""
         for _ in range(40):
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{BRIDGE_HEALTH_PORT}/health", timeout=2) as r:
+                with LOOPBACK_OPENER.open(f"http://127.0.0.1:{BRIDGE_HEALTH_PORT}/health", timeout=2) as r:
                     health_body = r.read().decode("utf-8")
                     if r.status == 200:
                         bridge_ready = True
@@ -193,7 +200,7 @@ def main() -> int:
         ready2 = False
         for _ in range(40):
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{BRIDGE_HEALTH_PORT}/health", timeout=2) as r:
+                with LOOPBACK_OPENER.open(f"http://127.0.0.1:{BRIDGE_HEALTH_PORT}/health", timeout=2) as r:
                     if r.status == 200:
                         ready2 = True
                         break
