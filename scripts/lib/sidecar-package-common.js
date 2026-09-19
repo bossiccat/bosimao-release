@@ -30,9 +30,25 @@ const ELECTRON_REQUIRED = [
   'v8_context_snapshot.bin',
   'locales/en-US.pak',
 ];
+// sidecar 应用源码闭集：buildPackage 只把这份清单里的文件拷进 resources/app
+// （sidecar-package-build.js "for (const relative of APP_SOURCES)"），
+// verifyAppSourceSet 则用它当闭集判据。因此**清单里的每个名字都必须存在**，
+// 且 sidecar/ 顶层每个 .js 都必须在这里 —— 漏一个，随包 app 就会在运行期
+// require 失败；多一个不存在的，build 会在 SIDECAR_PACKAGE_APP_SOURCE_MISSING 中止。
+//
+// 2026-09-19 补齐 3 个漂移项（adev.js / downlink_pacer.js / resample.js）：
+// 它们分别被随包模块 require —— rtc.js:28 `require('./adev')`、
+// rtc.js:15 `require('./downlink_pacer')`、audio.js:19 `require('./resample')`，
+// 而 rtc.js / audio.js 都在这份清单里。三个文件都已在 git 中（add853d / 484eae2），
+// 只是清单没跟着更新。后果不是静默：verifyAppSourceSet 在本函数与 buildPackage
+// 的**第一步**执行，所以 `sidecar-verify` 锁在 HEAD 上就一直红着
+// （SIDECAR_PACKAGE_APP_SOURCE_SET_MISMATCH），发布路径整体被阻断。
+// 补齐是**纠正**而非放宽：清单本来就是"随包源码闭集"，不是可用可省的候选表。
 const APP_SOURCES = [
-  'audio.js', 'bridge.js', 'config.js', 'exit-protocol.js', 'index.html', 'intent-recovery.js', 'intent-selection.js', 'logger.js',
-  'main.js', 'phone.js', 'rtc-startup.js', 'rtc-termination.js', 'rtc-test-audio.js', 'rtc.js',
+  'adev.js', 'audio.js', 'bridge.js', 'config.js', 'downlink_pacer.js', 'exit-protocol.js',
+  'index.html', 'intent-recovery.js', 'intent-selection.js', 'logger.js',
+  'main.js', 'phone.js', 'resample.js', 'rtc-startup.js', 'rtc-termination.js',
+  'rtc-test-audio.js', 'rtc.js',
   'security.js',
   'package.json', 'package-lock.json',
 ];
