@@ -7,6 +7,7 @@ import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
+import android.os.Build
 import android.util.Log
 import com.jax.voice.util.DiagLog
 import com.tencent.trtc.TRTCCloud
@@ -250,10 +251,14 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
 
     private fun instId(): String = Integer.toHexString(System.identityHashCode(this))
 
+    // 2026-09-16 修正：本看门狗初版的判据是"连续 5 秒精确零电平 ⇒ 麦克风无输入"，
+    // 但当天对齐采样实测证明**安静房间里连续 15 秒精确 0 是正常的**（说话时 raw 可达 1029）
+    // ⇒ 那个判据会对正常静音误报。现在只作**诊断提示**，不报错，窗口放宽到 30 秒，
+    // 且措辞不再断言"麦克风无输入"（它无法区分"用户没说话"与"采集失效"）。
     private val silentWatchdog = SilentInputWatchdog(
-        maxZeroFrames = 250,                       // 20ms/帧 × 250 = 5 秒
+        maxZeroFrames = 1500,                      // 20ms/帧 × 1500 = 30 秒
         onSilent = { frames ->
-            Log.e(TAG, "capture silent: $frames consecutive zero-RMS frames (5s)")
+            Log.w(TAG, "no non-zero input for $frames frames (30s); user may simply be silent")
         },
     )
 
@@ -268,7 +273,11 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
             // 本条路径在同一台机器上恒 0 ⇒ 必须看清"绑错了麦"还是"TRTC 抢麦"。
             runCatching {
                 val rd = record.routedDevice
-                Log.i(TAG, "routedDevice type=${rd?.type} id=${rd?.id} product=${rd?.productName} addr=${rd?.address}")
+                // AudioDeviceInfo#getAddress 是 API 28 才有的 API，而本模块 minSdk=26。
+                // 不做版本守卫的话，API 26/27 上这一行会抛，整条日志被 runCatching 吞掉
+                // ⇒ 旧设备上"绑到哪个麦"的诊断信息静默消失（不是 lint 洁癖，2026-09-19 CI [NewApi] 实测暴露）。
+                val addr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) rd?.address else null
+                Log.i(TAG, "routedDevice type=${rd?.type} id=${rd?.id} product=${rd?.productName} addr=$addr")
             }.onFailure { Log.w(TAG, "routedDevice read failed: ${it.message}") }
             while (running.get()) {
                 val n = record.read(pcm, 0, FRAME_SAMPLES)
@@ -284,8 +293,11 @@ class RealCustomAudioSource private constructor() : RtcClient.CustomAudioSource 
                     // 本轮真机事故：上行恒零时应用照旧宣称 IN_ROOM、不报任何错，
                     // 用户只能靠"说话没反应"发现。看门狗把静音变成显式事件（DiagLog 可导出）。
                     if (silentWatchdog.feed(gainStage.lastRawRms)) {
-                        Log.e(TAG, "上行连续 5s 精确零电平 ⇒ 麦克风无输入（C4 fail-loud）")
-                        DiagLog.log(TAG, "capture silent 5s: mic delivers zeros (uplink unusable)")
+                        // 诊断提示，**不是**错误：安静 30 秒是正常使用场景。
+                        // 真正确认"采集失效"需要一个我们目前没有的独立判据（例如与系统
+                        // 录音路径同时刻对照），所以这里不声称麦克风故障，只留一条可导出的痕迹。
+                        Log.w(TAG, "30s 无任何非零输入（用户可能没说话）")
+                        DiagLog.log(TAG, "capture: 30s without any non-zero input (diagnostic only)")
                     }
                     if (++frameSeq % LEVEL_LOG_FRAMES == 0L) {
                         Log.i(

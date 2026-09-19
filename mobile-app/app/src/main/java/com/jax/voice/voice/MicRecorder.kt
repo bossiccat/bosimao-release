@@ -3,6 +3,7 @@ package com.jax.voice.voice
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 
@@ -109,7 +110,11 @@ class MicRecorder(
             // 否则"读到全零"无法区分"没声音"与"绑到了被遮住的麦/无信号路径"。
             runCatching {
                 val rd = record.routedDevice
-                Log.i(TAG, "routedDevice type=${rd?.type} id=${rd?.id} product=${rd?.productName} addr=${rd?.address}")
+                // AudioDeviceInfo#getAddress 是 API 28 才有的 API，而本模块 minSdk=26。
+                // 不做版本守卫的话，API 26/27 上这一行会抛，整条日志被 runCatching 吞掉
+                // ⇒ 旧设备上"绑到哪个麦"的诊断信息静默消失（不是 lint 洁癖，2026-09-19 CI [NewApi] 实测暴露）。
+                val addr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) rd?.address else null
+                Log.i(TAG, "routedDevice type=${rd?.type} id=${rd?.id} product=${rd?.productName} addr=$addr")
             }.onFailure { Log.w(TAG, "routedDevice read failed: ${it.message}") }
             while (running) {
                 val n = record.read(pcm, 0, FRAME_SAMPLES)
