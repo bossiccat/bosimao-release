@@ -15,6 +15,7 @@ const {
   verifyPackage,
 } = require('../lib/sidecar-package');
 const { assertProductionTrust } = require('../lib/sidecar-trust');
+const { peBytes } = require('./pe-fixture');
 const { restoreWritableGeneration } = require('../lib/sidecar-runtime-immutable');
 const {
   createCurrentPointer,
@@ -382,6 +383,27 @@ test('rejects sidecar production source whitelist drift', () => {
   expectCode(config, 'SIDECAR_PACKAGE_APP_SOURCE_SET_MISMATCH');
 });
 
+test('APP_SOURCES matches the real sidecar/ top-level source set', () => {
+  // 上面那条漂移用例是**自适应**的：它按 APP_SOURCES 造目录再塞一个多余文件，
+  // 所以它永远发现不了 APP_SOURCES 与真实 sidecar/ 不一致。
+  // 2026-09-19 实测代价：adev.js / downlink_pacer.js / resample.js 三个被随包模块
+  // require 的文件（rtc.js:15 / rtc.js:28 / audio.js:19）漏登记了一周多，
+  // 期间 `sidecar-verify` 锁在 HEAD 上一直是红的（SIDECAR_PACKAGE_APP_SOURCE_SET_MISMATCH），
+  // 发布路径整体被阻断而无人察觉。这条锁就是那次漂移的直接产物。
+  const sidecarDir = path.join(PROJECT_ROOT, 'sidecar');
+  const actual = fs.readdirSync(sidecarDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && (entry.name.endsWith('.js') || entry.name === 'index.html'
+      || entry.name === 'package.json' || entry.name === 'package-lock.json'))
+    .map((entry) => entry.name)
+    .sort();
+  assert.deepEqual(
+    [...APP_SOURCES].sort(),
+    actual,
+    'sidecar/ 顶层源码集与 APP_SOURCES 必须一致：漏登记会让随包 app 运行期 require 失败，'
+    + '多登记不存在的会让 build 在 SIDECAR_PACKAGE_APP_SOURCE_MISSING 中止',
+  );
+});
+
 test('resource mapping preserves the dedicated runtime directory contract end to end', () => {
   // RP-07 (2026-08-31): 安装目的地解耦缩短为 jrt/（NSIS 3.11 解压端 260 上限，
   // 完整名最长 269 字符会静默丢文件）；源目录保持规范名 jax-rtc-sidecar-runtime/。
@@ -490,9 +512,12 @@ test('production trust rejects tiny native runtime files accepted by self-consis
   const { config, generationDir } = fixture();
   verifyPackage(config);
   restoreFixtureForTamper(generationDir);
+  // 2026-09-19: 桩必须是**结构合法**的 PE。此前这里是 "MZ + 零填充"，靠
+  // isPeBinary 只读 2 字节魔数才过；收紧后那种桩会被正确地判为 PE_HEADER，
+  // 从而把"native 太小应报 MIN_SIZE"这条断言挤掉（变成假红）。
   fs.writeFileSync(
     path.join(generationDir, INSTALLED_BIN),
-    Buffer.concat([Buffer.from([0x4d, 0x5a]), Buffer.alloc(5 * 1024 * 1024)]),
+    peBytes({ size: 5 * 1024 * 1024 }),
   );
   expectTrustCode(config, generationDir, 'SIDECAR_PACKAGE_TRUST_MIN_SIZE');
 });
@@ -507,13 +532,16 @@ test('production trust rejects oversized non-PE binary without MZ header', () =>
 test('production trust accepts real-size PE externalBin and native closed set', () => {
   const { config, generationDir } = fixture();
   restoreFixtureForTamper(generationDir);
+  // 2026-09-19: 阳性对照必须用真 PE 结构。此前用 "MZ + 零填充"，在本函数只读
+  // 魔数的时代能过 —— 于是这条"接受真实体积 PE"的对照组实际什么都没验，
+  // 正是它放过了 liteav_media_server.exe 这类只有魔数也照样通过的情形。
   fs.writeFileSync(
     path.join(generationDir, INSTALLED_BIN),
-    Buffer.concat([Buffer.from([0x4d, 0x5a]), Buffer.alloc(5 * 1024 * 1024)]),
+    peBytes({ size: 5 * 1024 * 1024 }),
   );
   const nativeDir = trustInput(config, generationDir).nativeDir;
   for (const name of NATIVE_NAMES) {
-    fs.writeFileSync(path.join(nativeDir, name), Buffer.concat([Buffer.from([0x4d, 0x5a]), Buffer.alloc(64 * 1024)]));
+    fs.writeFileSync(path.join(nativeDir, name), peBytes({ size: 64 * 1024 }));
   }
   fs.writeFileSync(path.join(generationDir, 'ffmpeg.dll'), Buffer.alloc(512 * 1024));
   fs.writeFileSync(path.join(generationDir, 'resources.pak'), Buffer.alloc(512 * 1024));
