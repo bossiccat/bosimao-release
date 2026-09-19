@@ -78,6 +78,16 @@ r"""契约：探本机端口的 HTTP 探测点必须显式绕代理。
 7) **本文件自己被排除在扫描面外**，原因写在 `SELF_EXCLUDED_FILES` 上方：行为验证必须
    故意造一个"按环境取代理的客户端"当阳性对照，那正是本文件要禁的东西。
    这个豁免被 `test_self_exclusion_is_narrow` 钉住（精确只许一个文件、不许连坐兄弟文件）。
+8) **在本机跑这一族（以及整套 suite）必须带 `--basetemp=<固定目录>`**：本机 safe-delete
+   shim 有一条**按 turn 计数**的批量删除守卫（阈值 500），它会掐掉 pytest 自己在 session
+   结束时对 `pytest-of-<user>\garbage-<uuid>` 的回收，`SystemExit(1)` 打断 session finish
+   ⇒ **连 `--junitxml` 的产物都被一起吞掉**（实测：进度条走到 100%、`ls` 报 XML 不存在、
+   rc=1 —— 比"rc 假红"更糟，那是**产物消失**）。加上 `--basetemp` 后 junit 落盘、rc=0。
+   这只挪临时目录根，**不动任何断言 / 超时**；CI（Linux runner、无该 shim）不受影响。
+   证据 [loopback-proxy/basetemp-sidesteps-guard]：
+
+     outputs/2026-09-19-pytest-basetemp-sidesteps-bulk-delete-guard.txt
+     sha256 7b1232048329ad3165e08be3a637ea65770b60b9d41fff58a6a03dc48ac43e6b
 """
 from __future__ import annotations
 
@@ -1291,6 +1301,27 @@ def test_evidence_index_is_wellformed_and_never_says_pending() -> None:
         assert len(e["proves"]) >= 20, (
             f"{e['logical']}: 第 5 列只有 {len(e['proves'])} 字，等于没写它证明了什么"
         )
+
+
+def test_evidence_index_declares_the_byte_shape() -> None:
+    """索引必须写明 sha256 是**哪个字节形态**的哈希 —— 否则"自证"这把尺子会歪。
+
+    本波 12 条证据实测形态是**混合**的（7 条 CRLF / 5 条 LF，2026-09-19 量出来的），
+    而 sha256 对形态敏感。不声明形态时，读者在别处重算会拿到一串"不一致"，把
+    **形态差异**误读成**证据被篡改** —— 又一个"看起来验过了"的陷阱（同族于
+    `core.autocrlf=true` 下把 blob 与工作区直接比字节、误报 14 处那次）。
+
+    判据落在**声明的存在**上，不钉具体形态：形态随写入方式变，硬钉死只会让索引
+    变成维护负担。真正管形态一致性的，是下面那条逐字节核对。
+    """
+    text = (REPO_ROOT / EVIDENCE_INDEX).read_text(encoding="utf-8")
+    assert "CRLF" in text and "LF" in text, (
+        "索引没写明证据文件的换行形态 —— 哈希对形态敏感，不声明就会把形态差异误读成篡改"
+    )
+    assert "工作区字节" in text, (
+        "索引没写明 sha256 是**本机工作区字节**的哈希（不是 LF 归一化后的），"
+        "读者会以为它跨平台通用"
+    )
 
 
 def test_evidence_index_sha256_matches_the_files_present_here() -> None:

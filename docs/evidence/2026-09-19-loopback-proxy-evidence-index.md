@@ -20,6 +20,10 @@
 3. 逻辑名是稳定标识（`loopback-proxy/<短名>`），路径可以变、逻辑名不该变。
 4. 计算只用 Python（`hashlib`）。**不要用 `grep`/`wc` 计数**：本机 MSYS `grep` 对含 `{}`
    的模式会给假 0，这类工具层假读数本身就是本波的一条证据（见 `shell-grep-false-zero`）。
+5. sha256 是**本机工作区字节**的哈希，**不是** LF 归一化后的哈希。本波 12 条的形态是
+   **混合**的（7 条 CRLF / 5 条 LF，见 §三"哈希的字节形态"）。跨平台、或经任何换行
+   翻译（LF 平台、编辑器"转换行尾"、`git add --renormalize`）之后重算，哈希**必然不同**
+   —— 那是形态差异，**不是**证据被篡改。判据要落在内容上。
 
 ---
 
@@ -39,25 +43,48 @@
 | `loopback-proxy/shell-grep-false-zero` | `outputs/2026-09-19-shell-grep-brace-pattern-false-zero.txt` | 3899 | `e9cdcb673d0dc1d906622ef26c0b320b97f41fcfdcc32f2c9e16d93ab9cfa0c1` | **工具层**假读数：同一文件同一时刻 `grep -c -F 'ProxyHandler({})'` 有时 1、连跑 5 次全 0，而 Python 字节计数稳定为 1；`WHICH_GREP` = MSYS `…\git\usr\bin\grep.EXE`。结论：本类核查的一律用 AST/Python 读数，`grep` 计数必须配阳性对照才可用 |
 | `loopback-proxy/report-initial-scan` | `outputs/2026-09-19-urlopen-localhost-proxy-bypass-scan.md` | 13894 | `1b9c2999869c4528b47d2848887edd774fe0dcdb9360500bcf3153aa2ae9fde2` | 任务 C 首版报告（**先报告后改**）：一句话结论、逐处清单、判定范围外的理由、触发条件、"不建议用 `NO_PROXY` 修"的取舍。§8 / §9 是**事后批注**（实际 4 文件 8 调用点、锁已建、28 处终局、本索引），原文不删 |
 | `loopback-proxy/report-httpx-ws-inventory` | `outputs/2026-09-19-httpx-trust-env-enumeration-and-ws-loopback-inventory.md` | 10305 | `e45b54e40c4862d0fae64c9cef45e5a0c7605e10e1781482e869d312c4f23603` | `trust_env` **影响面逐行枚举**（要结论不要"应该没事"）+ ws loopback 清点 + 行为验证表 + 变异 + 自豁免说明。§六 是终局更正：**28 处（不是 20 处）**、锁的第三个洞、`WS_TEST_DEBT` 已清空 |
+| `loopback-proxy/basetemp-sidesteps-guard` | `outputs/2026-09-19-pytest-basetemp-sidesteps-bulk-delete-guard.txt` | 7743 | `7b1232048329ad3165e08be3a637ea65770b60b9d41fff58a6a03dc48ac43e6b` | **工具层 veto 第二例，后果更重**：全量跑带了 `--junitxml` 却**没产出 XML**（`ls` 报不存在）——守卫 targets 是 pytest 自己的 `pytest-of-Administrator\garbage-<uuid>` 回收（读数 836 > 阈值 500），`SystemExit(1)` 打断 session finish ⇒ **产物被吞**。同一命令加 `--basetemp=<固定目录>` ⇒ 27 passed、junit 4343 B、**rc=0**。教训：**会吞掉产物的门禁比会误报的门禁更危险** —— 误报逼人去看，吞产物让人以为"没跑过"。本机取数一律带 `--basetemp` |
 
 ---
 
 ## 二、代码与契约锁里引用这些逻辑名的位置
 
+**行号一律重算，不手抄。** 本轮就抓到一次漂移：本表原先写「锁 59 / 533」、
+「`scripts/e2e_verify.py:197`」，实际是 71 / 561 / 199 —— 因为把裸路径改成逻辑名的那些
+编辑把行号顶下去了。**任何一次对引用方的编辑都会让这张表过期**，所以正确用法是重跑
+生成脚本，而不是照旧行号去找：
+
+```python
+# 生成 §二 全表（只用 Python —— 不要用 grep，见 §一 规则 4）
+import re, pathlib
+RE = re.compile(r"\[(loopback-proxy/[a-z0-9-]+)\]")
+for rel in ["cloudbridge/supervisor.py", "scripts/e2e_verify.py", "scripts/mock_phone_client.py",
+            "scripts/poc_001_model.py", "scripts/o019_rotation_window_e2e.py",
+            "scripts/sim/run-sim-e2e.py", "tools/verify_approval_e2e.py",
+            "backend/tests/contract/test_loopback_probe_proxy_contract.py"]:
+    for i, line in enumerate(pathlib.Path(rel).read_text(encoding="utf-8").splitlines(), 1):
+        for m in RE.finditer(line):
+            print(f"{rel}:{i}  {m.group(1)}")
+```
+
+下表的行号按**本索引所在的这个提交**计：
+
 | 引用方 | 行 | 逻辑名 |
 |---|---|---|
 | `cloudbridge/supervisor.py` | 61 | `loopback-proxy/fresh-process-cells` |
 | `scripts/e2e_verify.py` | 138 | `loopback-proxy/fresh-process-cells` |
-| `scripts/e2e_verify.py` | 197 | `loopback-proxy/httpx-cells` |
+| 同上 | 199 | `loopback-proxy/httpx-cells` |
 | `scripts/mock_phone_client.py` | 149 | `loopback-proxy/httpx-cells` |
 | `scripts/poc_001_model.py` | 101 | `loopback-proxy/httpx-cells` |
 | `scripts/o019_rotation_window_e2e.py` | 38 | `loopback-proxy/fresh-process-cells` |
 | `scripts/sim/run-sim-e2e.py` | 169 | `loopback-proxy/fresh-process-cells` |
 | `tools/verify_approval_e2e.py` | 25 | `loopback-proxy/fresh-process-cells` |
-| `backend/tests/contract/test_loopback_probe_proxy_contract.py` | 15 | `loopback-proxy/fresh-process-cells` |
-| 同上 | 16 | `loopback-proxy/httpx-cells` |
-| 同上 | 59 | `loopback-proxy/shell-grep-false-zero` |
-| 同上 | 533 | `loopback-proxy/httpx-cells` |
+| `backend/tests/contract/test_loopback_probe_proxy_contract.py` | 18 | `loopback-proxy/fresh-process-cells` |
+| 同上 | 22,561 | `loopback-proxy/httpx-cells` |
+| 同上 | 60 | `loopback-proxy/unit-ws-dead-proxy-cells` |
+| 同上 | 71 | `loopback-proxy/shell-grep-false-zero` |
+| 同上 | 87 | `loopback-proxy/basetemp-sidesteps-guard` |
+| 同上 | 1136 | `loopback-proxy/safe-delete-guard-veto` |
 
 ---
 
@@ -81,23 +108,53 @@ for rel in ['2026-09-19-urlopen-proxy-fresh-process-cells.txt',
 一旦拿到同族的证据文件（工作机、备份、别的分支），算出 sha256 一比对，
 就能判断它是不是当时引用的那一份、有没有被改写。
 
+### 哈希的字节形态（不加这条声明，自证就是一把会歪的尺子）
+
+索引里的 sha256 一律是**本机工作区字节**的哈希。2026-09-19 实测 12 条的形态是
+**混合**的 —— 原因只是当初写入方式不同，不必也不该去统一：
+
+| 形态 | 条数 | 逻辑名 |
+|---|---|---|
+| CRLF | 7 | `false-reading-experiment`、`mechanism-source`、`handler-source`、`fresh-process-cells`、`inventory-scan`、`lock-mutation-real-repo`、`httpx-cells` |
+| LF | 5 | `safe-delete-guard-veto`、`unit-ws-dead-proxy-cells`、`shell-grep-false-zero`、`report-initial-scan`、`report-httpx-ws-inventory` |
+
+两个后果，都要先说清楚：
+
+1. **哈希对形态敏感**。把任一条复制到会做换行翻译的地方再算，哈希**必然不同**。
+   **那是形态变了，不是证据被篡改。** 反过来说：拿这个 sha256 当"内容指纹"跨机器
+   比对时，先对齐形态，否则会得到一批看起来像"全被改过"的假阳性。
+2. **但在这里不存在歧义**：`outputs/` 被 `.gitignore:134` 忽略 ⇒ 这些文件**从来没有
+   blob 形态**，只有工作区形态一种。所以本条哈希在**同一份 `outputs/` 目录里**是确定
+   且可复算的 —— 这正是契约锁 `test_evidence_index_sha256_matches_the_files_present_here`
+   在做的事（就地逐字节核对；干净检出时 `skip`，CI 上不会假红）。
+
+为什么值得单独写一节：`core.autocrlf=true` 下，**仓库内**同一份受跟踪文件在本机天然
+有两个都"对"的字节数 —— 本索引自己就是例子：**工作区 11,029 B / blob 10,926 B**，
+差 103 B 恰好是 103 个 `CRLF` 的 `\r`。今天已经因此误报过 14 个"不一致"。
+**同一个字节数在不同边上不通用**，这条对 `outputs/` 同样成立。
+
 ---
 
 ## 四、附：本索引**未**覆盖的其它 `outputs/` 引用（发现登记，**不是**索引条目）
 
-全仓受跟踪文件里对 `outputs/` 的引用共 **32 个不同路径**，本索引只收口
-**loopback 代理一族（11 条）**。其余引用属别的工作线（其中
-`.github/workflows/android-gates.yml` 属本波明确不动的边界），**此处只登记发现**：
+全仓受跟踪文件里对 `outputs/` 的**不同**引用 token，2026-09-19 重测为 **45** 个
+（Python 扫全仓受跟踪文件，`tracked_files=983`；**不用 `grep`**，理由见 §一 规则 4）。
+其中 **13 个**已收口为本索引条目（§一 表格），其余 **32 个**属别的工作线或
+"产物落盘目的地"，**此处只登记发现**：
 
-- **产物落盘目的地**（不是证据引用）：`scripts/record-release-evidence.py:24,25`、
+- **产物落盘目的地**（写文件，不是引用证据）：`scripts/record-release-evidence.py:24,25`、
   `scripts/check-release-blockers.py:16`、`cloudbridge/sim_phone.py:111`、
   `backend/tests/contract/test_cloudbridge_service_contract.py:340,342`
-- **别的工作线的证据引用**：`scripts/field-evidence/run_field_evidence.py:46,172`、
+- **别的工作线的证据引用**：`scripts/field-evidence/run_field_evidence.py:49,55`、
   `cloudbridge/trtc-electron-sdk-linux-versions.json:10,348`、
   `backend/app/api/routes_voice_ingest_ticket.py:3`、`backend/app/voice/ingest_ticket.py:1`、
   `backend/tests/contract/test_ingest_ticket_contract.py:3`
 - **文档正文引用**（`docs/**`、`mobile-app/README.md`、根目录中文方案文档）：
-  其余各条
+  其余各条 —— 含 `.github/workflows/android-gates.yml:189`（属本波明确不动的边界）
 
 这一节**故意不给 sha256 列**：给了就成了索引条目，而索引条目不许有空值。
 要让它们也自证，需要在各自的工作线里补一份真实读数 —— 不能由别线代填。
+
+**计数口径**（写下来，免得下次凭记忆顺手改）：`45 = 13（本索引条目）+ 32（本节）`。
+本索引自身引入的 token 算在内 —— "谁在引用 `outputs/`"这个问题必须包含本索引，
+否则索引会把自己从统计里摘出去。**每往 §一 加一条，这两个数字都要重测，不能 +1 了事。**
