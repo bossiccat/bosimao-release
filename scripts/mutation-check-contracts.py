@@ -226,6 +226,56 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
      "    let subsystem = magic;  // MUTATED: 策略混入事实判断\n"
      "    magic == OPTIONAL_MAGIC_PE32 || magic == OPTIONAL_MAGIC_PE32_PLUS\n}",
      "sidecar_trust_pe_contract"),
+
+    # 运行期可再生产物（debug.log）两侧豁免 —— 2026-09-19 追加。
+    # 这一族的形状与上面 PE 锁同源：规则此前只在 Rust 侧存在，构建侧一处都没有。
+    ("provenance 闭集把运行期产物 debug.log 又算进哈希覆盖集",
+     "scripts/lib/sidecar-package-common.js",
+     "!metadataFileSet().has(item) && !RUNTIME_ARTIFACT_FILES.includes(item)",
+     "!metadataFileSet().has(item)  // MUTATED: debug.log 回到哈希覆盖集",
+     "sidecar_trust_pe_contract"),
+
+    ("指针协议 walk（actual）侧不再豁免 ⇒ 单侧豁免",
+     "scripts/lib/sidecar-runtime-protocol.js",
+     "    if (current === root && RUNTIME_ARTIFACT_FILES.includes(entry.name)) continue;\n",
+     "",
+     "sidecar_trust_pe_contract"),
+
+    ("generation.json 声明侧不再豁免 ⇒ 与 actual 枚举集不符",
+     "scripts/lib/sidecar-runtime-protocol.js",
+     "    if (RUNTIME_ARTIFACT_FILES.includes(relative)) continue;\n",
+     "",
+     "sidecar_trust_pe_contract"),
+
+    ("校验器只豁免 actual 侧、不豁免声明侧（老世代仍声明 debug.log）",
+     "scripts/lib/sidecar-package-verify.js",
+     "manifest.runtime_files.filter((item) => !RUNTIME_ARTIFACT_FILES.includes(item.path))",
+     "manifest.runtime_files  // MUTATED: 声明侧不再对偶豁免",
+     "sidecar_trust_pe_contract"),
+
+    ("只改 JS 侧名单、Rust 常量不动（跨语言锁必须变红）",
+     "scripts/lib/sidecar-runtime-immutable.js",
+     "const RUNTIME_ARTIFACT_FILES = ['debug.log'];",
+     "const RUNTIME_ARTIFACT_FILES = ['debug.log', 'crashpad.log'];  // MUTATED: 只改 JS 侧",
+     "sidecar_trust_pe_contract"),
+
+    ("只改 Rust 侧常量、JS 名单不动（跨语言锁必须变红）",
+     "pet-ui/src-tauri/src/sidecar_integrity.rs",
+     "pub(crate) const RUNTIME_ARTIFACT_FILES: [&str; 1] = [\"debug.log\"];",
+     "pub(crate) const RUNTIME_ARTIFACT_FILES: [&str; 1] = [\"debug.log.mutated\"];  // MUTATED: 只改 Rust 侧",
+     "sidecar_trust_pe_contract"),
+
+    ("Rust 豁免点退回裸字面量（共享常量不再被引用 ⇒ 又会单侧漂移）",
+     "pet-ui/src-tauri/src/sidecar_integrity.rs",
+     "    for name in RUNTIME_ARTIFACT_FILES {\n        files.remove(name);\n    }",
+     "    files.remove(\"debug.log\");  // MUTATED: 退回裸字面量",
+     "sidecar_trust_pe_contract"),
+
+    ("构建期剪除变成空操作（staging 里仍留着构建机的 debug.log）",
+     "scripts/lib/sidecar-package-build.js",
+     "    if (!fs.existsSync(staged)) continue;",
+     "    continue;  // MUTATED: 剪除变成空操作",
+     "sidecar_trust_pe_contract"),
 ]
 
 

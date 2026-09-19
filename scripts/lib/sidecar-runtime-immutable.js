@@ -9,6 +9,15 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+// 一个 generation 目录里，这些**顶层**名字是运行期可再生产物，不属于载荷闭集：
+// Chromium 在 CWD（= generation 根）写 debug.log 且**每次启动都在追加**，内容由运行期决定。
+// Rust 自 RP-07（2026-09-02，v4k/v4m 实测）起已在 list_runtime_files 与 walk_generation_payload
+// 的 walk/expected 两侧豁免；构建侧此前一处都没有跟上，于是"构建期声明的哈希"与"运行期实际
+// 内容"必然分叉（本机现役世代实测：清单 70aa1d9b… / 实测 78cf15e5…）。这里是 JS 侧唯一
+// 真相源，与 Rust 侧同集合由 sidecar-package.test.js 的跨语言锁钉住。
+// 边界：只列**已证实**的产物，不做目录级/通配豁免；不是穷举，扩列必须有实测支撑。
+const RUNTIME_ARTIFACT_FILES = ['debug.log'];
+
 function makeImmutableGeneration(generationDir) {
   for (const entry of fs.readdirSync(generationDir, { withFileTypes: true })) {
     const target = path.join(generationDir, entry.name);
@@ -43,6 +52,7 @@ function restoreWritableGeneration(generationDir) {
 }
 
 module.exports = {
+  RUNTIME_ARTIFACT_FILES,
   makeImmutableGeneration,
   restoreWritableGeneration,
 };

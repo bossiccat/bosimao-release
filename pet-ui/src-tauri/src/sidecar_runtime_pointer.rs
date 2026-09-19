@@ -13,7 +13,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::sidecar::{IntegritySpec, SidecarSpec};
-use crate::sidecar_integrity::{is_symlink_or_reparse, validate_hash, validate_path};
+use crate::sidecar_integrity::{
+    is_symlink_or_reparse, validate_hash, validate_path, RUNTIME_ARTIFACT_FILES,
+};
 
 /// 持有 generation 租约的 RAII guard（ADR-027 §5）。
 ///
@@ -388,7 +390,9 @@ fn walk_generation_payload(root: &Path) -> Result<BTreeMap<String, String>, Reso
     // debug.log（registration_protocol_win.cc 等内部诊断），不受 JAX_SIDECAR_LOG_DIR
     // 控制。与 logs/ 同属可再生运行时产物；resolve 阶段 ExtraPayload 不豁免它会使
     // 首次运行后 resolve 永久失败 → watchdog 熔断（本机实测，stderr 完整错误链证实）。
-    files.remove("debug.log");
+    for name in RUNTIME_ARTIFACT_FILES {
+        files.remove(name);
+    }
     Ok(files)
 }
 
@@ -476,7 +480,9 @@ pub fn resolve_sidecar_runtime(
     // 56937f6 只豁免了 walk（actual）侧，expected 侧仍声明 debug.log →
     // expected-actual 差集报 PayloadMissing → watchdog 熔断。两侧同时豁免。
     let mut files = metadata.files;
-    files.remove("debug.log");
+    for name in RUNTIME_ARTIFACT_FILES {
+        files.remove(name);
+    }
     let actual = walk_generation_payload(&generation_dir)?;
     let actual_keys: BTreeSet<&String> = actual.keys().collect();
     let expected_keys: BTreeSet<&String> = files.keys().collect();

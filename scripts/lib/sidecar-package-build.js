@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { RUNTIME_ARTIFACT_FILES } = require('./sidecar-runtime-immutable');
 
 // ADR-027 generation 内的稳定 metadata 文件名（与 sidecar-package.js 常量一致）。
 const SHA_FILE = 'jax-rtc-sidecar.exe.sha256';
@@ -60,6 +61,29 @@ function removeFileExternal(target, fail) {
   if (fs.existsSync(target)) fail('SIDECAR_PACKAGE_REMOVE_FILE_EXTERNAL_FAILED');
 }
 
+// 从 staging 剪除运行期可再生产物（Chromium 跑过之后留在 dist 顶层的 debug.log）。
+// 为什么是"剪除"而不是"不哈希"：它含构建机本地路径，装进客户包本身就不该发生 ——
+// 只把它从闭集里排除会留下一份谁也解释不清的载荷。名单与闭集豁免同源
+// （sidecar-runtime-immutable.js 是唯一真相源，位置见 sidecar-package-common.js）。
+// 两向 fail-closed：源里有而 staging 里没有 ⇒ 拷贝不完整；删完仍在 ⇒ 删除失败。
+// 不用 cmd.exe 外部删除：那是为 ~180MB electron.exe 的宿主 hook 层故障（见上）准备的，
+// 这里是小文件，走 node fs 层跨平台且可断言。
+function pruneRuntimeArtifacts(sourceDist, targetDir, fail) {
+  for (const name of RUNTIME_ARTIFACT_FILES) {
+    const staged = path.join(targetDir, name);
+    if (fs.existsSync(path.join(sourceDist, name)) && !fs.existsSync(staged)) {
+      fail('SIDECAR_PACKAGE_RUNTIME_ARTIFACT_COPY_INCOMPLETE');
+    }
+    if (!fs.existsSync(staged)) continue;
+    try {
+      fs.rmSync(staged, { force: true });
+    } catch (_) {
+      // 由下方向的存在性断言统一判红，避免把原始 fs 错误当成结论。
+    }
+    if (fs.existsSync(staged)) fail('SIDECAR_PACKAGE_RUNTIME_ARTIFACT_PRUNE_FAILED');
+  }
+}
+
 function buildPackage(config, api) {  const {
     APP_SOURCES,
     createProvenance,
@@ -93,6 +117,9 @@ function buildPackage(config, api) {  const {
   // Electron dist → staging；electron.exe 作为 installed 身份与 externalBin 构建输入。
   const electronDist = path.join(config.sidecarDir, 'node_modules', 'electron', 'dist');
   copyTreeInto(electronDist, stagingDir);
+  // 在写任何 manifest / 计算任何闭集之前剪除运行期产物：否则它会被哈希进
+  // runtime_files 与 generation.json，而运行期一追加就与声明分叉（详见本函数注释）。
+  pruneRuntimeArtifacts(electronDist, stagingDir, fail);
   const electronExe = path.join(stagingDir, 'electron.exe');
   if (!fs.existsSync(electronExe)) fail('SIDECAR_PACKAGE_ELECTRON_RUNTIME_MISSING');
   copyFileExternal(electronExe, path.join(stagingDir, config.installedFile), fail);
@@ -135,4 +162,4 @@ function buildPackage(config, api) {  const {
   return verifyPackage(config);
 }
 
-module.exports = { buildPackage };
+module.exports = { buildPackage, pruneRuntimeArtifacts };

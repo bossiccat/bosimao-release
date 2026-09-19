@@ -23,7 +23,7 @@ const {
 } = require('../lib/sidecar-trust');
 const { NATIVE_REQUIRED } = require('../lib/sidecar-package-common');
 const { peBytes } = require('./pe-fixture');
-const { restoreWritableGeneration } = require('../lib/sidecar-runtime-immutable');
+const { RUNTIME_ARTIFACT_FILES, restoreWritableGeneration } = require('../lib/sidecar-runtime-immutable');
 const {
   createCurrentPointer,
   createRuntimeLayout,
@@ -113,13 +113,13 @@ function numericConst(relative, constName, isRust) {
 }
 
 // 取出 Rust 源文件里某个 `const <NAME>: [&str; N] = [ ... ];` 的字符串项。
-// 锚定规则（刻意为之）：声明必须出现在行首（允许缩进）。注释行以 // 或 //! 开头，
-// 永远匹配不到 `^[ \t]*const` —— 而这些文件名在注释里也出现过，锚全文就是
-// "有形状没牙齿"（同 o018 静态锁那次教训）。
+// 锚定规则（刻意为之）：声明必须出现在行首（允许缩进，允许 `pub(crate) ` 可见性前缀）。
+// 注释行以 // 或 //! 开头，永远匹配不到 `^[ \t]*(pub…)? const` —— 而这些文件名在注释里
+// 也出现过，锚全文就是"有形状没牙齿"（同 o018 静态锁那次教训）。
 function rustStrArray(relative, constName) {
   const source = readProjectFile(relative);
   const anchor = new RegExp(
-    `^[ \\t]*const\\s+${constName}\\s*:\\s*\\[\\s*&str\\s*;\\s*(\\d+)\\s*\\]\\s*=\\s*\\[`,
+    `^[ \\t]*(?:pub(?:\\([^)]*\\))?\\s+)?const\\s+${constName}\\s*:\\s*\\[\\s*&str\\s*;\\s*(\\d+)\\s*\\]\\s*=\\s*\\[`,
     'gm',
   );
   const found = [...source.matchAll(anchor)];
@@ -141,6 +141,22 @@ function rustStrArray(relative, constName) {
     `${relative} 里 ${constName} 声明 [&str; ${declared}] 但列了 ${values.length} 项`,
   );
   return values;
+}
+
+// 取出 JS 源文件里某个 `const <NAME> = [ ... ];` 的字符串项（锚在声明行行首，同 rustStrArray：
+// 这些名字在注释里也出现过，锚全文就是"有形状没牙齿"）。
+function jsStrArray(relative, constName) {
+  const source = readProjectFile(relative);
+  const found = [...source.matchAll(new RegExp(`^[ \\t]*const\\s+${constName}\\s*=\\s*\\[`, 'gm'))];
+  assert.equal(
+    found.length,
+    1,
+    `${relative} 里 ${constName} 的数组声明必须恰好一处（锚在声明行首，不含注释）`,
+  );
+  const start = found[0].index + found[0][0].length;
+  const end = source.indexOf(']', start);
+  assert.ok(end > start, `${relative} 里 ${constName} 的数组没有闭合`);
+  return [...source.slice(start, end).matchAll(/['"]([^'"]*)['"]/g)].map((match) => match[1]);
 }
 
 // 测试侧独立构造 provenance manifest：不复用生产 createProvenance，
@@ -375,6 +391,86 @@ test('rejects runtime closed-set additions and omissions', () => {
   assert.throws(() => verifyPackage(omitted.config), (error) => error instanceof PackageError);
 });
 
+test('a Chromium runtime artifact is not part of the payload closed set', () => {
+  // Chromium 在 CWD（= generation 根）写顶层 debug.log（registration_protocol_win.cc 等
+  // 内部诊断），**每次启动都在追加**，不受 JAX_SIDECAR_LOG_DIR 控制。Rust 侧自 RP-07
+  // （2026-09-02，v4k/v4m 实测）起已豁免它，构建侧却一处都没有跟上 ⇒ 它被哈希进
+  // runtime_files 与 generation.json，而运行期一追加就与声明的哈希必然分叉：
+  //   · 构建期 --verify-only → SIDECAR_PACKAGE_RUNTIME_MISMATCH
+  //   · 世代解析 → finalized payload hash mismatch
+  // 本机现役世代实测就是这个形态（清单声明 70aa1d9b… / 实测 78cf15e5…）。
+  const stagingTimeHash = sha256('staging-time-debug-log');
+  const { config, generationDir } = fixture({
+    mutateManifest: (manifest) => {
+      manifest.runtime_files.push({ path: 'debug.log', sha256: stagingTimeHash });
+    },
+  });
+
+  // 复刻"构建侧未豁免时产出的世代"：manifest 与 generation.json 两侧都声明它，
+  // 而它的内容由运行期决定（此处即运行期追加后的形态）。
+  restoreFixtureForTamper(generationDir);
+  fs.writeFileSync(path.join(generationDir, 'debug.log'), 'runtime-appended');
+  const metadata = JSON.parse(fs.readFileSync(path.join(generationDir, GENERATION_METADATA_FILE), 'utf8'));
+  metadata.files['debug.log'] = stagingTimeHash;
+  fs.writeFileSync(path.join(generationDir, GENERATION_METADATA_FILE), JSON.stringify(metadata));
+
+  // 核心断言：内容变了也必须仍然通过 —— 这就是用户机器上每次启动之后的状态。
+  assert.doesNotThrow(() => verifyPackage(config));
+
+  // 反向对照：不能靠"把整个闭集判据放宽"来过 —— 其余未登记文件仍必须被判否。
+  fs.writeFileSync(path.join(generationDir, 'runtime-noise.dll'), 'unrecorded');
+  assert.throws(
+    () => verifyPackage(config),
+    (error) => error instanceof PackageError,
+    '豁免只能窄到运行期产物这一个名字，闭集对其余路径必须照旧闭合',
+  );
+
+  // 新构建的 manifest 不该再声明它（否则每产出一个世代就重演一次上面的分叉）。
+  assert.deepEqual(
+    createProvenance(config, generationDir).runtime_files.filter((item) => item.path === 'debug.log'),
+    [],
+    'debug.log 是运行期可再生产物，不该进 provenance 的哈希覆盖集',
+  );
+});
+
+test('the build prunes Chromium runtime artifacts out of staging instead of packing them', () => {
+  // 补丁不止"不哈希"：构建机的 debug.log 里含构建机本地路径，把它装进客户包本身就不该
+  // 发生（而且它每次运行都被改写，等于给载体发一份注定过期的哈希）。
+  // 两向 fail-closed：源里有而 staging 里没有 ⇒ 拷贝不完整（本文件有过静默半拷贝的
+  // 历史）；删完仍在 ⇒ 删除失败。两侧都不得静默继续打包。
+  const { pruneRuntimeArtifacts } = require('../lib/sidecar-package-build');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jax-sidecar-prune-'));
+  const source = path.join(root, 'dist');
+  const staging = path.join(root, 'staging');
+  fs.mkdirSync(source, { recursive: true });
+  fs.mkdirSync(staging, { recursive: true });
+  const fail = (code) => { throw new PackageError(code); };
+
+  // 源里没有（构建机从未跑过 electron）⇒ 什么都不删，也不报错。
+  pruneRuntimeArtifacts(source, staging, fail);
+
+  // 源里有、staging 里也有 ⇒ 必须删掉。
+  fs.writeFileSync(path.join(source, 'debug.log'), 'build-machine-local-path');
+  fs.writeFileSync(path.join(staging, 'debug.log'), 'build-machine-local-path');
+  pruneRuntimeArtifacts(source, staging, fail);
+  assert.equal(fs.existsSync(path.join(staging, 'debug.log')), false);
+
+  // 源里有而 staging 里没有 ⇒ 拷贝不完整。
+  assert.throws(
+    () => pruneRuntimeArtifacts(source, staging, fail),
+    (error) => error instanceof PackageError
+      && error.code === 'SIDECAR_PACKAGE_RUNTIME_ARTIFACT_COPY_INCOMPLETE',
+  );
+
+  // 删不掉（此处用同名目录模拟）⇒ 不得带着它继续打包。
+  fs.mkdirSync(path.join(staging, 'debug.log'));
+  assert.throws(
+    () => pruneRuntimeArtifacts(source, staging, fail),
+    (error) => error instanceof PackageError
+      && error.code === 'SIDECAR_PACKAGE_RUNTIME_ARTIFACT_PRUNE_FAILED',
+  );
+});
+
 test('rejects duplicate, traversal and absolute manifest paths', () => {
   for (const mutate of [
     (manifest) => manifest.runtime_files.push({ ...manifest.runtime_files[0] }),
@@ -537,6 +633,59 @@ test('the native closed set is one set across every production copy', () => {
     rustStrConst('pet-ui/src-tauri/src/sidecar_integrity.rs', 'PRE_VERSIONING_TRUST_VERSION'),
     PRE_VERSIONING_TRUST_VERSION,
     'Rust 的版本化之前基线必须与 scripts/lib/sidecar-trust.js 的一致',
+  );
+});
+
+test('the runtime artifact exemption is one set across both languages', () => {
+  // 「运行期可再生产物不进闭集」这条规则此前**只存在于 Rust 侧**（RP-07 起 3 处裸字面量），
+  // 构建侧一处都没有 ⇒ 两侧对"闭集"的定义分叉：启动期放行、构建期判否。这不是假想：
+  // 本机现役世代正是"清单声明 70aa1d9b… / 实测 78cf15e5…"的形态，同一个目录上 Rust 与
+  // 构建侧给出相反结论（这也是长年「反复弹窗」的结构性来源之一）。
+  // JS 侧 3 处（provenance 闭集 / 校验器的 actual+declared 两侧 / 指针协议 walk+expected）
+  // 与 Rust 侧 3 处（list_runtime_files / validate_runtime 的 expected 侧 /
+  // walk_generation_payload 的 walk 与 resolve 的 expected）必须引用同一份名单。
+  //
+  // 覆盖边界：本锁钉**名字集合**与"每个豁免点都引用共享常量"，钉不住"是否又新增了第 4 处
+  // 豁免点"——那是任何静态锁都够不到的。Rust 侧的顶层 logs/ 前缀规则不在本锁的名字集合内：
+  // JS 侧当前**没有**对应规则，属既有不对称（已单列，不在本次改动范围）。
+  const frozen = ['debug.log'];
+  assert.deepEqual(
+    [...RUNTIME_ARTIFACT_FILES].sort(),
+    frozen,
+    'JS 侧名单变了：改这里必须同时改 Rust 常量与两侧全部豁免点',
+  );
+  assert.deepEqual(
+    jsStrArray('scripts/lib/sidecar-runtime-immutable.js', 'RUNTIME_ARTIFACT_FILES').sort(),
+    frozen,
+    'JS 源码里声明的名单与运行时导出的不一致（说明锚到别处去了）',
+  );
+  assert.deepEqual(
+    [...rustStrArray('pet-ui/src-tauri/src/sidecar_integrity.rs', 'RUNTIME_ARTIFACT_FILES')].sort(),
+    frozen,
+    'Rust 侧 RUNTIME_ARTIFACT_FILES 与 JS 侧不一致 ⇒ 构建期放行、启动期拒绝（或反之）',
+  );
+
+  // 每个豁免点都必须**引用**该常量：裸字面量各自为政，改一处不会带动另一处。
+  for (const [relative, symbol] of [
+    ['pet-ui/src-tauri/src/sidecar_integrity.rs', 'list_runtime_files'],
+    ['pet-ui/src-tauri/src/sidecar_integrity.rs', 'validate_runtime'],
+    ['pet-ui/src-tauri/src/sidecar_runtime_pointer.rs', 'walk_generation_payload'],
+    ['pet-ui/src-tauri/src/sidecar_runtime_pointer.rs', 'resolve_sidecar_runtime'],
+  ]) {
+    const body = balancedItem(rustTokens(readProjectFile(relative)), ['fn', symbol]);
+    assert.equal(
+      body.includes('RUNTIME_ARTIFACT_FILES'),
+      true,
+      `${relative} 的 ${symbol} 没有引用 RUNTIME_ARTIFACT_FILES：退回裸字面量就会单侧漂移`,
+    );
+  }
+
+  // JS 侧同样钉住"引用而非硬编码"：豁免点必须来自共享名单。
+  const verifySource = readProjectFile('scripts/lib/sidecar-package-verify.js');
+  assert.equal(
+    verifySource.includes('RUNTIME_ARTIFACT_FILES'),
+    true,
+    '校验器必须引用共享名单；把豁免写成字面量会让两侧再次分叉',
   );
 });
 

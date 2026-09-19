@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeImmutableGeneration } = require('./sidecar-runtime-immutable');
+const { RUNTIME_ARTIFACT_FILES, makeImmutableGeneration } = require('./sidecar-runtime-immutable');
 const { replacePointer } = require('./sidecar-pointer-replace');
 
 const GENERATION_RE = /^g-[0-9a-f]{64}$/;
@@ -59,6 +59,7 @@ function createGenerationMetadata(input) {
   }
   const files = {};
   for (const relative of Object.keys(input.files).sort()) {
+    if (RUNTIME_ARTIFACT_FILES.includes(relative)) continue;
     if (!relative || path.isAbsolute(relative) || relative.includes('\\') || relative.split('/').includes('..')) {
       fail(`invalid generation metadata path: ${relative}`);
     }
@@ -132,6 +133,7 @@ function walkPayloadFiles(root, current = root, result = {}, options = {}) {
   const entries = fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of entries) {
     if (options.ignoreMetadata && current === root && entry.name === 'generation.json') continue;
+    if (current === root && RUNTIME_ARTIFACT_FILES.includes(entry.name)) continue;
     const target = path.join(current, entry.name);
     const relative = assertSafeChildPath(root, target, 'payload');
     const stat = fs.lstatSync(target);
@@ -265,7 +267,6 @@ function publishCurrentPointer(input) {
   return pointer;
 }
 
-// Task 1 boundary: later tasks add staging build/finalize, pointer publication, leases and GC.
 function publishRuntime(input) {
   if (!input || typeof input !== 'object') fail('publish input required');
   if (typeof input.runtimeDir !== 'string' || input.runtimeDir.length === 0) fail('stable root is required');

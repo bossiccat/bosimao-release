@@ -9,6 +9,7 @@ const {
 } = require('./sidecar-runtime-publish');
 // 单向依赖：common → trust（trust 只依赖 node 内置模块，不反向 require 本文件，无环）。
 const { TRUST_VERSION } = require('./sidecar-trust');
+const { RUNTIME_ARTIFACT_FILES } = require('./sidecar-runtime-immutable');
 
 const SCRIPT_VERSION = '1.0.0';
 const TARGET_TRIPLE = 'x86_64-pc-windows-msvc';
@@ -32,14 +33,11 @@ const ELECTRON_REQUIRED = [
   'v8_context_snapshot.bin',
   'locales/en-US.pak',
 ];
-// sidecar 应用源码闭集：buildPackage 只把这份清单里的文件拷进 resources/app，
-// verifyAppSourceSet 用它当闭集判据 ⇒ 漏一个名字，随包 app 运行期 require 失败；
-// 多一个不存在的，build 在 SIDECAR_PACKAGE_APP_SOURCE_MISSING 中止。
-// 2026-09-19 补 3 个漂移项（adev.js / downlink_pacer.js / resample.js）：三者分别被
-// rtc.js:28 / rtc.js:15 / audio.js:19 require，而 rtc.js、audio.js 都在本清单里，
-// 清单没跟着更新。verifyAppSourceSet 在 verifyPackage 与 buildPackage 的**第一步**
-// 执行，所以 `sidecar-verify` 锁在 HEAD 上一直红着（发布路径整体被阻断）。补齐是
-// **纠正**而非放宽：这份清单是"随包源码闭集"，不是可用可省的候选表。
+// sidecar 应用源码闭集：buildPackage 只把清单里的文件拷进 resources/app，verifyAppSourceSet
+// 用它当判据 ⇒ 漏一个会让随包 app 运行期 require 失败，多一个不存在的会让 build 在
+// SIDECAR_PACKAGE_APP_SOURCE_MISSING 中止（它是 verify/build 的**第一步**，漂移会直接锁死
+// 发布路径）。2026-09-19 补 3 个漂移项（adev.js / downlink_pacer.js / resample.js，分别被
+// rtc.js:28 / rtc.js:15 / audio.js:19 require）：补齐是纠正而非放宽。
 const APP_SOURCES = [
   'adev.js', 'audio.js', 'bridge.js', 'config.js', 'downlink_pacer.js', 'exit-protocol.js',
   'index.html', 'intent-recovery.js', 'intent-selection.js', 'logger.js',
@@ -178,6 +176,7 @@ function sdkRoot(contentRoot) {
 }
 
 // provenance 清单的 metadata 文件相对名（只按名字排除，不按根目录路径）。
+// RUNTIME_ARTIFACT_FILES 在此之外另行排除（运行期可再生产物，与 Rust 侧同集合）。
 function metadataFileSet() {
   return new Set([SHA_FILE, PROVENANCE_FILE, PROVENANCE_DIGEST_FILE]);
 }
@@ -204,7 +203,7 @@ function createProvenance(config, contentRoot) {
   if (fs.existsSync(path.join(contentRoot, 'resources', 'app', 'node_modules', 'electron'))) {
     fail('SIDECAR_PACKAGE_DEV_DEPENDENCY_EMBEDDED');
   }
-  const runtimeFiles = listFiles(contentRoot).filter((item) => !metadataFileSet().has(item));
+  const runtimeFiles = listFiles(contentRoot).filter((item) => !metadataFileSet().has(item) && !RUNTIME_ARTIFACT_FILES.includes(item));
   return {
     schema_version: 1,
     build_script_version: SCRIPT_VERSION,

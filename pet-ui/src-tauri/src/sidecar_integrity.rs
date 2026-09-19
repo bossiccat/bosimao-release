@@ -58,6 +58,14 @@ const TRUST_VERSION: &str = "1.0.0";
 /// 这是刻意保留、有到期条件的历史基线，不是"缺字段就放行"。
 const PRE_VERSIONING_TRUST_VERSION: &str = "1.0.0";
 
+/// 运行期可再生产物（generation 目录的**顶层**相对名）。Chromium 在 CWD（= generation 根）
+/// 写 debug.log 且每次启动追加，内容由运行期决定 ⇒ 它既不能进载荷闭集，也不能参与哈希比对
+/// （否则每次运行之后世代必然自我判否）。JS 侧唯一真相源在
+/// `scripts/lib/sidecar-runtime-immutable.js`；两侧同集合、且下面三处豁免点必须**引用**
+/// 本常量而不是各写裸字面量，由 `scripts/test/sidecar-package.test.js` 的
+/// "the runtime artifact exemption is one set across both languages" 钉住。
+pub(crate) const RUNTIME_ARTIFACT_FILES: [&str; 1] = ["debug.log"];
+
 /// 判定 symlink 或 Windows reparse point（junction/mount point/symlink）。
 /// `metadata` 必须是 `symlink_metadata` 的结果（不跟随链接）。
 pub(crate) fn is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
@@ -130,19 +138,15 @@ pub(crate) fn validate_runtime(spec: &SidecarSpec) -> Result<(), SidecarError> {
     let manifest: ProvenanceManifest =
         serde_json::from_slice(&bytes).map_err(|_| SidecarError::ManifestInvalid)?;
     validate_metadata(&manifest, spec)?;
-    // RP-07 P0（2026-09-02）：debug.log 是 Chromium 在 CWD（= generation 目录）
-    // 写的再生产物（registration_protocol_win.cc 等内部诊断，不受
-    // JAX_SIDECAR_LOG_DIR 控制）。staging 捕获时它可能被写进 provenance 的
-    // runtime_files（v4m 安装实测 3830 项含 debug.log），但安装侧既不保证其
-    // 存在、也不保证内容一致。actual 侧已在 list_runtime_files 豁免；此处
-    // expected 侧同步豁免，否则首次 spawn 前完整性门即熔断
-    // （RuntimeSetMismatch / RuntimeHashMismatch）→ watchdog fused。
-    // 豁免不弱化安全边界：manifest 本身受 ManifestDigestMismatch 保护，且
-    // actual 侧从不对其做 hash 校验（两侧若不对偶只会制造假阳性熔断）。
+    // RP-07 P0（2026-09-02）：旧构建会把 debug.log 写进 provenance 的 runtime_files
+    // （v4m 安装实测 3830 项含它），而安装侧既不保证它存在、也不保证内容一致。
+    // actual 侧已豁免，此处 expected 侧**对偶**豁免（见 RUNTIME_ARTIFACT_FILES）——
+    // 只豁免一侧就是假阳性熔断：RuntimeSetMismatch / RuntimeHashMismatch → watchdog fused。
+    // 豁免不弱化边界：manifest 本身受 ManifestDigestMismatch 保护。
     let declared: Vec<RuntimeFile> = manifest
         .runtime_files
         .iter()
-        .filter(|file| file.path != "debug.log")
+        .filter(|file| !RUNTIME_ARTIFACT_FILES.contains(&file.path.as_str()))
         .cloned()
         .collect();
     let runtime_by_path = validate_runtime_entries(&declared, runtime_dir)?;
@@ -298,16 +302,15 @@ fn list_runtime_files(root: &Path, manifest_path: &Path) -> Result<BTreeSet<Stri
         // generation 布局下 runtime_dir 即 selected generation 目录，其中
         // generation.json 是 pointer 协议元数据，不属于 provenance 的 runtime_files。
         Some("generation.json"),
-        // RP-07 补充（2026-09-02）：Chromium 自身会在 CWD（= generation 目录）写
-        // debug.log（registration_protocol_win.cc 等内部诊断），不受
-        // JAX_SIDECAR_LOG_DIR 控制。它与 logs/ 同属可再生运行时产物，不豁免会使
-        // 首次运行后每次 spawn 都 RuntimeSetMismatch → watchdog 熔断（本机实测）。
-        Some("debug.log"),
     ]
     .into_iter()
     .flatten()
     {
         files.remove(excluded);
+    }
+    // RP-07（2026-09-02）：运行期可再生产物另列（见 RUNTIME_ARTIFACT_FILES 的文档）。
+    for name in RUNTIME_ARTIFACT_FILES {
+        files.remove(name);
     }
     // RP-07 P0 兜底（2026-09-01）：sidecar 运行期在 runtime_dir 下生成的 logs/
     //（logger.js / phone.js 诊断产物）不属于 provenance 闭集；主修复是日志

@@ -32,6 +32,12 @@ junitxml 计数口径。先例：`test_barge_in_flush_contract.py` 用同样的�
 注意 Rust 侧的行为牙齿（`MZ` + 40,000 字节填充必须判否、真实 172MB 产物必须放行）
 住在 Rust 单元测试里，而**没有任何 workflow 跑 `cargo test`**，所以那些牙齿在 CI 上
 不可见；这条 pytest 用例只能锁住两侧的判据形状与常量值，锁不住 Rust 的行为。
+
+2026-09-19 再追加：同族锁扩到**运行期可再生产物**（Chromium 在 generation 根写的
+`debug.log`）。这条规则此前**只存在于 Rust 侧**（RP-07 起 3 处裸字面量），构建侧
+（provenance 闭集 / 校验器 / 指针协议）一处都没有 ⇒ 两侧对"闭集"的定义分叉：
+同一目录启动期放行、构建期判否。本机现役世代实测的形态就是"清单声明 70aa1d9b… /
+实测 78cf15e5…"。锁同时要求两侧每个豁免点都**引用**共享常量而不是各写裸字面量。
 """
 from __future__ import annotations
 
@@ -50,8 +56,8 @@ _JS_SUITES = (
     ROOT / "scripts" / "test" / "sidecar-package.test.js",
 )
 
-# 用例数下限：当前 55。留余量，但足以在"套件被清空/被整体跳过"时变红。
-_MIN_CASES = 53
+# 用例数下限：当前 59。留余量，但足以在"套件被清空/被整体跳过"时变红。
+_MIN_CASES = 57
 
 # 必须存在的用例名 —— 防"文件还在、牙齿被拔"（删掉关键用例但套件仍然全绿）。
 _REQUIRED_CASES = (
@@ -69,6 +75,12 @@ _REQUIRED_CASES = (
     # `sidecar_runtime_trust.rs` 的头注释声称"同一策略"，而 2026-09-19 实测
     # 那句话一度是假的（Rust 侧只判 2 字节 MZ）。注释不算数，这条锁才算。
     "the Rust startup PE judgement is the same structural judgement as the JS one",
+    # 运行期可再生产物（debug.log）必须同时被两侧豁免，且豁免点全部引用共享常量。
+    "the runtime artifact exemption is one set across both languages",
+    # 行为牙齿：已出厂世代（两侧都声明 debug.log）在运行期追加后仍必须通过校验。
+    "a Chromium runtime artifact is not part of the payload closed set",
+    # 行为牙齿：构建期必须把它从 staging 剪除，且两向 fail-closed。
+    "the build prunes Chromium runtime artifacts out of staging instead of packing them",
 )
 
 

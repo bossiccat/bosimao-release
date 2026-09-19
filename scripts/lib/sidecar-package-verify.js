@@ -22,6 +22,7 @@ const {
   verifyAppSourceSet,
   verifySelectedGeneration,
 } = require('./sidecar-package-common');
+const { RUNTIME_ARTIFACT_FILES } = require('./sidecar-runtime-immutable');
 
 // package verifier：从 current.json 解析 pointer → 定位 generations/g-<id> →
 // verifyFinalizedGeneration 闭集校验 → provenance 身份/版本/native 子集/闭集自洽。
@@ -58,7 +59,7 @@ function verifyPackage(config) {
 
   // 5. provenance schema + 版本 + externalBin 身份。
   const manifest = parseGenerationManifest(generationDir);
-  const { nativePaths, runtimePaths } = validateManifestSchema(manifest);
+  const { nativePaths } = validateManifestSchema(manifest);
   verifyAppSourceSet(config.sidecarDir);
   if (manifest.sidecar_package_lock_sha256 !== config.sourceLockHash) fail('SIDECAR_PACKAGE_LOCK_MISMATCH');
   if (manifest.electron_version !== config.electronVersion) fail('SIDECAR_PACKAGE_ELECTRON_VERSION_MISMATCH');
@@ -86,11 +87,15 @@ function verifyPackage(config) {
     fail('SIDECAR_PACKAGE_DEV_DEPENDENCY_EMBEDDED');
   }
 
-  // 7. runtime_files 闭集（排除 metadata 文件与 generation.json，与 Rust list_runtime_files 一致）。
-  const excluded = new Set([...metadataFileSet(), GENERATION_METADATA_FILE]);
+  // 7. runtime_files 闭集（排除 metadata 文件、generation.json 与运行期可再生产物，
+  //    与 Rust list_runtime_files 一致）。声明侧必须与 actual 侧**对偶**豁免：已出厂世代
+  //    （构建侧尚未豁免时产出）仍声明 debug.log，只豁免一侧会变成 SET_MISMATCH。
+  const excluded = new Set([...metadataFileSet(), GENERATION_METADATA_FILE, ...RUNTIME_ARTIFACT_FILES]);
   const actualRuntimePaths = new Set(listFiles(generationDir).filter((item) => !excluded.has(item)));
-  if (actualRuntimePaths.size !== runtimePaths.size
-      || [...actualRuntimePaths].some((item) => !runtimePaths.has(item))) {
+  const declaredRuntime = manifest.runtime_files.filter((item) => !RUNTIME_ARTIFACT_FILES.includes(item.path));
+  const declaredRuntimePaths = new Set(declaredRuntime.map((item) => item.path));
+  if (actualRuntimePaths.size !== declaredRuntimePaths.size
+      || [...actualRuntimePaths].some((item) => !declaredRuntimePaths.has(item))) {
     fail('SIDECAR_PACKAGE_RUNTIME_SET_MISMATCH');
   }
   const requiredNative = new Set(NATIVE_REQUIRED.map(
@@ -100,11 +105,11 @@ function verifyPackage(config) {
       || [...requiredNative].some((item) => !nativePaths.has(item))) {
     fail('SIDECAR_PACKAGE_NATIVE_SET_MISMATCH');
   }
-  const runtimeByPath = new Map(manifest.runtime_files.map((item) => [item.path, item.sha256]));
+  const runtimeByPath = new Map(declaredRuntime.map((item) => [item.path, item.sha256]));
   for (const item of manifest.native_files) {
     if (runtimeByPath.get(item.path) !== item.sha256) fail('SIDECAR_PACKAGE_NATIVE_SUBSET_MISMATCH');
   }
-  for (const item of manifest.runtime_files) {
+  for (const item of declaredRuntime) {
     const file = path.join(generationDir, item.path);
     if (!fs.existsSync(file) || sha256File(file) !== item.sha256) fail('SIDECAR_PACKAGE_RUNTIME_MISMATCH');
   }
