@@ -142,7 +142,13 @@ async def run_phone_round(relay_url: str, token: str, pairing_code: str,
 
 
 async def wait_relay_up(port: int, timeout_s: float = 8.0) -> None:
-    async with httpx.AsyncClient(timeout=1.0) as ac:
+    # 就绪轮询打的是 http://127.0.0.1:{port}/relay/health。`httpx` 默认 `trust_env=True`
+    # 会把 HTTP_PROXY 应用到 loopback 上 ⇒ 中继已经起来却一直探不到，最后报"未就绪"。
+    # 这个 client 只在本函数里轮询这一个 loopback 地址，`trust_env=False` 无副作用
+    # （httpx 0.28.1 里 trust_env 只管环境/系统代理与 SSL_CERT_FILE/DIR）。
+    # 实测：outputs/2026-09-19-httpx-loopback-proxy-cells.txt
+    # 契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
+    async with httpx.AsyncClient(timeout=1.0, trust_env=False) as ac:
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             try:

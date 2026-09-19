@@ -133,7 +133,11 @@ def check_config_reload(client: httpx.Client) -> None:
 async def _ws_alert_check(client: httpx.Client) -> None:
     """WS 订阅 + 触发测试提醒 → 断言收到 alert 事件"""
     try:
-        async with websockets.connect(WS_URL) as ws:
+        # 探本机 WS 必须显式绕代理：`websockets` 默认按环境代理走（HTTP_PROXY/ALL_PROXY），
+        # 设了代理时 `ws://127.0.0.1:8000` 也会交给代理 ⇒ **端口活着却连不上**。
+        # 同族实测：outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt
+        # 契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
+        async with websockets.connect(WS_URL, proxy=None) as ws:
             r = client.post(
                 f"{BASE}/api/v1/control",
                 json={"action": "trigger_alert_test", "target": "codex"},
@@ -184,7 +188,15 @@ def check_push(client: httpx.Client) -> None:
 
 def main() -> int:
     print("=== 贾克斯模式 e2e 验收 ===")
-    with httpx.Client(timeout=15.0) as c:
+    # 本脚本所有 HTTP 都是打 127.0.0.1:8000（BASE）。`httpx` 默认 `trust_env=True`，
+    # 会把 `HTTP_PROXY` 应用到 loopback 请求上 ⇒ 活端口读成死（代理侧收到绝对 URI）。
+    # `trust_env` 在 httpx 0.28.1 里只影响：环境/系统代理（`_client.py:685/1399`
+    # `allow_env_proxies = trust_env and transport is None`，取 `urllib.request.getproxies()`）
+    # 与 `SSL_CERT_FILE`/`SSL_CERT_DIR`（`_config.py:34/36`，本版本不经 trust_env 启用 netrc）。
+    # 本脚本两者都不依赖 ⇒ 关掉是零副作用的。
+    # 实测：outputs/2026-09-19-httpx-loopback-proxy-cells.txt
+    # 契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
+    with httpx.Client(timeout=15.0, trust_env=False) as c:
         if not check_health(c):
             return 1
         check_status(c)
