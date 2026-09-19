@@ -11,10 +11,17 @@ const {
   APP_SOURCES,
   TARGET_TRIPLE,
   PackageError,
+  createProvenance,
   expectedBundleResourceMap,
   verifyPackage,
 } = require('../lib/sidecar-package');
-const { assertProductionTrust } = require('../lib/sidecar-trust');
+const {
+  NATIVE_NAMES: TRUST_NATIVE_NAMES,
+  PRE_VERSIONING_TRUST_VERSION,
+  TRUST_VERSION,
+  assertProductionTrust,
+} = require('../lib/sidecar-trust');
+const { NATIVE_REQUIRED } = require('../lib/sidecar-package-common');
 const { peBytes } = require('./pe-fixture');
 const { restoreWritableGeneration } = require('../lib/sidecar-runtime-immutable');
 const {
@@ -70,6 +77,52 @@ function closedFileMap(root) {
   const map = {};
   for (const relative of listFiles(root)) map[relative] = sha256File(path.join(root, relative));
   return map;
+}
+
+function rustStrConst(relative, constName) {
+  const source = readProjectFile(relative);
+  const anchor = new RegExp(
+    `^[ \\t]*const\\s+${constName}\\s*:\\s*&str\\s*=\\s*"([^"]*)"\\s*;`,
+    'gm',
+  );
+  const found = [...source.matchAll(anchor)];
+  assert.equal(
+    found.length,
+    1,
+    `${relative} 里 ${constName} 的 &str 常量必须恰好一处（锚在声明行首，不含注释）`,
+  );
+  return found[0][1];
+}
+
+// 取出 Rust 源文件里某个 `const <NAME>: [&str; N] = [ ... ];` 的字符串项。
+// 锚定规则（刻意为之）：声明必须出现在行首（允许缩进）。注释行以 // 或 //! 开头，
+// 永远匹配不到 `^[ \t]*const` —— 而这些文件名在注释里也出现过，锚全文就是
+// "有形状没牙齿"（同 o018 静态锁那次教训）。
+function rustStrArray(relative, constName) {
+  const source = readProjectFile(relative);
+  const anchor = new RegExp(
+    `^[ \\t]*const\\s+${constName}\\s*:\\s*\\[\\s*&str\\s*;\\s*(\\d+)\\s*\\]\\s*=\\s*\\[`,
+    'gm',
+  );
+  const found = [...source.matchAll(anchor)];
+  assert.equal(
+    found.length,
+    1,
+    `${relative} 里 ${constName} 的数组声明必须恰好一处（锚在声明行首，不含注释）`,
+  );
+  const declared = Number(found[0][1]);
+  const start = found[0].index + found[0][0].length;
+  const end = source.indexOf(']', start);
+  assert.ok(end > start, `${relative} 里 ${constName} 的数组没有闭合`);
+  const body = source.slice(start, end);
+  assert.equal(body.includes('['), false, `${relative} 里 ${constName} 的数组体意外嵌套了 [`);
+  const values = [...body.matchAll(/"([^"]*)"/g)].map((match) => match[1]);
+  assert.equal(
+    values.length,
+    declared,
+    `${relative} 里 ${constName} 声明 [&str; ${declared}] 但列了 ${values.length} 项`,
+  );
+  return values;
 }
 
 // 测试侧独立构造 provenance manifest：不复用生产 createProvenance，
@@ -193,6 +246,9 @@ function trustInput(config, generationDir) {
       'resources', 'app', 'node_modules', 'trtc-electron-sdk', 'build', 'Release',
     ),
     runtimeDir: generationDir,
+    // 可信门要拿 selected generation 的 provenance 比对策略版本。
+    // 缺了必须 fail-closed（sidecar-trust-pe.test.js 有专门用例钉这一点）。
+    provenance: JSON.parse(fs.readFileSync(path.join(generationDir, PROVENANCE_FILE), 'utf8')),
   };
 }
 
@@ -404,6 +460,68 @@ test('APP_SOURCES matches the real sidecar/ top-level source set', () => {
   );
 });
 
+test('the native closed set is one set across every production copy', () => {
+  // 同一份"原生集 5 个名字"在本仓有 5 份副本：
+  //   1. scripts/lib/sidecar-trust.js                NATIVE_NAMES     构建期可信门
+  //   2. scripts/lib/sidecar-package-common.js       NATIVE_REQUIRED  provenance 哈希覆盖集
+  //   3. pet-ui/src-tauri/src/sidecar_integrity.rs   REQUIRED         启动期，全路径 + 精确集合相等
+  //   4. pet-ui/src-tauri/src/sidecar_runtime_trust.rs NATIVE_NAMES   启动期
+  //   5. 本文件的 NATIVE_NAMES 字面量（fixture 构造，刻意独立，见 ADR-027）
+  // 前 4 份全在生产路径上，此前**互无锁**，而且是跨语言（JS ↔ Rust）、跨进程
+  // （构建期 ↔ 应用启动期）。这类漂移刚咬过一次（APP_SOURCES，见上一条）；
+  // 这次更糟：没有任何测试同时看它们,所以"改了 JS 忘了改 Rust"只会表现为
+  // 装机后 sidecar 拒绝 spawn（ManifestInvalid / RuntimeUntrusted），
+  // 在 CI 上完全不可见。下面把 5 份钉成同一集合。
+  const productionPrefix = 'resources/app/node_modules/trtc-electron-sdk/build/Release/';
+  const frozen = [...NATIVE_NAMES].sort();
+  assert.equal(frozen.length, 5, '冻结字面量必须是 5 项；增删原生集必须同步改这一条与全部副本');
+
+  assert.deepEqual(
+    [...TRUST_NATIVE_NAMES].sort(),
+    frozen,
+    'scripts/lib/sidecar-trust.js 的 NATIVE_NAMES 与冻结集合不一致（构建期可信门）',
+  );
+  assert.deepEqual(
+    [...NATIVE_REQUIRED].sort(),
+    frozen,
+    'scripts/lib/sidecar-package-common.js 的 NATIVE_REQUIRED 与冻结集合不一致'
+    + '（它是 provenance native_files 的哈希覆盖集：少一个名字等于少一处完整性覆盖）',
+  );
+
+  const integrityPaths = rustStrArray('pet-ui/src-tauri/src/sidecar_integrity.rs', 'REQUIRED');
+  for (const item of integrityPaths) {
+    assert.equal(
+      item.startsWith(productionPrefix),
+      true,
+      `sidecar_integrity.rs 的 REQUIRED 项必须是 ${productionPrefix} 下的全路径，实为 ${item}`,
+    );
+  }
+  assert.deepEqual(
+    integrityPaths.map((item) => path.posix.basename(item)).sort(),
+    frozen,
+    'pet-ui/src-tauri/src/sidecar_integrity.rs 的 REQUIRED 与冻结集合不一致（启动期精确集合相等）',
+  );
+
+  assert.deepEqual(
+    [...rustStrArray('pet-ui/src-tauri/src/sidecar_runtime_trust.rs', 'NATIVE_NAMES')].sort(),
+    frozen,
+    'pet-ui/src-tauri/src/sidecar_runtime_trust.rs 的 NATIVE_NAMES 与冻结集合不一致（启动期可信门）',
+  );
+
+  // 策略版本常量同样是跨语言双份（构建期 JS ↔ 启动期 Rust）。不钉住的话，
+  // "JS 接受、Rust 拒绝 spawn"（或反之）只会在装机后才暴露。
+  assert.equal(
+    rustStrConst('pet-ui/src-tauri/src/sidecar_integrity.rs', 'TRUST_VERSION'),
+    TRUST_VERSION,
+    'Rust 启动期门禁的 TRUST_VERSION 必须与 scripts/lib/sidecar-trust.js 的一致',
+  );
+  assert.equal(
+    rustStrConst('pet-ui/src-tauri/src/sidecar_integrity.rs', 'PRE_VERSIONING_TRUST_VERSION'),
+    PRE_VERSIONING_TRUST_VERSION,
+    'Rust 的版本化之前基线必须与 scripts/lib/sidecar-trust.js 的一致',
+  );
+});
+
 test('resource mapping preserves the dedicated runtime directory contract end to end', () => {
   // RP-07 (2026-08-31): 安装目的地解耦缩短为 jrt/（NSIS 3.11 解压端 260 上限，
   // 完整名最长 269 字符会静默丢文件）；源目录保持规范名 jax-rtc-sidecar-runtime/。
@@ -549,4 +667,42 @@ test('production trust accepts real-size PE externalBin and native closed set', 
   fs.writeFileSync(path.join(generationDir, 'v8_context_snapshot.bin'), Buffer.alloc(64 * 1024));
   fs.writeFileSync(path.join(generationDir, 'locales', 'en-US.pak'), Buffer.alloc(32 * 1024));
   assertProductionTrust(trustInput(config, generationDir));
+});
+
+test('createProvenance stamps the production trust policy version into the manifest', () => {
+  // 缺了这个键，assertProductionTrust 只能退回"版本化之前的基线"，
+  // 于是"策略变了"就只对新构建生效 —— 旧 generation 原样留在野。
+  const { config, generationDir } = fixture();
+  const produced = createProvenance(config, generationDir);
+  assert.equal(produced.trust_version, TRUST_VERSION);
+});
+
+test('manifest schema tolerates an absent trust version but rejects a malformed one', () => {
+  // 本机 current-installed 的两个 generation 是 2026-09-05 构建的，manifest 里
+  // 没有 trust_version，所以 schema 必须继续接受缺键形态（否则它们今天就会红，
+  // 而重建属于尚未批准的出货运维动作）。但键一旦出现就必须是合法值 ——
+  // 未知键依旧一律拒绝，`rejects strict manifest schema drift` 钉着那一半。
+  verifyPackage(fixture().config);
+
+  const declared = fixture({
+    mutateManifest: (manifest) => { manifest.trust_version = TRUST_VERSION; },
+  });
+  assert.equal(verifyPackage(declared.config).trust_version, TRUST_VERSION);
+
+  for (const bad of [123, '', null]) {
+    const broken = fixture({
+      mutateManifest: (manifest) => { manifest.trust_version = bad; },
+    });
+    expectCode(broken.config, 'SIDECAR_PACKAGE_MANIFEST_SCHEMA_INVALID');
+  }
+});
+
+test('production trust rejects a generation whose manifest declares a stale trust policy version', () => {
+  const { config, generationDir } = fixture({
+    mutateManifest: (manifest) => { manifest.trust_version = '0.9.0'; },
+  });
+  // schema 层面它是合法的（非空字符串），只有可信门的版本比对能拦住它 ——
+  // 这正是"把策略变更变成机械后果"的那一步：旧策略的 generation 校验失败 ⇒ 强制重建。
+  verifyPackage(config);
+  expectTrustCode(config, generationDir, 'SIDECAR_PACKAGE_TRUST_VERSION_MISMATCH');
 });

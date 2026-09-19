@@ -7,6 +7,8 @@ const {
   parseCurrentPointer,
   verifyFinalizedGeneration,
 } = require('./sidecar-runtime-publish');
+// 单向依赖：common → trust（trust 只依赖 node 内置模块，不反向 require 本文件，无环）。
+const { TRUST_VERSION } = require('./sidecar-trust');
 
 const SCRIPT_VERSION = '1.0.0';
 const TARGET_TRIPLE = 'x86_64-pc-windows-msvc';
@@ -30,20 +32,14 @@ const ELECTRON_REQUIRED = [
   'v8_context_snapshot.bin',
   'locales/en-US.pak',
 ];
-// sidecar 应用源码闭集：buildPackage 只把这份清单里的文件拷进 resources/app
-// （sidecar-package-build.js "for (const relative of APP_SOURCES)"），
-// verifyAppSourceSet 则用它当闭集判据。因此**清单里的每个名字都必须存在**，
-// 且 sidecar/ 顶层每个 .js 都必须在这里 —— 漏一个，随包 app 就会在运行期
-// require 失败；多一个不存在的，build 会在 SIDECAR_PACKAGE_APP_SOURCE_MISSING 中止。
-//
-// 2026-09-19 补齐 3 个漂移项（adev.js / downlink_pacer.js / resample.js）：
-// 它们分别被随包模块 require —— rtc.js:28 `require('./adev')`、
-// rtc.js:15 `require('./downlink_pacer')`、audio.js:19 `require('./resample')`，
-// 而 rtc.js / audio.js 都在这份清单里。三个文件都已在 git 中（add853d / 484eae2），
-// 只是清单没跟着更新。后果不是静默：verifyAppSourceSet 在本函数与 buildPackage
-// 的**第一步**执行，所以 `sidecar-verify` 锁在 HEAD 上就一直红着
-// （SIDECAR_PACKAGE_APP_SOURCE_SET_MISMATCH），发布路径整体被阻断。
-// 补齐是**纠正**而非放宽：清单本来就是"随包源码闭集"，不是可用可省的候选表。
+// sidecar 应用源码闭集：buildPackage 只把这份清单里的文件拷进 resources/app，
+// verifyAppSourceSet 用它当闭集判据 ⇒ 漏一个名字，随包 app 运行期 require 失败；
+// 多一个不存在的，build 在 SIDECAR_PACKAGE_APP_SOURCE_MISSING 中止。
+// 2026-09-19 补 3 个漂移项（adev.js / downlink_pacer.js / resample.js）：三者分别被
+// rtc.js:28 / rtc.js:15 / audio.js:19 require，而 rtc.js、audio.js 都在本清单里，
+// 清单没跟着更新。verifyAppSourceSet 在 verifyPackage 与 buildPackage 的**第一步**
+// 执行，所以 `sidecar-verify` 锁在 HEAD 上一直红着（发布路径整体被阻断）。补齐是
+// **纠正**而非放宽：这份清单是"随包源码闭集"，不是可用可省的候选表。
 const APP_SOURCES = [
   'adev.js', 'audio.js', 'bridge.js', 'config.js', 'downlink_pacer.js', 'exit-protocol.js',
   'index.html', 'intent-recovery.js', 'intent-selection.js', 'logger.js',
@@ -57,6 +53,12 @@ const MANIFEST_KEYS = [
   'trtc_sdk_version', 'sidecar_package_lock_sha256', 'external_bin', 'native_files',
   'runtime_files', 'bundle_resources',
 ];
+// 具名可选键（2026-09-19）：`trust_version` 是生产可信门的策略版本。为什么可选而非并进
+// MANIFEST_KEYS：本机 current-installed 的两个 generation 是 2026-09-05 构建的，没有这个键；
+// 要求它存在会让它们今天即校验失败，而重建属于尚未批准的出货运维动作。键集合仍然**闭**
+// （未知键一律 SIDECAR_PACKAGE_MANIFEST_SCHEMA_INVALID，`rejects strict manifest schema
+// drift` 钉着），所以"可选"只对这一个具名键开口。
+const MANIFEST_OPTIONAL_KEYS = ['trust_version'];
 const EXTERNAL_BIN_KEYS = ['build_input_file', 'installed_file', 'target_triple', 'sha256'];
 const FILE_KEYS = ['path', 'sha256'];
 
@@ -101,6 +103,15 @@ function sameKeys(value, expected) {
     && Object.keys(value).sort().join('\0') === [...expected].sort().join('\0');
 }
 
+// manifest 顶层键判定：必需键不能少，未知键不能多，具名可选键可有可无（比 `sameKeys` 只多"可选键"）。
+function manifestKeysAcceptable(manifest) {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return false;
+  const allowed = new Set([...MANIFEST_KEYS, ...MANIFEST_OPTIONAL_KEYS]);
+  const keys = Object.keys(manifest);
+  return MANIFEST_KEYS.every((key) => Object.prototype.hasOwnProperty.call(manifest, key))
+    && keys.every((key) => allowed.has(key));
+}
+
 function validateRelativePath(relative) {
   if (typeof relative !== 'string' || relative.length === 0 || relative.includes('\\')) {
     fail('SIDECAR_PACKAGE_MANIFEST_PATH_INVALID');
@@ -127,13 +138,16 @@ function validateFileEntries(entries) {
 }
 
 function validateManifestSchema(manifest) {
-  if (!sameKeys(manifest, MANIFEST_KEYS) || manifest.schema_version !== 1
+  if (!manifestKeysAcceptable(manifest) || manifest.schema_version !== 1
       || manifest.build_script_version !== SCRIPT_VERSION
       || manifest.target_triple !== TARGET_TRIPLE
       || !sameKeys(manifest.external_bin, EXTERNAL_BIN_KEYS)
       || !HASH_RE.test(manifest.external_bin.sha256)
       || !sameKeys(manifest.bundle_resources, Object.keys(expectedBundleResourceMap()))
-      || manifest.bundle_resources['binaries/jax-rtc-sidecar-runtime/'] !== 'jrt/') {
+      || manifest.bundle_resources['binaries/jax-rtc-sidecar-runtime/'] !== 'jrt/'
+      // 可选键一旦出现就必须合法（非字符串/空串判 schema 违规），让 `--verify-only` 也拦得住。
+      || (manifest.trust_version !== undefined
+          && (typeof manifest.trust_version !== 'string' || manifest.trust_version.length === 0))) {
     fail('SIDECAR_PACKAGE_MANIFEST_SCHEMA_INVALID');
   }
   validateRelativePath(manifest.external_bin.build_input_file);
@@ -163,13 +177,13 @@ function sdkRoot(contentRoot) {
   return path.join(contentRoot, 'resources', 'app', 'node_modules', 'trtc-electron-sdk');
 }
 
-// provenance 清单的 metadata 文件相对名（flat 假设已移除，只按名字排除，不按根目录路径）。
+// provenance 清单的 metadata 文件相对名（只按名字排除，不按根目录路径）。
 function metadataFileSet() {
   return new Set([SHA_FILE, PROVENANCE_FILE, PROVENANCE_DIGEST_FILE]);
 }
 
-// 从 contentRoot（staging 或 generation 目录）构造 provenance manifest。
-// contentRoot 语义：stable root 之下的 staging 或不可变 generation 目录，禁止 flat runtimeDir。
+// 从 contentRoot（stable root 之下的 staging 或不可变 generation 目录；禁止 flat runtimeDir）
+// 构造 provenance manifest。
 function createProvenance(config, contentRoot) {
   if (!contentRoot || typeof contentRoot !== 'string') fail('SIDECAR_PACKAGE_CONTENT_ROOT_REQUIRED');
   if (!fs.existsSync(config.executable)) fail('SIDECAR_PACKAGE_EXTERNAL_BIN_MISSING');
@@ -194,6 +208,8 @@ function createProvenance(config, contentRoot) {
   return {
     schema_version: 1,
     build_script_version: SCRIPT_VERSION,
+    // 生产可信门的策略版本：写进 manifest 才能被 assertProductionTrust 比对。
+    trust_version: TRUST_VERSION,
     target_triple: TARGET_TRIPLE,
     electron_version: config.electronVersion,
     trtc_sdk_version: installedVersion,

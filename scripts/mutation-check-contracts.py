@@ -154,6 +154,49 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
      "  'main.js', 'phone.js', 'resample.js', 'rtc-startup.js', 'rtc-termination.js',",
      "  'main.js', 'phone.js', 'rtc-startup.js', 'rtc-termination.js',  # MUTATED",
      "sidecar_trust_pe_contract"),
+
+    # ---- 2026-09-19 原生闭集的跨源不变式锁 ----
+    # 同一份"原生集 5 个名字"有 5 份副本，其中 4 份在生产路径上（JS 构建期 ×2、
+    # Rust 启动期 ×2，跨语言）。此前互无锁：改了 JS 忘了改 Rust 的后果不是构建失败，
+    # 而是装机后 sidecar 拒绝 spawn（ManifestInvalid / RuntimeUntrusted），CI 全程不可见。
+    # 守护是 scripts/test/sidecar-package.test.js 的
+    # "the native closed set is one set across every production copy"，由
+    # backend/tests/contract/test_sidecar_trust_pe_contract.py 拉起。
+    ("原生集只在 sidecar-trust.js 少一个名字（构建期可信门悄悄少验一个文件）",
+     "scripts/lib/sidecar-trust.js",
+     "  'liteav_media_server.exe',\n", "",
+     "sidecar_trust_pe_contract"),
+
+    ("原生集只在 sidecar-package-common.js 少一个名字（provenance 哈希覆盖集缩水）",
+     "scripts/lib/sidecar-package-common.js",
+     "  'liteav_media_server.exe',\n", "",
+     "sidecar_trust_pe_contract"),
+
+    ("原生集只在 Rust 启动期可信门少一个名字（JS/Rust 漂移，构建期完全看不见）",
+     "pet-ui/src-tauri/src/sidecar_runtime_trust.rs",
+     '    "liteav_media_server.exe",\n', "",
+     "sidecar_trust_pe_contract"),
+
+    ("原生集只在 Rust 启动期精确集合相等少一个名字（REQUIRED 与 manifest 不一致）",
+     "pet-ui/src-tauri/src/sidecar_integrity.rs",
+     '        "resources/app/node_modules/trtc-electron-sdk/build/Release/liteav_media_server.exe",\n', "",
+     "sidecar_trust_pe_contract"),
+
+    # ---- 2026-09-19 可信门策略版本（trust_version）----
+    # 策略版本写进 provenance manifest 并比对，是为了让"策略变了"成为机械后果：
+    # 按旧策略构建的 generation 即使还在磁盘上也会校验失败、强制重建。
+    # 守护住在 scripts/test/sidecar-trust-pe.test.js + scripts/test/sidecar-package.test.js。
+    ("策略版本比对被废（旧策略的 generation 又能通过生产可信门）",
+     "scripts/lib/sidecar-trust.js",
+     "  if (declared !== TRUST_VERSION) fail('SIDECAR_PACKAGE_TRUST_VERSION_MISMATCH');",
+     "  if (false) fail('SIDECAR_PACKAGE_TRUST_VERSION_MISMATCH');  // MUTATED: 比对被废",
+     "sidecar_trust_pe_contract"),
+
+    ("只改 JS 侧策略版本（Rust 启动期门禁的常量没跟着改 ⇒ 跨语言漂移）",
+     "scripts/lib/sidecar-trust.js",
+     "const TRUST_VERSION = '1.0.0';",
+     "const TRUST_VERSION = '1.1.0';  // MUTATED: 只改 JS 侧",
+     "sidecar_trust_pe_contract"),
 ]
 
 

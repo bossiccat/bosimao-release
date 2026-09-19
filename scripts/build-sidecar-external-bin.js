@@ -9,6 +9,7 @@ const {
   TARGET_TRIPLE,
   PackageError,
   buildPackage,
+  parseGenerationManifest,
   resolveCurrentGeneration,
   verifyPackage,
 } = require('./lib/sidecar-package');
@@ -126,6 +127,7 @@ function verifyAndTrust(config) {
     executable: path.join(generationDir, config.installedFile),
     nativeDir: path.join(generationDir, 'resources', 'app', 'node_modules', 'trtc-electron-sdk', 'build', 'Release'),
     runtimeDir: generationDir,
+    provenance: manifest,
   });
   return manifest;
 }
@@ -166,7 +168,7 @@ function main(input = {}) {
   let manifest;
   try {
     manifest = verifyOnly ? verify(config) : build(config);
-    // 生产可信门（体积 + PE 头）落在 selected immutable generation 内，
+    // 生产可信门（策略版本 + 体积 + PE 头）落在 selected immutable generation 内，
     // 而非 flat runtime 或 externalBin 构建输入。必须在释放租约前完成：
     // 否则并发 publisher 可在 release 之后替换 current pointer，使被校验的
     // generation 与实际选中的 generation 不一致（TOCTOU）。
@@ -176,6 +178,10 @@ function main(input = {}) {
         executable: path.join(generationDir, activeConfig.installedFile),
         nativeDir: path.join(generationDir, 'resources', 'app', 'node_modules', 'trtc-electron-sdk', 'build', 'Release'),
         runtimeDir: generationDir,
+        // 从（重新解析后的）generation 目录读 manifest，而不是复用上面的 `manifest`
+        // 局部量：pointer 若在校验与该门之间被并发 publisher 换掉，闭包里的旧
+        // manifest 会掩盖这次替换（与上面的 TOCTOU 注释同因）。
+        provenance: (input.parseGenerationManifest || parseGenerationManifest)(generationDir),
       });
     }))(config);
     process.stdout.write(

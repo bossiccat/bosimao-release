@@ -28,6 +28,14 @@ struct ExternalBinManifest {
 struct ProvenanceManifest {
     schema_version: u32,
     build_script_version: String,
+    // 生产可信门的策略版本（对应 `scripts/lib/sidecar-trust.js` 的 TRUST_VERSION）。
+    //
+    // 为什么是 `Option`：本机 current-installed 的两个 generation 是 2026-09-05
+    // 构建的，manifest 里没有这个键。用 `String` 除了 `deny_unknown_fields` 之外
+    // 还会因为"缺字段"反序列化失败 ⇒ 每台机器上 sidecar 都拒绝 spawn。
+    //
+    // `deny_unknown_fields` 保持不变：未知键依旧一律拒绝，只有这一个具名键可选。
+    trust_version: Option<String>,
     target_triple: String,
     electron_version: String,
     trtc_sdk_version: String,
@@ -37,6 +45,18 @@ struct ProvenanceManifest {
     runtime_files: Vec<RuntimeFile>,
     bundle_resources: BTreeMap<String, String>,
 }
+
+/// 生产可信门的策略版本。必须与 `scripts/lib/sidecar-trust.js` 的 `TRUST_VERSION`
+/// 一致 —— `scripts/test/sidecar-package.test.js` 的
+/// "the native closed set is one set across every production copy" 同族不变式锁
+/// 会同时读这两处（跨语言），任一侧单独改动即变红。
+const TRUST_VERSION: &str = "1.0.0";
+
+/// 「版本化之前」的基线版本号：2026-09-05 构建的 generation 的 manifest 里
+/// 没有 `trust_version` 键，它们是在策略版本恰为 1.0.0 时构建的。
+/// 一旦 TRUST_VERSION 被 bump，缺键的旧 generation 会立刻失配 ⇒ 强制重建；
+/// 这是刻意保留、有到期条件的历史基线，不是"缺字段就放行"。
+const PRE_VERSIONING_TRUST_VERSION: &str = "1.0.0";
 
 /// 判定 symlink 或 Windows reparse point（junction/mount point/symlink）。
 /// `metadata` 必须是 `symlink_metadata` 的结果（不跟随链接）。
@@ -198,11 +218,22 @@ pub(crate) fn validate_path(value: &str) -> Result<(), SidecarError> {
     Ok(())
 }
 
+/// 策略版本判定，与 `scripts/lib/sidecar-trust.js` 里
+/// `assertProductionTrust` 的比对同语义：缺键 ⇒ 视为版本化之前的基线。
+/// 抽成独立函数是为了让它能被单元测试直接钉住，而不必构造完整的 `SidecarSpec`。
+fn trust_version_acceptable(declared: Option<&str>) -> bool {
+    declared.unwrap_or(PRE_VERSIONING_TRUST_VERSION) == TRUST_VERSION
+}
+
 fn validate_metadata(
     manifest: &ProvenanceManifest,
     spec: &SidecarSpec,
 ) -> Result<(), SidecarError> {
     if manifest.schema_version != 1
+        // 策略版本比对：把"策略变了"变成机械后果 —— 按旧策略构建的 generation
+        // 即使仍躺在磁盘上、pointer 也仍指向它，也会在这里被拒。
+        // 缺键 ⇒ 视为版本化之前的基线（见 PRE_VERSIONING_TRUST_VERSION）。
+        || !trust_version_acceptable(manifest.trust_version.as_deref())
         || manifest.target_triple != "x86_64-pc-windows-msvc"
         || manifest.external_bin.installed_file
             != spec
@@ -292,4 +323,112 @@ fn normalized_relative(root: &Path, file: PathBuf) -> Result<String, SidecarErro
         .map_err(|_| SidecarError::ManifestInvalid)?
         .to_string_lossy()
         .replace('\\', "/"))
+}
+
+// 2026-09-19：`ProvenanceManifest` 此前**零测试覆盖** —— 它是 `deny_unknown_fields`
+// 的生产启动路径解析点，改错一个字段名的后果是全量 sidecar 拒绝 spawn，
+// 而构建侧的 `--verify-only`（纯 Node）完全测不到。下面这组用例把三件事钉住：
+//   1. 带 `trust_version` 的 manifest 能解析，且缺键形态（旧 generation）也能解析；
+//   2. 策略版本判定在 bump 前后两种形态下都正确；
+//   3. `deny_unknown_fields` **没有**被放宽成"可选键 = 爱加什么加什么"。
+#[cfg(test)]
+mod provenance_manifest_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn native_entries() -> Vec<serde_json::Value> {
+        [
+            "resources/app/node_modules/trtc-electron-sdk/build/Release/trtc_electron_sdk.node",
+            "resources/app/node_modules/trtc-electron-sdk/build/Release/liteav.dll",
+            "resources/app/node_modules/trtc-electron-sdk/build/Release/txffmpeg.dll",
+            "resources/app/node_modules/trtc-electron-sdk/build/Release/txsoundtouch.dll",
+            "resources/app/node_modules/trtc-electron-sdk/build/Release/liteav_media_server.exe",
+        ]
+        .iter()
+        .map(|path| json!({ "path": path, "sha256": "a".repeat(64) }))
+        .collect()
+    }
+
+    /// 一份形状完整的 manifest（键集合与 `createProvenance` 的输出一致）。
+    /// `extra` 用来注入或替换单个顶层键。
+    fn manifest(extra: Option<(&str, serde_json::Value)>) -> String {
+        let mut map = serde_json::Map::new();
+        map.insert("schema_version".into(), json!(1));
+        map.insert("build_script_version".into(), json!("1.0.0"));
+        map.insert("target_triple".into(), json!("x86_64-pc-windows-msvc"));
+        map.insert("electron_version".into(), json!("31.7.7"));
+        map.insert("trtc_sdk_version".into(), json!("13.4.802-beta.3"));
+        map.insert(
+            "sidecar_package_lock_sha256".into(),
+            json!("b".repeat(64)),
+        );
+        map.insert(
+            "external_bin".into(),
+            json!({
+                "build_input_file": "jax-rtc-sidecar-x86_64-pc-windows-msvc.exe",
+                "installed_file": "jax-rtc-sidecar.exe",
+                "target_triple": "x86_64-pc-windows-msvc",
+                "sha256": "c".repeat(64),
+            }),
+        );
+        map.insert("native_files".into(), json!(native_entries()));
+        map.insert("runtime_files".into(), json!(native_entries()));
+        map.insert(
+            "bundle_resources".into(),
+            json!({ "binaries/jax-rtc-sidecar-runtime/": "jrt/" }),
+        );
+        if let Some((key, value)) = extra {
+            map.insert(key.to_string(), value);
+        }
+        serde_json::Value::Object(map).to_string()
+    }
+
+    fn parse(text: &str) -> Result<ProvenanceManifest, serde_json::Error> {
+        serde_json::from_str(text)
+    }
+
+    #[test]
+    fn accepts_a_manifest_carrying_the_current_trust_version() {
+        let parsed = parse(&manifest(Some(("trust_version", json!(TRUST_VERSION)))))
+            .expect("带 trust_version 的 manifest 必须能解析");
+        assert_eq!(parsed.trust_version.as_deref(), Some(TRUST_VERSION));
+        assert!(trust_version_acceptable(parsed.trust_version.as_deref()));
+    }
+
+    #[test]
+    fn accepts_a_pre_versioning_manifest_without_the_key() {
+        // 本机 current-installed 的两个 generation 就是这种形态（2026-09-05 构建）。
+        let parsed = parse(&manifest(None)).expect("缺 trust_version 的旧 manifest 必须仍能解析");
+        assert_eq!(parsed.trust_version, None);
+        assert!(trust_version_acceptable(parsed.trust_version.as_deref()));
+    }
+
+    #[test]
+    fn the_absent_key_judgement_expires_when_the_policy_version_is_bumped() {
+        // 自适配断言：只要"基线 == 当前策略版本"成立，缺键就放行；
+        // 一旦 bump，缺键必须立刻失配 ⇒ 旧 generation 强制重建。
+        assert_eq!(
+            trust_version_acceptable(None),
+            PRE_VERSIONING_TRUST_VERSION == TRUST_VERSION,
+            "缺键的判定必须等价于「基线与当前策略版本相同」——bump 之后必须失配",
+        );
+    }
+
+    #[test]
+    fn rejects_a_stale_declared_trust_version() {
+        let parsed = parse(&manifest(Some(("trust_version", json!("0.9.0")))))
+            .expect("非空字符串在解析层是合法的，只应被策略判定拒绝");
+        assert!(!trust_version_acceptable(parsed.trust_version.as_deref()));
+    }
+
+    #[test]
+    fn a_wrongly_typed_trust_version_fails_deserialization() {
+        assert!(parse(&manifest(Some(("trust_version", json!(123))))).is_err());
+    }
+
+    #[test]
+    fn deny_unknown_fields_is_not_relaxed() {
+        // "可选键"只对 trust_version 这一个具名键开口，不是放宽成任意键。
+        assert!(parse(&manifest(Some(("untrusted_extension", json!(true))))).is_err());
+    }
 }

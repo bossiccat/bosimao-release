@@ -20,6 +20,11 @@ junitxml 计数口径。先例：`test_barge_in_flush_contract.py` 用同样的�
 
 不 skip：按仓库铁律，缺 node 时**响亮失败**而不是静默通过 ——
 跳过一次等于让这条契约消失一次。
+
+2026-09-19 追加：这些套件现在还承载**原生闭集的跨源不变式锁**。同一份"原生集 5 个
+名字"在本仓有 5 份副本，其中 4 份在生产路径上且跨语言（JS 构建期 × 2、Rust 启动期 × 2），
+此前互无锁。把锁放在这里（而不是 Rust 单元测试里）是因为它必须同时看到 JS 与 Rust 两侧，
+而这条 pytest 用例已经是两端唯一的汇合点。
 """
 from __future__ import annotations
 
@@ -38,8 +43,8 @@ _JS_SUITES = (
     ROOT / "scripts" / "test" / "sidecar-package.test.js",
 )
 
-# 用例数下限：当前 47。留余量，但足以在"套件被清空/被整体跳过"时变红。
-_MIN_CASES = 45
+# 用例数下限：当前 54。留余量，但足以在"套件被清空/被整体跳过"时变红。
+_MIN_CASES = 52
 
 # 必须存在的用例名 —— 防"文件还在、牙齿被拔"（删掉关键用例但套件仍然全绿）。
 _REQUIRED_CASES = (
@@ -51,6 +56,8 @@ _REQUIRED_CASES = (
     "subsystem is not part of the PE-ness judgement (CUI is still a PE)",
     # 源码闭集与真实 sidecar/ 一致（漂移曾让 sidecar-verify 在 HEAD 上红了一周）。
     "APP_SOURCES matches the real sidecar/ top-level source set",
+    # 原生闭集跨 5 份副本（JS×2 + Rust×2 + 冻结字面量）必须是同一集合。
+    "the native closed set is one set across every production copy",
 )
 
 

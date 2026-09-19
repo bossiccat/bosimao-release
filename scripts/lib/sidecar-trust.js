@@ -12,6 +12,19 @@ const path = require('node:path');
 
 const TRUST_VERSION = '1.0.0';
 
+// 「版本化之前」的基线版本号。
+//
+// 本机 current-installed 的两个 generation（g-096f42… / g-82d140…）是 2026-09-05 构建的，
+// 实测它们的 provenance manifest 只有那 10 个必需键、**没有** `trust_version`。
+// 它们是在 TRUST_VERSION 恰为 '1.0.0' 时构建的，所以这里显式把它标注为"版本化之前的
+// 基线"，而不是静默跳过比对：
+//   - 具名常量 + 注释写明历史含义与**失效条件**；
+//   - 一旦 TRUST_VERSION 被 bump（例如 prune 落地那天提到 1.1.0），缺键的旧 generation
+//     会被判 1.0.0 ≠ 新版本 ⇒ 校验失败 ⇒ 强制重建。
+// 这是刻意保留、且有到期条件的**历史基线**，不是 allowlist：
+// 它没有"加一行就放行任意文件"的口子，唯一的容忍对象是"缺少版本键"这一种形态。
+const PRE_VERSIONING_TRUST_VERSION = '1.0.0';
+
 const NATIVE_NAMES = [
   'trtc_electron_sdk.node',
   'liteav.dll',
@@ -108,11 +121,32 @@ function isPeBinary(file) {
   }
 }
 
+// 生产可信门：策略版本 + 体积 + PE 结构。
+//
+// 策略版本（`trust_version`）为什么必须比对
+// ----------------------------------------
+// 可信门的**策略本身会变**（阈值、PE 判据、原生集成员）。变了之后，按旧策略构建的
+// generation 仍然躺在机器上，只靠"新构建走新策略"是拦不住它们的 —— 旧的原样留在野。
+// 把策略版本写进 provenance manifest、并让本函数比对，等于把"策略变了"变成**机械后果**：
+// 缺版本键或版本不匹配的 generation 直接校验失败，强制重建。
+//
+// 输入约定：调用方必须把 **selected generation 的 provenance manifest** 交进来
+// （`input.provenance`）。缺失即 `SIDECAR_PACKAGE_TRUST_PROVENANCE_MISSING` ——
+// 刻意 fail-closed，让"忘了接线"表现为响亮错误，而不是静默跳过比对。
 function assertProductionTrust(input) {
   if (!input || !input.executable || !input.nativeDir || !input.runtimeDir) {
     fail('SIDECAR_PACKAGE_TRUST_INPUT_INVALID');
   }
   const { executable, nativeDir, runtimeDir } = input;
+
+  const provenance = input.provenance;
+  if (!provenance || typeof provenance !== 'object' || Array.isArray(provenance)) {
+    fail('SIDECAR_PACKAGE_TRUST_PROVENANCE_MISSING');
+  }
+  const declared = provenance.trust_version === undefined
+    ? PRE_VERSIONING_TRUST_VERSION
+    : provenance.trust_version;
+  if (declared !== TRUST_VERSION) fail('SIDECAR_PACKAGE_TRUST_VERSION_MISMATCH');
 
   if (!fs.existsSync(executable)) fail('SIDECAR_PACKAGE_TRUST_MISSING');
   if (fs.statSync(executable).size < MIN_EXTERNAL_BIN_BYTES) fail('SIDECAR_PACKAGE_TRUST_MIN_SIZE');
@@ -133,6 +167,7 @@ function assertProductionTrust(input) {
 }
 
 module.exports = {
+  PRE_VERSIONING_TRUST_VERSION,
   TRUST_VERSION,
   assertProductionTrust,
   isPeBinary,

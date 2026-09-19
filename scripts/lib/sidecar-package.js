@@ -48,6 +48,7 @@ module.exports = {
   closedFileMap: common.closedFileMap,
   createProvenance: common.createProvenance,
   expectedBundleResourceMap: common.expectedBundleResourceMap,
+  parseGenerationManifest: common.parseGenerationManifest,
   resolveCurrentGeneration: common.resolveCurrentGeneration,
   sha256File: common.sha256File,
   verifyPackage,

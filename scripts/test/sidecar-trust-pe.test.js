@@ -30,6 +30,8 @@ const path = require('node:path');
 const test = require('node:test');
 
 const {
+  PRE_VERSIONING_TRUST_VERSION,
+  TRUST_VERSION,
   assertProductionTrust,
   isPeBinary,
   MIN_EXTERNAL_BIN_BYTES,
@@ -59,7 +61,8 @@ function writePe(file, options) {
   return file;
 }
 
-// 组装一个"体积达标 + 结构合法"的 assertProductionTrust 输入。
+// 组装一个"体积达标 + 结构合法 + 策略版本匹配"的 assertProductionTrust 输入。
+// `provenance` 是必需的：可信门要拿它比对策略版本（缺失即 fail-closed）。
 function trustFixture(mutate = {}) {
   const root = tempDir();
   const nativeDir = path.join(root, 'native');
@@ -90,7 +93,12 @@ function trustFixture(mutate = {}) {
     fs.writeFileSync(path.join(runtimeDir, name), Buffer.alloc(size));
   }
 
-  return { root, input: { executable, nativeDir, runtimeDir } };
+  const provenance = mutate.provenance === undefined
+    ? { trust_version: TRUST_VERSION }
+    : mutate.provenance;
+  const input = { executable, nativeDir, runtimeDir };
+  if (provenance !== 'OMIT') input.provenance = provenance;
+  return { root, input };
 }
 
 function trustCode(input) {
@@ -218,6 +226,43 @@ test('production trust accepts a CUI native file (subsystem is not its business)
   // liteav_media_server.exe 实为 CUI；信任门必须放行，弹窗属性由 PE 门禁判。
   const { input } = trustFixture({ native: { 'liteav_media_server.exe': 'cui' } });
   assert.equal(trustCode(input), 'OK');
+});
+
+// --------------------------------------------------------------------------
+// 策略版本：让"策略变了"成为机械后果，而不是只对新构建生效
+// --------------------------------------------------------------------------
+test('production trust requires the provenance manifest (no silent skip when unwired)', () => {
+  // 缺失 provenance 时必须**响亮失败**。若这里改成"没给就跳过比对"，
+  // 那么任何一处忘了传 manifest 的调用点都会静默通过 —— 正是本文件要消灭的假绿。
+  const { input } = trustFixture({ provenance: 'OMIT' });
+  assert.equal(input.provenance, undefined);
+  assert.equal(trustCode(input), 'SIDECAR_PACKAGE_TRUST_PROVENANCE_MISSING');
+});
+
+test('production trust rejects a generation whose declared trust policy version is stale', () => {
+  const { input } = trustFixture({ provenance: { trust_version: '0.9.0' } });
+  assert.equal(trustCode(input), 'SIDECAR_PACKAGE_TRUST_VERSION_MISMATCH');
+});
+
+test('production trust treats an absent trust_version as the pre-versioning baseline', () => {
+  // 本机 current-installed 的 generation（2026-09-05 构建）manifest 里没有这个键。
+  // 在"基线 == 当前策略版本"期间它们必须仍然通过；一旦策略版本被 bump
+  // （例如 prune 落地那天），缺键的旧 generation 必须立刻失配 ⇒ 强制重建。
+  // 下面是自适配断言：两种形态都被钉住，改版本的人没法不小心跳过这一步。
+  const { input } = trustFixture({ provenance: {} });
+  if (PRE_VERSIONING_TRUST_VERSION === TRUST_VERSION) {
+    assert.equal(
+      trustCode(input),
+      'OK',
+      '基线与当前策略版本相同期间，缺键的旧 generation 应当通过',
+    );
+    return;
+  }
+  assert.equal(
+    trustCode(input),
+    'SIDECAR_PACKAGE_TRUST_VERSION_MISMATCH',
+    '策略版本已 bump：缺 trust_version 的旧 generation 必须失配，强制重建',
+  );
 });
 
 // --------------------------------------------------------------------------
