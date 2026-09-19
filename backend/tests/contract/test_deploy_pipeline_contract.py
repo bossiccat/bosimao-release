@@ -680,3 +680,39 @@ def test_vpc_readback_records_the_intended_bridge_vpc_population() -> None:
     assert "jax-voice-bridge" in run, "必须点名会发生变化的是 bridge"
     assert "原本为空" in run and "首次 CI 运行" in run, \
         "必须写明这是一次对在线服务的已知配置变更，而不是让运维撞见"
+
+
+def test_vpc_readback_retry_is_bounded_and_budget_is_stated() -> None:
+    """重试必须是**有界**的，且总预算真的 ≤ 60s —— 从源码里算，而不是信注释。
+
+    重试只为容忍**瞬时读取滞后**：偶发假红会让人学会忽略这条守卫。但预算必须有上界，
+    否则一次读滞后就能把 job 拖成超时（那也是一种假红）。
+    """
+    run = _step(_READBACK_STEP)["run"]
+    m = re.search(r"MAX_ATTEMPTS = (\d+)", run)
+    assert m, "必须显式声明最大尝试次数"
+    attempts = int(m.group(1))
+    m = re.search(r"BACKOFF_S = \(([\d,\s]*)\)", run)
+    assert m, "必须显式声明退避序列"
+    delays = [int(x) for x in m.group(1).split(",") if x.strip()]
+    assert len(delays) == attempts - 1, \
+        f"退避序列长度必须是 MAX_ATTEMPTS-1：{attempts} 次尝试应有 {attempts - 1} 段等待"
+    assert sum(delays) <= 60, f"退避总预算 {sum(delays)}s 超过 60s"
+    assert "time.sleep(delay)" in run, "退避必须真的被使用"
+    # 成功时也要打尝试次数：第一次真跑的输出才能显示有没有发生滞后、上界够不够宽。
+    assert "次读取" in run, "成功路径必须打印尝试次数"
+
+
+def test_vpc_readback_retry_cannot_turn_a_mismatch_into_a_pass() -> None:
+    """重试只容忍瞬时滞后，绝不能把**持续**的不一致变成通过。
+
+    这是硬保证：循环里唯一的成功出口是「problems 为空」；耗尽后必须非零退出，且措辞
+    要说明不一致**持续存在**（而不是「可能瞬时」）——凌晨三点看这条报错的人需要知道
+    这不是再等一会儿就会好。
+    """
+    run = _step(_READBACK_STEP)["run"]
+    assert "if not problems:" in run, "唯一的成功出口必须要求 problems 为空"
+    assert run.count("sys.exit(0)") == 1, "唯一的成功退出只能是 Deploy 未执行那一支"
+    assert "sys.exit(1)" in run, "耗尽后必须非零退出"
+    assert "持续存在" in run, "耗尽后的措辞必须说明是持续性不一致，而不是「可能瞬时」"
+    assert "仍与本次部署期望值" in run, "报错要点明重试之后仍然不一致"
