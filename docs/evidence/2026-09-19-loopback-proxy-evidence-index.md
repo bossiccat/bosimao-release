@@ -110,13 +110,13 @@ for rel in ['2026-09-19-urlopen-proxy-fresh-process-cells.txt',
 
 ### 哈希的字节形态（不加这条声明，自证就是一把会歪的尺子）
 
-索引里的 sha256 一律是**本机工作区字节**的哈希。2026-09-19 实测 12 条的形态是
+索引里的 sha256 一律是**本机工作区字节**的哈希。2026-09-19 实测 13 条的形态是
 **混合**的 —— 原因只是当初写入方式不同，不必也不该去统一：
 
 | 形态 | 条数 | 逻辑名 |
 |---|---|---|
 | CRLF | 7 | `false-reading-experiment`、`mechanism-source`、`handler-source`、`fresh-process-cells`、`inventory-scan`、`lock-mutation-real-repo`、`httpx-cells` |
-| LF | 5 | `safe-delete-guard-veto`、`unit-ws-dead-proxy-cells`、`shell-grep-false-zero`、`report-initial-scan`、`report-httpx-ws-inventory` |
+| LF | 6 | `safe-delete-guard-veto`、`unit-ws-dead-proxy-cells`、`shell-grep-false-zero`、`report-initial-scan`、`report-httpx-ws-inventory`、`basetemp-sidesteps-guard` |
 
 两个后果，都要先说清楚：
 
@@ -128,9 +128,35 @@ for rel in ['2026-09-19-urlopen-proxy-fresh-process-cells.txt',
    且可复算的 —— 这正是契约锁 `test_evidence_index_sha256_matches_the_files_present_here`
    在做的事（就地逐字节核对；干净检出时 `skip`，CI 上不会假红）。
 
-为什么值得单独写一节：`core.autocrlf=true` 下，**仓库内**同一份受跟踪文件在本机天然
-有两个都"对"的字节数 —— 本索引自己就是例子：**工作区 11,029 B / blob 10,926 B**，
-差 103 B 恰好是 103 个 `CRLF` 的 `\r`。今天已经因此误报过 14 个"不一致"。
+**为什么值得单独写一节**：`core.autocrlf=true` 下，**仓库内**同一份受跟踪文件在本机天然
+有两个都"对"的字节数（blob 是 LF、工作区是 CRLF，两个数之差**恰好等于工作区的 CRLF 个数**）。
+今天已经因此误报过 14 个"不一致"。
+
+**这里不写死具体数字 —— 引自己的大小是自我失效的**：本索引每被编辑一次，那两个数就变
+（本节初稿写死过一组，改完立刻过期）。要看当次读数就运行：
+
+```bash
+.venv/Scripts/python.exe -c "
+import pathlib, subprocess
+rel = 'docs/evidence/2026-09-19-loopback-proxy-evidence-index.md'
+CR = bytes([0x0D]); LF = bytes([0x0A]); CRLF = CR + LF
+w = pathlib.Path(rel).read_bytes()
+b = subprocess.run(['git', 'show', 'HEAD:' + rel], capture_output=True, check=True).stdout
+norm = w.replace(CRLF, LF)          # 行尾规范化，消掉两边差异
+print('worktree', len(w), 'B   CRLF', w.count(CRLF), ' LF-only', w.count(LF) - w.count(CRLF))
+print('blob    ', len(b), 'B   LF  ', b.count(LF))
+print('规范化后与 blob 相等 ?', norm == b, '  <- 不相等说明有未提交改动')
+print('字节差  ', len(w) - len(b), 'B')
+"
+```
+
+**这条命令有一个前提，初稿没写、照着一跑就露馅了**：`字节差 == 工作区 CRLF 个数`
+只在**工作区干净**（内容已提交、只差行尾）时成立。带未提交改动去跑，字节差里
+混进了新增正文，那个等式立刻不成立 —— 所以上面直接用 `norm == blob` 当判据，
+把"是否干净"这件事也一并量出来，而不是默默假设它。
+
+（用 `bytes([...])` 构造是为了躲开转义 —— 这一点我栽过两次：写成 `b'\\n'` 数到的是
+**字面的「反斜杠 + n」**，不是换行，于是同一份文件被数成 0 个换行。）
 **同一个字节数在不同边上不通用**，这条对 `outputs/` 同样成立。
 
 ---
