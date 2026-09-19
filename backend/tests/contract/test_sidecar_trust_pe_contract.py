@@ -129,7 +129,15 @@ def test_pe_trust_suites_run_green_and_keep_their_teeth(tmp_path: Path) -> None:
     assert proc.returncode == 0, f"PE 信任契约套件未通过\n{detail}"
     assert not failures and not errors, f"PE 信任契约套件有失败用例\n{detail}"
     assert len(cases) >= _MIN_CASES, (
-        f"用例数 {len(cases)} < {_MIN_CASES}：套件被裁剪或整体未执行\n{detail}"
+        f"[junit 用例数低于下限] 本次只数到 {len(cases)} 个 <testcase>，"
+        f"下限 _MIN_CASES={_MIN_CASES}。\n"
+        "这**不是**随机/偶发失败，也不是 node 抖了一下 —— 只有下面两种成因，"
+        "请对号入座，别靠重跑（重跑不会改变本次数到的用例数）：\n"
+        "  1) 套件被裁剪/整体未执行：某个用例被删、被改名，或因条件而不执行；\n"
+        "  2) 你**有意识**地减少/重组了用例，但忘了同步下调本文件里的 _MIN_CASES。\n"
+        "处置：要么把用例补回来，要么**有意识**地下调 _MIN_CASES"
+        "（并在提交信息里写清为什么少了几条）。\n"
+        f"{detail}"
     )
 
     missing = [name for name in _REQUIRED_CASES if name not in names]
