@@ -48,11 +48,100 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK (cmdline-tools + ANDROID_HOME)
-        uses: android-actions/setup-android@v3
+      # ---------------------------------------------------------------------
+      # Android SDK provisioning：显式、固定版本、SHA-256 硬校验、fail-closed。
+      #
+      # 为什么不再用 android-actions/setup-android@v3：
+      #   该 action 内部**无条件**执行 `sdkmanager tools`，而 legacy `tools` 包
+      #   已从 Google 官方仓库下架。实证（均为本仓库可复核的读数）：
+      #     - 2026-09-19 实拉 https://dl.google.com/android/repository/repository2-3.xml
+      #       共 315 个 remotePackage，**没有一个叫 `tools`**；
+      #     - 2026-08-20 的成功运行 32379687406 日志里 `sdkmanager tools` 还能
+      #       "Unzipping... tools/bin/..."，说明该包当时尚在。
+      #   ⇒ 同一份 workflow、同一个 action SHA(9fc6c4e9…)，仅因上游下架 `tools`
+      #     就必然 `Warning: Failed to find package 'tools'` → exit 1，SDK 步骤
+      #     100% 失败（master 上 run 35444853966 等连续 4 次均 27-31s 死于此），
+      #     四道门禁被整段跳过。
+      #
+      # 改为显式下载**按 build 号固定**的 cmdline-tools 归档：
+      #   版本：cmdline-tools 19.0（build 13114758）
+      #   来源：https://dl.google.com/android/repository/commandlinetools-win-13114758_latest.zip
+      #   ↑ 文件名里的 `_latest` 是 Google 的**固定命名惯例**，不是浮动别名：该 URL
+      #     由 build 号 13114758 唯一确定，内容不可变。官方清单 repository2-3.xml 中
+      #     `cmdline-tools;19.0` 的 windows 归档 = 同一 URL，size=143040480，
+      #     sha1=54a582f3bf73e04253602f2d1c80bd5868aac115。
+      #     Google **只发布 SHA-1、不发布 SHA-256**；下面的 SHA-256 是实测值，已用
+      #     官方 sha1/size + dl.google.com 原站前缀做三重交叉印证。两道哈希任一不符
+      #     即 throw，绝不跳过。
+      #   为什么钉 19.0 而非更新的 23.0：实测 23.0 的 sdkmanager 已被 Google 标记
+      #     deprecated 且 `--list` 直接崩溃退出（-1073740791 = 0xC0000409）；19.0 是
+      #     channel-0 稳定版、经典 sdkmanager，实测 JDK 17 下 `--list` exit 0，且
+      #     "platform-tools" / "platforms;android-35" / "build-tools;35.0.0" 三个精确
+      #     包名均可解析。
+      # ---------------------------------------------------------------------
+      - name: Set up Android SDK (pinned cmdline-tools 19.0, SHA-256 verified)
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # 版本与校验值：换版本必须同时更新这三项，否则本步骤必然判红
+          $toolsVersion = '19.0'
+          $toolsBuild   = '13114758'
+          $toolsUrl     = "https://dl.google.com/android/repository/commandlinetools-win-${toolsBuild}_latest.zip"
+          $toolsSha256  = '98b565cb657b012dae6794cefc0f66ae1efb4690c699b78a614b4a6a3505b003'
+          # 官方 repository2-3.xml 所载（Google 的发布口径），用于交叉印证
+          $toolsSha1    = '54a582f3bf73e04253602f2d1c80bd5868aac115'
+
+          # SDK 根由本步骤显式声明，不继承镜像或上一步可能残留的变量
+          $sdkRoot = 'C:\Android\android-sdk'
+          New-Item -ItemType Directory -Force -Path $sdkRoot | Out-Null
+
+          $zip = Join-Path $env:RUNNER_TEMP "commandlinetools-win-$toolsBuild.zip"
+          Write-Host "cmdline-tools $toolsVersion (build $toolsBuild) <- $toolsUrl"
+          Invoke-WebRequest -Uri $toolsUrl -OutFile $zip
+
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
+          $actualSha1   = (Get-FileHash -Algorithm SHA1   -Path $zip).Hash.ToLower()
+          Write-Host "  SHA-256 = $actualSha256"
+          Write-Host "  SHA-1   = $actualSha1"
+          if ($actualSha256 -ne $toolsSha256) {
+            throw "cmdline-tools 归档 SHA-256 不匹配，拒绝使用：期望 $toolsSha256，实得 $actualSha256（$toolsUrl）"
+          }
+          if ($actualSha1 -ne $toolsSha1) {
+            throw "cmdline-tools 归档 SHA-1 与 Google 官方清单不一致，拒绝使用：期望 $toolsSha1，实得 $actualSha1（$toolsUrl）"
+          }
+
+          # 目录名必须是 cmdline-tools\latest —— sdkmanager 依赖该布局定位 SDK 根与自身
+          $toolsDir = Join-Path $sdkRoot 'cmdline-tools\latest'
+          if (Test-Path $toolsDir) { Remove-Item -Recurse -Force $toolsDir }
+          New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+          Expand-Archive -Path $zip -DestinationPath $toolsDir -Force
+
+          # 归档内层是 cmdline-tools/，上提一层到 latest/
+          $inner = Join-Path $toolsDir 'cmdline-tools'
+          if (-not (Test-Path $inner)) { throw "cmdline-tools 归档结构与预期不符：未见内层 $inner" }
+          Get-ChildItem -Path $inner -Force | Move-Item -Destination $toolsDir -Force
+          Remove-Item -Recurse -Force $inner
+
+          $sdkmanager = Join-Path $toolsDir 'bin\sdkmanager.bat'
+          if (-not (Test-Path $sdkmanager)) { throw "sdkmanager 未就位：$sdkmanager" }
+
+          # 后续步骤（含 AGP 经 ANDROID_HOME 探测 SDK）依赖这两项
+          Add-Content -Path $env:GITHUB_ENV  -Value "ANDROID_HOME=$sdkRoot"     -Encoding utf8NoBOM
+          Add-Content -Path $env:GITHUB_ENV  -Value "ANDROID_SDK_ROOT=$sdkRoot" -Encoding utf8NoBOM
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $toolsDir 'bin') -Encoding utf8NoBOM
+
+          Write-Host "ANDROID_HOME = $sdkRoot"
+          Write-Host "sdkmanager   = $sdkmanager"
+          & $sdkmanager --version
+          if ($LASTEXITCODE -ne 0) { throw "sdkmanager --version 退出码 $LASTEXITCODE" }
 
       - name: Install SDK packages (API 35; licenses pre-accepted)
         run: |
+          $ErrorActionPreference = 'Stop'
+          # 显式路径调用，不依赖 PATH 巧合
+          $sdkmanager = Join-Path $env:ANDROID_HOME 'cmdline-tools\latest\bin\sdkmanager.bat'
+          if (-not (Test-Path $sdkmanager)) { throw "sdkmanager 未就位：$sdkmanager" }
+
           $lic = Join-Path $env:ANDROID_HOME 'licenses'
           New-Item -ItemType Directory -Force -Path $lic | Out-Null
           # 写入历代 android-sdk-license 哈希，免去交互式 --licenses
@@ -63,7 +152,9 @@ jobs:
             'd56f5187479451eabf01fb78af6dfcb131a6481e'
           )
           Set-Content -Path (Join-Path $lic 'android-sdk-license') -Value $hashes
-          sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+          & $sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          if ($LASTEXITCODE -ne 0) { throw "sdkmanager --install 退出码 $LASTEXITCODE" }
 
       - name: Set up Gradle (wrapper cache + dependency cache)
         uses: gradle/actions/setup-gradle@v4
