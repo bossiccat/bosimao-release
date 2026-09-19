@@ -34,9 +34,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PORT = 8901
 BASE = f"http://127.0.0.1:{PORT}"
 # 探本机端口必须显式绕代理：裸 urlopen 信任 HTTP_PROXY，设了代理时会把 127.0.0.1 也交给
-# 代理，于是活端口读成死（就绪探测永远 False）。实测与契约锁：
+# 代理，于是活端口读成死（就绪探测永远 False）。
+# 证据 [loopback-proxy/fresh-process-cells]：
 #   outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt
-#   backend/tests/contract/test_loopback_probe_proxy_contract.py
+#   sha256 34f4aaa1e6cdfec1f7dd3e76e695a784f504d1020d2280c8ae2fc516100f95dd
+# 契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
 LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 VENV_PY = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
 ENV_KEYS = (

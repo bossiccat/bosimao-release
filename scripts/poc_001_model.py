@@ -98,7 +98,9 @@ async def main(path: str, json_out: bool) -> int:
         # `httpx` 默认 `trust_env=True` 会把 HTTP_PROXY 应用到 loopback 上 ⇒
         # 模型服务活着却读成"不可达"（代理侧收到绝对 URI）。
         # httpx 0.28.1 里 trust_env 只管环境/系统代理与 SSL_CERT_FILE/DIR ⇒ 关掉无副作用。
-        # 实测：outputs/2026-09-19-httpx-loopback-proxy-cells.txt
+        # 证据 [loopback-proxy/httpx-cells]
+        #   outputs/2026-09-19-httpx-loopback-proxy-cells.txt
+        #   sha256 073e5a3eb8ff419dc397373cb7ac072796f0520fc95baa2b741f47e5ed3435f3
         # 契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
         async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
             for img in images:

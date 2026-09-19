@@ -58,7 +58,9 @@ logger = logging.getLogger("jax-voice-bridge")
 # 为什么：`urllib.request.urlopen` 用进程级全局 opener 且信任 `HTTP_PROXY`，设了代理时
 # 会把 `http://127.0.0.1:19093/...` 也交给代理 —— 于是**桥活着、`rtc_bridge_health` 却报死**。
 # 实测（代理侧记录到绝对 URI，活端口读成 `ERR HTTPError`）：
-#     outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt
+#     证据 [loopback-proxy/fresh-process-cells]
+#       outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt
+#       sha256 34f4aaa1e6cdfec1f7dd3e76e695a784f504d1020d2280c8ae2fc516100f95dd
 # 另一层原因：`urllib.request._opener` 是进程级全局，代理地址在**进程内第一次 urlopen**
 # 时被冻结，所以读数会依赖"进程里第一次 urlopen 发生在什么环境"。自己建 opener 顺带
 # 把这个不确定性一起消掉。

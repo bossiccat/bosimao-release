@@ -22,8 +22,10 @@ import urllib.error
 # 探本机端口必须显式绕代理：本脚本所有 HTTP 都是打 127.0.0.1 上的验证实例，而裸
 # urlopen 信任 HTTP_PROXY，设了代理时会把 127.0.0.1 也交给代理 —— 于是活端口读成死，
 # 40 次就绪重试全部失败，脚本报"启动失败"而其实服务是好的。
-# 实测与契约锁：outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt、
-# backend/tests/contract/test_loopback_probe_proxy_contract.py
+# 证据 [loopback-proxy/fresh-process-cells]
+#   outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt
+#   sha256 34f4aaa1e6cdfec1f7dd3e76e695a784f504d1020d2280c8ae2fc516100f95dd
+# 契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
 LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 ROOT = Path(__file__).resolve().parents[1]

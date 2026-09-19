@@ -135,7 +135,9 @@ async def _ws_alert_check(client: httpx.Client) -> None:
     try:
         # 探本机 WS 必须显式绕代理：`websockets` 默认按环境代理走（HTTP_PROXY/ALL_PROXY），
         # 设了代理时 `ws://127.0.0.1:8000` 也会交给代理 ⇒ **端口活着却连不上**。
-        # 同族实测：outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt
+        # 证据 [loopback-proxy/fresh-process-cells]
+        #   outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt
+        #   sha256 34f4aaa1e6cdfec1f7dd3e76e695a784f504d1020d2280c8ae2fc516100f95dd
         # 契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
         async with websockets.connect(WS_URL, proxy=None) as ws:
             r = client.post(
@@ -194,7 +196,9 @@ def main() -> int:
     # `allow_env_proxies = trust_env and transport is None`，取 `urllib.request.getproxies()`）
     # 与 `SSL_CERT_FILE`/`SSL_CERT_DIR`（`_config.py:34/36`，本版本不经 trust_env 启用 netrc）。
     # 本脚本两者都不依赖 ⇒ 关掉是零副作用的。
-    # 实测：outputs/2026-09-19-httpx-loopback-proxy-cells.txt
+    # 证据 [loopback-proxy/httpx-cells]
+    #   outputs/2026-09-19-httpx-loopback-proxy-cells.txt
+    #   sha256 073e5a3eb8ff419dc397373cb7ac072796f0520fc95baa2b741f47e5ed3435f3
     # 契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
     with httpx.Client(timeout=15.0, trust_env=False) as c:
         if not check_health(c):

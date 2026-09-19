@@ -166,8 +166,10 @@ def main() -> int:
             import urllib.request
             # 探本机端口必须显式绕代理：裸 urlopen 会信任 HTTP_PROXY，把 127.0.0.1 也交给代理，
             # 于是"桥是活的"被读成读取失败 ⇒ bridge_metrics=None ⇒ 下游 `or {}` ⇒ 字段整体缺失。
-            # 实测与契约锁：outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt、
-            # backend/tests/contract/test_loopback_probe_proxy_contract.py
+            # 证据 [loopback-proxy/fresh-process-cells]
+            #   outputs/2026-09-19-urlopen-proxy-fresh-process-cells.txt
+            #   sha256 34f4aaa1e6cdfec1f7dd3e76e695a784f504d1020d2280c8ae2fc516100f95dd
+            # 契约锁：backend/tests/contract/test_loopback_probe_proxy_contract.py
             _loopback_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             with _loopback_opener.open("http://127.0.0.1:19093/metrics", timeout=5) as resp:
                 summary["bridge_metrics"] = json.loads(resp.read().decode("utf-8", "replace"))
