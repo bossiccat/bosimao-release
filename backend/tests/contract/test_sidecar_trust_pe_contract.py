@@ -25,6 +25,13 @@ junitxml 计数口径。先例：`test_barge_in_flush_contract.py` 用同样的�
 名字"在本仓有 5 份副本，其中 4 份在生产路径上且跨语言（JS 构建期 × 2、Rust 启动期 × 2），
 此前互无锁。把锁放在这里（而不是 Rust 单元测试里）是因为它必须同时看到 JS 与 Rust 两侧，
 而这条 pytest 用例已经是两端唯一的汇合点。
+
+同一次修复还补了**跨语言 PE 判据锁**（JS 构建期 `isPeBinary` ↔ Rust 启动期
+`is_pe_binary`）：Rust 侧此前只判 2 字节 `MZ`，而该文件头注释当时就声称"与
+`scripts/lib/sidecar-trust.js` 同一策略"—— 一句没有锁背书的等价性声明。
+注意 Rust 侧的行为牙齿（`MZ` + 40,000 字节填充必须判否、真实 172MB 产物必须放行）
+住在 Rust 单元测试里，而**没有任何 workflow 跑 `cargo test`**，所以那些牙齿在 CI 上
+不可见；这条 pytest 用例只能锁住两侧的判据形状与常量值，锁不住 Rust 的行为。
 """
 from __future__ import annotations
 
@@ -43,8 +50,8 @@ _JS_SUITES = (
     ROOT / "scripts" / "test" / "sidecar-package.test.js",
 )
 
-# 用例数下限：当前 54。留余量，但足以在"套件被清空/被整体跳过"时变红。
-_MIN_CASES = 52
+# 用例数下限：当前 55。留余量，但足以在"套件被清空/被整体跳过"时变红。
+_MIN_CASES = 53
 
 # 必须存在的用例名 —— 防"文件还在、牙齿被拔"（删掉关键用例但套件仍然全绿）。
 _REQUIRED_CASES = (
@@ -58,6 +65,10 @@ _REQUIRED_CASES = (
     "APP_SOURCES matches the real sidecar/ top-level source set",
     # 原生闭集跨 5 份副本（JS×2 + Rust×2 + 冻结字面量）必须是同一集合。
     "the native closed set is one set across every production copy",
+    # 启动期 Rust 的 PE 判据必须与构建期 JS 同口径 ——
+    # `sidecar_runtime_trust.rs` 的头注释声称"同一策略"，而 2026-09-19 实测
+    # 那句话一度是假的（Rust 侧只判 2 字节 MZ）。注释不算数，这条锁才算。
+    "the Rust startup PE judgement is the same structural judgement as the JS one",
 )
 
 

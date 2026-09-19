@@ -94,6 +94,24 @@ function rustStrConst(relative, constName) {
   return found[0][1];
 }
 
+// 取出 JS / Rust 两侧某个数值常量的字面量值（十进制 Number）。
+// 锚在声明行行首：这些常量名在注释里也出现过，锚全文就是"有形状没牙齿"（o018 教训）。
+// `PE_SIGNATURE` / `PE_SIGNATURE_BYTES` 这类同前缀常量不会互相误匹配 ——
+// 正则要求名字之后紧跟 `=`（JS）或 `:`（Rust）。
+function numericConst(relative, constName, isRust) {
+  const source = readProjectFile(relative);
+  const pattern = isRust
+    ? `^[ \\t]*const\\s+${constName}\\s*:\\s*(?:u8|u16|u32|u64|usize)\\s*=\\s*(0x[0-9a-fA-F_]+|[0-9_]+)\\s*;`
+    : `^[ \\t]*const\\s+${constName}\\s*=\\s*(0x[0-9a-fA-F_]+|[0-9_]+)\\s*;`;
+  const found = [...source.matchAll(new RegExp(pattern, 'gm'))];
+  assert.equal(
+    found.length,
+    1,
+    `${relative} 里 ${constName} 的常量声明必须恰好一处（锚在声明行首，不含注释）`,
+  );
+  return Number(found[0][1].replace(/_/g, ''));
+}
+
 // 取出 Rust 源文件里某个 `const <NAME>: [&str; N] = [ ... ];` 的字符串项。
 // 锚定规则（刻意为之）：声明必须出现在行首（允许缩进）。注释行以 // 或 //! 开头，
 // 永远匹配不到 `^[ \t]*const` —— 而这些文件名在注释里也出现过，锚全文就是
@@ -519,6 +537,63 @@ test('the native closed set is one set across every production copy', () => {
     rustStrConst('pet-ui/src-tauri/src/sidecar_integrity.rs', 'PRE_VERSIONING_TRUST_VERSION'),
     PRE_VERSIONING_TRUST_VERSION,
     'Rust 的版本化之前基线必须与 scripts/lib/sidecar-trust.js 的一致',
+  );
+});
+
+test('the Rust startup PE judgement is the same structural judgement as the JS one', () => {
+  // `sidecar_runtime_trust.rs` 的头注释声称「与 scripts/lib/sidecar-trust.js 同一策略」。
+  // 2026-09-19 实测那句话一度是**假的**：Rust 侧 `is_pe_binary` 只判 2 字节 `MZ`，
+  // 而 JS 侧已在 3e221ba 收紧为真结构校验。它跑在**每次启动、全部客户机**上，
+  // 比构建期那条门更险 —— 而两侧是跨语言独立实现，各自的测试只钉自己，
+  // "改了一侧忘了另一侧"没有任何测试能发现（与上一条 native 集锁同因）。
+  //
+  // 本条钉的是**判据形状 + 常量值**，不是行为等价：Rust 侧的行为牙齿由它自己的
+  // `pe_structure_tests` 提供（`MZ` + 40,000 字节填充、`MZ` + 5MB 零填充必须判否）。
+  // 写注释声称"同策略"是不算数的 —— 这条锁才是那句声明的证据。
+  for (const [name, hex] of [
+    ['PE_SIGNATURE', '00004550'],
+    ['OPTIONAL_MAGIC_PE32', '10b'],
+    ['OPTIONAL_MAGIC_PE32_PLUS', '20b'],
+    ['E_LFANEW_OFFSET', '3c'],
+  ]) {
+    const expected = Number.parseInt(hex, 16);
+    assert.equal(
+      numericConst('scripts/lib/sidecar-trust.js', name, false),
+      expected,
+      `JS 侧 ${name} 的取值变了：两侧判据必须同口径（构建期门禁）`,
+    );
+    assert.equal(
+      numericConst('pet-ui/src-tauri/src/sidecar_runtime_trust.rs', name, true),
+      expected,
+      `Rust 侧 ${name} 与 JS 侧不一致 ⇒ 构建期放行、启动期拒绝 spawn（或反之）`,
+    );
+  }
+
+  // 结构四步必须都在 `is_pe_binary` **函数体内**被引用：
+  // MZ → e_lfanew → "PE\0\0" → OptionalHeader.Magic。
+  // 用 token 级（去注释）函数体并锚在函数声明上：这些符号在头注释里也出现过。
+  const body = balancedItem(
+    rustTokens(readProjectFile('pet-ui/src-tauri/src/sidecar_runtime_trust.rs')),
+    ['fn', 'is_pe_binary', '(', 'path', ':', '&', 'Path', ')'],
+  );
+  for (const symbol of [
+    'E_LFANEW_OFFSET',
+    'PE_SIGNATURE',
+    'OPTIONAL_MAGIC_PE32',
+    'OPTIONAL_MAGIC_PE32_PLUS',
+  ]) {
+    assert.equal(
+      body.includes(symbol),
+      true,
+      `is_pe_binary 里没有引用 ${symbol}：判据一旦退回"只验魔数"就不会再引用它`,
+    );
+  }
+  // 反向：判据里不得出现 subsystem —— 该不该是 GUI 是**策略**，归 pe-subsystem-verify.py。
+  assert.equal(
+    body.includes('subsystem'),
+    false,
+    'subsystem 不属于"是不是 PE"的事实判据（本机 5 件原生产物里有 4 件是 CUI，'
+    + '把它们判否等于用策略判错去关掉客户机启动）',
   );
 });
 

@@ -197,6 +197,35 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
      "const TRUST_VERSION = '1.0.0';",
      "const TRUST_VERSION = '1.1.0';  // MUTATED: 只改 JS 侧",
      "sidecar_trust_pe_contract"),
+
+    # ---- 2026-09-19 跨语言 PE 判据锁（JS 构建期 isPeBinary ↔ Rust 启动期 is_pe_binary）----
+    # `sidecar_runtime_trust.rs` 的头注释声称"与 scripts/lib/sidecar-trust.js 同一策略"，
+    # 而实测那句话一度是**假的**：Rust 侧只判 2 字节 MZ，且它跑在每次启动、全部客户机上。
+    # 守护是 scripts/test/sidecar-package.test.js 的
+    # "the Rust startup PE judgement is the same structural judgement as the JS one"。
+    #
+    # ⚠️ 覆盖边界（必须如实说明）：这条 pytest 桥**跑不到 Rust 的行为牙齿** ——
+    # "MZ + 40,000 字节填充必须判否""真实 172MB 产物必须放行"住在 Rust 单元测试里，
+    # 而没有任何 workflow 跑 `cargo test`。下面三个变异只能证明**判据形状/常量值**的锁有牙齿；
+    # Rust 行为侧的变异另由临时脚本验证（见本轮报告）。
+    ("Rust 启动期 PE 签名常量被改（两侧判据不再同口径）",
+     "pet-ui/src-tauri/src/sidecar_runtime_trust.rs",
+     "const PE_SIGNATURE: u32 = 0x0000_4550;",
+     "const PE_SIGNATURE: u32 = 0x0000_4551;  // MUTATED: 只改 Rust 侧",
+     "sidecar_trust_pe_contract"),
+
+    ("Rust 启动期 PE 判据收窄成只认 PE32（丢掉 PE32+ ⇒ 全部真实产物会被判否）",
+     "pet-ui/src-tauri/src/sidecar_runtime_trust.rs",
+     "    magic == OPTIONAL_MAGIC_PE32 || magic == OPTIONAL_MAGIC_PE32_PLUS",
+     "    magic == OPTIONAL_MAGIC_PE32  // MUTATED: 丢掉 PE32+",
+     "sidecar_trust_pe_contract"),
+
+    ("subsystem 被塞进 Rust 的「是不是 PE」事实判据（策略混入）",
+     "pet-ui/src-tauri/src/sidecar_runtime_trust.rs",
+     "    magic == OPTIONAL_MAGIC_PE32 || magic == OPTIONAL_MAGIC_PE32_PLUS\n}",
+     "    let subsystem = magic;  // MUTATED: 策略混入事实判断\n"
+     "    magic == OPTIONAL_MAGIC_PE32 || magic == OPTIONAL_MAGIC_PE32_PLUS\n}",
+     "sidecar_trust_pe_contract"),
 ]
 
 
