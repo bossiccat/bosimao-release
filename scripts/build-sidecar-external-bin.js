@@ -106,6 +106,29 @@ function ensureNativePointerHelper(input = {}) {
   return requireNativePointerHelper({ helperPath });
 }
 
+// runtime 目录与本进程要取的协调锁互为兄弟：锁文件落在 path.dirname(runtimeDir) 里
+// （见 lib/sidecar-runtime-coordination.js coordinationLockPath/:45），而该目录
+// （pet-ui/src-tauri/binaries/）是本工具自己的输出目录，且被 .gitignore:171 整目录忽略
+// ⇒ 干净检出上根本不存在；租约又排在输出树创建之前（sidecar-package-build.js
+// copyTreeInto/:36 才 mkdir）⇒ 新机器/CI 的第一次构建必然在取锁时拿到 ENOENT，并被报成
+// RUNTIME_PARENT_MISSING（表象是"父目录缺失"，真因是"输出目录还没建"）。
+// 故在取租约前幂等创建之：recursive 对并发 publisher 是幂等的，且不触碰锁文件本身，
+// 不影响取锁的互斥语义；提前建好父目录还能让 runtimeCoordinationIdentity 的 realpath
+// 解析对所有并发进程一致，锁名不会分叉。
+// 创建失败必须响亮失败，且诊断要说清是"创建父目录失败"而不是"父目录缺失"。
+function ensureRuntimeParent(config) {
+  const parent = path.dirname(path.normalize(config.runtimeDir).replace(/[\\/]+$/, ''));
+  try {
+    fs.mkdirSync(parent, { recursive: true });
+  } catch (error) {
+    const failure = new Error('SIDECAR_RUNTIME_PARENT_CREATE_FAILED');
+    failure.code = 'SIDECAR_RUNTIME_PARENT_CREATE_FAILED';
+    failure.target = parent;
+    failure.last_errno_code = (error && error.code) || 'UNKNOWN';
+    throw failure;
+  }
+}
+
 function packageConfig() {
   const versions = lockedVersions();
   return {
@@ -139,6 +162,12 @@ function main(input = {}) {
   if (verifyOnly) requireNativePointerHelper(input);
   else ensureNativePointerHelper(input);
   const config = (input.packageConfig || packageConfig)();
+  // 取租约之前先把输出目录建出来：干净检出上 binaries/ 不存在（.gitignore:171），
+  // 而锁文件就在该目录里。publish 与 migration 两条取锁路径的锁父目录都是
+  // path.dirname(config.runtimeDir)（migration: lib/sidecar-runtime-migration.js:105
+  // `acquireMigrationLock(path.dirname(path.resolve(runtimeDir)))` 配合本文件下方
+  // `path.join(runtimeParent, basename(config.runtimeDir))`），故一处调用覆盖两者。
+  ensureRuntimeParent(config);
   // 普通发布与 legacy 迁移共用同一把跨进程租约，避免迁移的 final probe
   // 到 rename/publish/verify 期间被并发 build 写入。
   const lease = input.acquireRuntimeLease || acquireRuntimeLease;
@@ -197,8 +226,12 @@ function diagnosticCode(error) {
   const helperCode = /^SIDECAR_POINTER_REPLACE_HELPER_[A-Z_]+/.exec(error.code || error.message || '');
   const coordinationCode = /^SIDECAR_RUNTIME_COORDINATION_[A-Z_]+/.exec(error.code || error.message || '');
   const toolchainCode = /^SIDECAR_CARGO_TOOLCHAIN_[A-Z_]+/.exec(error.code || error.message || '');
+  // 输出目录创建失败：与协调原语的 RUNTIME_PARENT_MISSING（父目录缺失）区分开，
+  // 这里说的是"我们试图创建它但失败了"，errno 由 error.last_errno_code 带出。
+  const runtimeParentCode = /^SIDECAR_RUNTIME_PARENT_[A-Z_]+/.exec(error.code || error.message || '');
   if (error instanceof PackageError) return error.code;
   if (toolchainCode) return toolchainCode[0];
+  if (runtimeParentCode) return runtimeParentCode[0];
   if (coordinationCode) return coordinationCode[0];
   if (helperCode) return helperCode[0];
   return migrationCode ? migrationCode[0] : 'SIDECAR_PACKAGE_UNEXPECTED_FAILURE';
@@ -216,6 +249,7 @@ if (require.main === module) {
 module.exports = {
   diagnosticCode,
   ensureNativePointerHelper,
+  ensureRuntimeParent,
   main,
   packageConfig,
   requireNativePointerHelper,
