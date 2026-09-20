@@ -5,6 +5,9 @@ on:
   push:
     tags:
       - "v*"
+  # 本仓 `git tag -l` = 0 ⇒ 上面两条从未触发过 release job。没有 workflow_dispatch
+  # 就根本没有"手动跑一次看现场"的入口，Phase 0 会一直停在纸面上。
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -161,4 +164,114 @@ jobs:
           path: |
             artifacts/release-evidence/
             artifacts/release-evidence/**/release-manifest.json
+          if-no-files-found: warn
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Phase 0：Windows 专属判据的承载 job（**报告制**）
+  #
+  # 为什么必须是独立的一条 windows-latest job
+  #   * `sidecar_runtime_trust.rs` / `sidecar_integrity.rs` 是 `#[cfg(windows)]`，
+  #     在 ubuntu 上编不进去；而 `verify` job 今天在 ubuntu 上跑锁定检查，编出来的
+  #     是 **Linux 产物** —— 它的"通过"证明不了任何 Windows 属性（假绿）。
+  #   * 5 件原生集（含 180MB externalBin 与那个 CUI 的 liteav_media_server.exe）
+  #     由 `npm ci` 提供：`sidecar/node_modules` 未被跟踪（.gitignore:28），
+  #     干净 runner 必须自己装（F8）。
+  #   * `git tag -l` = 0 ⇒ `release` job 从未触发过。这条 job 是第一次把
+  #     Windows 判据真正放进流水线。
+  #
+  # Phase 0 语义（刻意保守）
+  #   PE 子系统扫描用 `--report-only`：只清点不判红（末行标记 `PE_SUBSYSTEM=REPORT_ONLY`，
+  #   刻意与 PASS 不同名，避免被误当成门禁通过）。基础设施性失败（依赖安装超时、
+  #   构建失败、单测红）照常红 —— 那是"跑不起来"，不是"判得不严"。
+  #
+  # 本 job **不进入任何 `needs:`** —— release 流程不因它而阻塞（先跑一段时间再说）。
+  #
+  # !!! 合入前必做 !!! 把下面两处 `@stable` / `@v4` 换成 40 位 SHA（本仓惯例，
+  # 见同文件其余 `uses:`）。这里刻意不填一个我编不出来的 SHA。
+  # ───────────────────────────────────────────────────────────────────────────
+  windows-popup-gate:
+    name: windows-popup-gate
+    runs-on: windows-latest
+    # job 级兜底：任何一步静默挂住都不该烧到 GitHub 的默认 6 小时
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # !!! 合入前换成 SHA !!!
+      # 两处 SHA 已按本仓惯例 pin（2026-09-20，用 gh api 从上游解析、非手抄）：
+      #   dtolnay/rust-toolchain@stable 分支 tip = 6bed0761d98439e5a578e2877258200ad565ba87
+      #   actions/setup-node v4 → commit       = 49933ea5288caeca8642d1e84afbd3f7d6820020
+      # 工具链版本显式钉 1.97.1：本仓无 `rust-toolchain.toml`，不钉就等于让"今天能编"
+      # 依赖 runner 镜像当天的 stable —— 而 android-gates 那次故障正是浮动依赖咬的。
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: "1.97.1"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      # ── 第 0 步：依赖安装（**有界**）─────────────────────────────────────
+      # 2026-09-19 实测：`npm ci` 在本机静默挂死 17 分钟 —— npm 自带 debug 日志
+      # 停在 `13 silly idealTree buildDeps`，**一条 fetch 都没有**，node_modules
+      # 与缓存目录近 20 分钟零写入。若在 runner 上同样挂住，这条 job 会一直烧到
+      # GitHub 的默认 job 超时，而且**没有任何输出能告诉你卡在哪**。
+      # 所以给它上界：显式超时 → 杀掉整棵进程树（含 detached 后代）→ 带出末尾
+      # 80 行 + 日志路径 → 退出码 124（与 coreutils timeout(1) 同码，一眼可辨）。
+      - name: 安装 sidecar 依赖（有界：900s 超时）
+        working-directory: sidecar
+        shell: pwsh
+        run: >-
+          node ../scripts/bounded-exec.mjs
+          --timeout-seconds 900
+          --tail 80
+          --log "${{ runner.temp }}/npm-ci.log"
+          --shell
+          -- npm ci --no-audit --no-fund
+
+      # ── 第 1 步：物化 binaries/ ───────────────────────────────────────────
+      # 必须先做。`cargo build --release` 的 build.rs 会跑 `--verify-only` 当门，
+      # 而干净 runner 上 `binaries/` 整个目录被 .gitignore:171 忽略
+      # ⇒ 直接编会在第一道就红（SIDECAR_PACKAGE_POINTER_MISSING，F2）。
+      - name: 物化 sidecar 世代（binaries/）
+        run: node scripts/build-sidecar-external-bin.js
+
+      - name: cargo build --release（内含 --verify-only 门）
+        working-directory: pet-ui/src-tauri
+        run: cargo build --release
+
+      - name: cargo test --lib（Windows-only 判据的牙齿）
+        working-directory: pet-ui/src-tauri
+        run: cargo test --lib
+
+      # ── Phase 0：PE 子系统扫描（报告制）─────────────────────────────────
+      # 口径是"随包集合"而不是"随便找个目录扫"：tauri 把 bundle.resources 拷进
+      # `target/release`，所以随包 resources（含 trtc-electron-sdk/build/Release
+      # 下那个 CUI）本来就在这棵树里 —— 实测该口径与 `--installed` 等价。
+      # `--exclude-cargo-artifacts` 剪掉的只是 build/deps/examples 里的
+      # build-script 产物（98 个 CUI），它们从不随包发布。
+      - name: PE 子系统扫描（Phase 0：report-only，不判红）
+        run: >-
+          python scripts/pe-subsystem-verify.py
+          --dir pet-ui/src-tauri/target/release
+          --recursive --exclude-cargo-artifacts --report-only
+
+      # shell 用 bash 是为了让 `test/*.test.js` 由 shell 展开 —— 与现有
+      # deploy-cloudrun.yml 的 `cd sidecar && node --test test/*.test.js` 同口径。
+      # （sidecar/test/ 下还有 fixture/probe 这类非测试文件，不宜直接 `node --test test/`。）
+      - name: sidecar 单测（Windows 上才装得了 electron/TRTC）
+        working-directory: sidecar
+        shell: bash
+        run: node --test test/*.test.js
+
+      # "有现场"：即使上面某步红了，npm 日志也必须留下来
+      - name: 上传诊断现场（npm 日志）
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-popup-gate-diagnostics
+          path: ${{ runner.temp }}/npm-ci.log
           if-no-files-found: warn

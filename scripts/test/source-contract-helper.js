@@ -62,7 +62,13 @@ function listJavaScriptFiles(root, current = root) {
   for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
     const absolute = path.join(current, entry.name);
     if (entry.isDirectory()) files.push(...listJavaScriptFiles(root, absolute));
-    if (entry.isFile() && entry.name.endsWith('.js')) files.push(path.relative(root, absolute));
+    // 2026-09-19：`.mjs` 此前**完全不在视野内**（只匹配 `.js`）。实测改动前
+    // scripts/（排除 test/）下 .mjs 文件数 = 0，所以接上是零风险；不接的话，
+    // 新加的 .mjs 会绕过「手写 JS ≤300 行」——失效方向是**漏报**，
+    // 而本仓对排除清单的要求是「失效方向必须多报」。
+    if (entry.isFile() && /\.(?:m?js)$/.test(entry.name)) {
+      files.push(path.relative(root, absolute));
+    }
   }
   return files.sort();
 }
