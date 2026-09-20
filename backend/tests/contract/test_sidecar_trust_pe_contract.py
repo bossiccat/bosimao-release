@@ -33,6 +33,24 @@ junitxml 计数口径。先例：`test_barge_in_flush_contract.py` 用同样的�
 住在 Rust 单元测试里，而**没有任何 workflow 跑 `cargo test`**，所以那些牙齿在 CI 上
 不可见；这条 pytest 用例只能锁住两侧的判据形状与常量值，锁不住 Rust 的行为。
 
+2026-09-20 追加：原生闭集由 5 件变 4 件 —— 媒体混流服务进程（CUI）被**刻意剪除**
+（`scripts/lib/sidecar-trust.js` 的 `INTENTIONALLY_ABSENT_NATIVE`：名字 + 理由 + 移除日期 +
+实测量）。这次改动同时给这座桥加了四条新用例：①它不在任何生产清单/派生副本里、且那份
+"刻意缺席"记录必须带理由与日期（防"悄悄加回来"与"把记录删掉"两个方向）；②构建期剪除的
+两向 fail-closed；③媒体家族 API 引用的构建期 preflight **含阳性对照**（构造一份含
+`startMediaMixingServer(` 的样本并断言它真的被拦下），否则正则写错就是空集通过；
+④buildPackage 里那两行调用**存在**（行为用例钉不住"调用被删"）。
+
+同一次改动还**修正了一处漏算**：上面 2026-09-19 那段说"原生集 5 个名字有 5 份副本"，
+漏掉了 `pet-ui/src-tauri/tests/support.rs` 的 fixture `NATIVE_NAMES`（集成测试副本）。
+它不是生产清单，但它构造的 manifest 会被喂给 `validate_runtime`（`sidecar.rs` 的
+`validate_for_launch` → `validate_native_subset` 的**精确集合相等**），而 `cargo`
+没有任何 workflow 跑过 ⇒ 它是唯一一条能在 CI 上拦住"改了生产清单忘了改 fixture"的锁。
+现已把这份副本与它的 `TRUST_VERSION` 一并纳入闭集锁/版本锁（第 6 份副本、
+第 3 份策略版本副本），并补了对应变异。另外：那份 fixture 的 manifest 此前**没有**
+`trust_version` 键，策略版本 bump 之后它会被判成"版本化之前的基线"，使整组集成测试
+静默换成另一个错因 —— 已显式盖上当前策略版本。
+
 2026-09-19 再追加：同族锁扩到**运行期可再生产物**（Chromium 在 generation 根写的
 `debug.log`）。这条规则此前**只存在于 Rust 侧**（RP-07 起 3 处裸字面量），构建侧
 （provenance 闭集 / 校验器 / 指针协议）一处都没有 ⇒ 两侧对"闭集"的定义分叉：
@@ -81,6 +99,16 @@ _REQUIRED_CASES = (
     "a Chromium runtime artifact is not part of the payload closed set",
     # 行为牙齿：构建期必须把它从 staging 剪除，且两向 fail-closed。
     "the build prunes Chromium runtime artifacts out of staging instead of packing them",
+    # 2026-09-20：刻意剪除的原生成员（媒体混流服务进程，CUI）。
+    # 反向锁：它不在任何生产清单/派生副本里，且那份"刻意缺席"记录带名字/理由/日期/实测量。
+    "the pruned native is a recorded decision and cannot come back silently",
+    # 构建期剪除的两向 fail-closed（该在时不在 ⇒ 报错；剪完仍在 ⇒ 报错）。
+    "the build prunes the intentionally absent native out of staging with two-way fail-closed",
+    # 媒体家族 API 引用的构建期 preflight：**带阳性对照**，防"正则写错 ⇒ 空集通过"。
+    "the media family API reference guard stops the build with a named error",
+    "the media family guard neither misfires on real calls nor misses the real names",
+    # 静态锁：buildPackage 里那两行调用必须存在（行为用例钉不住"调用被删"）。
+    "the build path actually calls the pruned-native prune and the media family guard",
 )
 
 

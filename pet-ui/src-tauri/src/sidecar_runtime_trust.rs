@@ -12,12 +12,13 @@ use crate::sidecar::{SidecarError, SidecarSpec};
 
 const MIN_EXTERNAL_BIN_BYTES: u64 = 4 * 1024 * 1024;
 const MIN_NATIVE_BYTES: u64 = 32 * 1024;
-const NATIVE_NAMES: [&str; 5] = [
+// 4 件：刻意缺席的成员（TRTC 媒体混流服务进程，CUI）已被剪除 —— 见
+// `scripts/lib/sidecar-trust.js` 的 INTENTIONALLY_ABSENT_NATIVE。
+const NATIVE_NAMES: [&str; 4] = [
     "trtc_electron_sdk.node",
     "liteav.dll",
     "txffmpeg.dll",
     "txsoundtouch.dll",
-    "liteav_media_server.exe",
 ];
 const MIN_ELECTRON_BYTES: [(&str, u64); 5] = [
     ("ffmpeg.dll", 512 * 1024),
@@ -36,10 +37,11 @@ fn file_size(path: &Path) -> Option<u64> {
 // 边界（刻意为之，别往这里塞 subsystem 检查）
 // ------------------------------------------
 // 「这个 PE 该不该是 GUI 子系统」是**策略**问题，归 `scripts/pe-subsystem-verify.py`
-// 管辖（它读 OptionalHeader.Subsystem，2=GUI / 3=CUI）。本机实测：5 件原生产物里的
-// 4 件（`liteav.dll` / `txffmpeg.dll` / `txsoundtouch.dll` / `liteav_media_server.exe`）
-// 的 .Subsystem 都是 3，但它们全都是合法 PE；把 subsystem 判定塞进本函数会让
-// NATIVE_NAMES 的校验语义变得不可读，并且**用策略判错去关掉客户机的启动**。
+// 管辖（它读 OptionalHeader.Subsystem，2=GUI / 3=CUI）。本机实测（2026-09-20 复核）：
+// 4 件原生产物里的 3 件（`liteav.dll` / `txffmpeg.dll` / `txsoundtouch.dll`）的
+// .Subsystem 都是 3，`trtc_electron_sdk.node` 是 2，但它们全都是合法 PE；把 subsystem
+// 判定塞进本函数会让 NATIVE_NAMES 的校验语义变得不可读，
+// 并且**用策略判错去关掉客户机的启动**。
 // 两侧分工：
 //     本函数      → 是不是 PE（事实，可判真假）
 //     PE 子系统门禁 → 是不是 GUI（策略，需要产品决策）
@@ -139,7 +141,7 @@ pub(crate) fn validate_runtime_trust(spec: &SidecarSpec) -> Result<(), SidecarEr
 
 // 2026-09-19：`is_pe_binary` 此前只判 2 字节 `MZ`，却承担着"PE provenance"的职责。
 // 下面这组用例把三件事钉住：
-//   1. **假红侧优先** —— 真实 172MB externalBin + 真实 5 件原生集在收紧后必须**全部通过**，
+//   1. **假红侧优先** —— 真实 172MB externalBin + 真实 4 件原生集在收紧后必须**全部通过**，
 //      且走的是生产函数 `validate_runtime_trust` 本身（本门的失效方向是"判错 = 客户机拒绝
 //      启动"，比假绿严重，所以这一侧排在最前面）；
 //   2. 假绿侧 —— `MZ` + 垃圾/零填充、e_lfanew 指向 0 或文件尾之后、未知 magic、截断文件
@@ -266,28 +268,42 @@ mod pe_structure_tests {
 
         // 真实 CUI 产物：.Subsystem 实测是 3，但它依然是合法 PE。
         // 这条把"策略 vs 事实"的边界钉在**真实产物**上，而不是只钉在构造的 fixture 上。
+        //
+        // 2026-09-20：该产物已被剪除出原生集（见 `scripts/lib/sidecar-trust.js` 的
+        // INTENTIONALLY_ABSENT_NATIVE），所以不能再假设它存在 —— 本机 current-installed
+        // 的世代仍是 prune 之前的形态（构建于 2026-09-05），这里只在它确实存在时保留
+        // 这条产物级事实钉，并**响亮打印**"世代尚未重建"（不静默通过）。
+        // prune 生效后走 else 分支：那是预期形态，不是缺陷。
         let media_server = native_root.join("liteav_media_server.exe");
-        let bytes = std::fs::read(&media_server).expect("read liteav_media_server.exe");
-        let lfanew = E_LFANEW_OFFSET as usize;
-        let pe_offset = u32::from_le_bytes([
-            bytes[lfanew],
-            bytes[lfanew + 1],
-            bytes[lfanew + 2],
-            bytes[lfanew + 3],
-        ]) as usize;
-        let subsystem = u16::from_le_bytes([
-            bytes[pe_offset + OPTIONAL_SUBSYSTEM_OFFSET],
-            bytes[pe_offset + OPTIONAL_SUBSYSTEM_OFFSET + 1],
-        ]);
-        println!("[pe-structure] liteav_media_server.exe subsystem: {subsystem}");
-        assert_eq!(
-            subsystem, CUI_SUBSYSTEM,
-            "本机 liteav_media_server.exe 实测应为 CUI(3)；若产物换了这条要跟着复核"
-        );
-        assert!(
-            is_pe_binary(&media_server),
-            "CUI 是合法 PE —— 策略判定不得关掉客户机启动"
-        );
+        if media_server.exists() {
+            let bytes = std::fs::read(&media_server).expect("read the pruned media server");
+            let lfanew = E_LFANEW_OFFSET as usize;
+            let pe_offset = u32::from_le_bytes([
+                bytes[lfanew],
+                bytes[lfanew + 1],
+                bytes[lfanew + 2],
+                bytes[lfanew + 3],
+            ]) as usize;
+            let subsystem = u16::from_le_bytes([
+                bytes[pe_offset + OPTIONAL_SUBSYSTEM_OFFSET],
+                bytes[pe_offset + OPTIONAL_SUBSYSTEM_OFFSET + 1],
+            ]);
+            println!("[pe-structure] pruned media server subsystem: {subsystem}");
+            assert_eq!(
+                subsystem, CUI_SUBSYSTEM,
+                "该产物实测应为 CUI(3)；若上游换了这条要跟着复核"
+            );
+            assert!(
+                is_pe_binary(&media_server),
+                "CUI 是合法 PE —— 策略判定不得关掉客户机启动"
+            );
+            eprintln!(
+                "[pe-structure] 本机 generation 仍是 prune 之前的形态：媒体混流服务进程仍在盘上。\
+                 rebuild 尚未执行 —— 见 outputs/prune-liteav-media-server-plan.md"
+            );
+        } else {
+            println!("[pe-structure] 媒体混流服务进程已不在 generation 中（prune 已生效）");
+        }
     }
 
     // ----------------------------------------------------------------------

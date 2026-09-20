@@ -19,9 +19,10 @@
 // 所以本文件同时钉两件事：
 //   1. "这是不是 PE" 必须是**结构**判断（MZ → e_lfanew → "PE\0\0" → OptionalHeader.magic）；
 //   2. subsystem **不**属于这个判断。subsystem 是策略，归
-//      `scripts/pe-subsystem-verify.py` 管辖。CUI 的 liteav_media_server.exe 是
-//      合法 PE —— 把策略塞进事实判断会让 NATIVE_NAMES 的校验语义不可读。
-//      下面有专门一条用例把这个边界钉死，防止后人往里加 subsystem 检查。
+//      `scripts/pe-subsystem-verify.py` 管辖。CUI 是合法 PE —— 把策略塞进事实判断
+//      会让 NATIVE_NAMES 的校验语义不可读。下面有专门一条用例把这个边界钉死，
+//      防止后人往里加 subsystem 检查（样本名字 2026-09-20 起换成一个仍在集合内的成员：
+//      原来那个 CUI 产物已被剪除，见 sidecar-trust.js 的 INTENTIONALLY_ABSENT_NATIVE）。
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -223,8 +224,11 @@ test('production trust accepts structurally valid externalBin and native closed 
 });
 
 test('production trust accepts a CUI native file (subsystem is not its business)', () => {
-  // liteav_media_server.exe 实为 CUI；信任门必须放行，弹窗属性由 PE 门禁判。
-  const { input } = trustFixture({ native: { 'liteav_media_server.exe': 'cui' } });
+  // 被剪除的那个媒体混流服务进程实为 CUI（subsystem = 3，见 sidecar-trust.js 的
+  // INTENTIONALLY_ABSENT_NATIVE.measured），信任门必须放行它 —— 弹窗属性由 PE 门禁判。
+  // 2026-09-20：它已不在 NATIVE_NAMES 里，所以这里必须换一个**仍在集合内**的名字来合
+  // CUI 样本；否则 trustFixture 的 mutate 键会落空，这条用例会变成永远通过的空断言。
+  const { input } = trustFixture({ native: { 'liteav.dll': 'cui' } });
   assert.equal(trustCode(input), 'OK');
 });
 

@@ -50,7 +50,10 @@ struct ProvenanceManifest {
 /// 一致 —— `scripts/test/sidecar-package.test.js` 的
 /// "the native closed set is one set across every production copy" 同族不变式锁
 /// 会同时读这两处（跨语言），任一侧单独改动即变红。
-const TRUST_VERSION: &str = "1.0.0";
+// 2026-09-20：与 scripts/lib/sidecar-trust.js 同步 bump（prune 媒体混流服务进程）。
+// 跨语言锁 "the native closed set is one set across every production copy" 同时读这两处，
+// 任一侧单独改动即变红。
+const TRUST_VERSION: &str = "1.1.0";
 
 /// 「版本化之前」的基线版本号：2026-09-05 构建的 generation 的 manifest 里
 /// 没有 `trust_version` 键，它们是在策略版本恰为 1.0.0 时构建的。
@@ -187,12 +190,14 @@ fn validate_native_subset(
     native: &[RuntimeFile],
     runtime: &BTreeMap<String, String>,
 ) -> Result<(), SidecarError> {
-    const REQUIRED: [&str; 5] = [
+    // 4 件：刻意缺席的成员（媒体混流服务进程，CUI）已被剪除 —— 见
+    // scripts/lib/sidecar-trust.js 的 INTENTIONALLY_ABSENT_NATIVE。集合相等仍是精确判据：
+    // 多一件少一件都判 ManifestInvalid。
+    const REQUIRED: [&str; 4] = [
         "resources/app/node_modules/trtc-electron-sdk/build/Release/trtc_electron_sdk.node",
         "resources/app/node_modules/trtc-electron-sdk/build/Release/liteav.dll",
         "resources/app/node_modules/trtc-electron-sdk/build/Release/txffmpeg.dll",
         "resources/app/node_modules/trtc-electron-sdk/build/Release/txsoundtouch.dll",
-        "resources/app/node_modules/trtc-electron-sdk/build/Release/liteav_media_server.exe",
     ];
     let mut paths = BTreeSet::new();
     for item in native {
@@ -331,7 +336,9 @@ fn normalized_relative(root: &Path, file: PathBuf) -> Result<String, SidecarErro
 // 2026-09-19：`ProvenanceManifest` 此前**零测试覆盖** —— 它是 `deny_unknown_fields`
 // 的生产启动路径解析点，改错一个字段名的后果是全量 sidecar 拒绝 spawn，
 // 而构建侧的 `--verify-only`（纯 Node）完全测不到。下面这组用例把三件事钉住：
-//   1. 带 `trust_version` 的 manifest 能解析，且缺键形态（旧 generation）也能解析；
+//   1. 带 `trust_version` 的 manifest 能解析，且缺键形态（旧 generation）也能解析
+//      —— 注意"能解析"与"被放行"是两件事：2026-09-20 策略版本 bump 到 1.1.0 之后，
+//      缺键形态**仍然能解析**（键可选），但**不再被放行**（放行已到期 ⇒ 强制重建）；
 //   2. 策略版本判定在 bump 前后两种形态下都正确；
 //   3. `deny_unknown_fields` **没有**被放宽成"可选键 = 爱加什么加什么"。
 #[cfg(test)]
@@ -340,12 +347,13 @@ mod provenance_manifest_tests {
     use serde_json::json;
 
     fn native_entries() -> Vec<serde_json::Value> {
+        // 与 validate_native_subset 的 REQUIRED 同一集合（4 件）：刻意缺席的成员见
+        // scripts/lib/sidecar-trust.js 的 INTENTIONALLY_ABSENT_NATIVE。
         [
             "resources/app/node_modules/trtc-electron-sdk/build/Release/trtc_electron_sdk.node",
             "resources/app/node_modules/trtc-electron-sdk/build/Release/liteav.dll",
             "resources/app/node_modules/trtc-electron-sdk/build/Release/txffmpeg.dll",
             "resources/app/node_modules/trtc-electron-sdk/build/Release/txsoundtouch.dll",
-            "resources/app/node_modules/trtc-electron-sdk/build/Release/liteav_media_server.exe",
         ]
         .iter()
         .map(|path| json!({ "path": path, "sha256": "a".repeat(64) }))
@@ -399,11 +407,17 @@ mod provenance_manifest_tests {
     }
 
     #[test]
-    fn accepts_a_pre_versioning_manifest_without_the_key() {
-        // 本机 current-installed 的两个 generation 就是这种形态（2026-09-05 构建）。
+    fn rejects_the_pre_versioning_shape_once_the_policy_version_is_bumped() {
+        // 本机 current-installed 的两个 generation 是 2026-09-05 构建的，manifest 里没有
+        // trust_version（= PRE_VERSIONING_TRUST_VERSION）。这条曾在策略版本恰为 1.0.0 时
+        // 被**放行**；2026-09-20 随随包原生集剪除把策略版本 bump 到 1.1.0 ⇒ 该放行到期。
+        // 两件事必须同时成立，本用例分开钉住：
+        //   ① 解析层仍然容忍缺键 —— 旧 manifest 不该因为解析不了而报 ManifestInvalid，
+        //      否则真实原因（策略过期 ⇒ 需要重建）会被"格式坏了"这个错因盖掉；
+        //   ② 判定层必须判否 —— 这正是"强制重建"的机械后果。
         let parsed = parse(&manifest(None)).expect("缺 trust_version 的旧 manifest 必须仍能解析");
         assert_eq!(parsed.trust_version, None);
-        assert!(trust_version_acceptable(parsed.trust_version.as_deref()));
+        assert!(!trust_version_acceptable(parsed.trust_version.as_deref()));
     }
 
     #[test]

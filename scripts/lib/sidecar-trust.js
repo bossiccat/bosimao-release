@@ -10,7 +10,15 @@ const path = require('node:path');
 // a 28-byte externalBin and 10-23-byte native stubs can be internally
 // consistent and still be useless as a commercial runtime.
 
-const TRUST_VERSION = '1.0.0';
+// 2026-09-20：prune 的策略版本（见下方的 INTENTIONALLY_ABSENT_NATIVE）。
+//
+// ⚠️ 这一行只有在 **prune 真正落地的那一天** 才生效，必须与 NATIVE_NAMES 的剪除**同批**发布：
+// bump 会让所有按旧策略构建的既有 generation 在 assertProductionTrust 里判
+// SIDECAR_PACKAGE_TRUST_VERSION_MISMATCH ⇒ 强制重建。而本机 current-installed 的世代
+// （1.0.0，且带着已剪除的 CUI）今天仍是坏的；"重建 generation"是**另一个独立步骤**，
+// 不属于本次改动（见 outputs/prune-liteav-media-server-plan.md）。也就是说：
+//   只改源码不重建 ⇒ 新构建的 app 会拒绝 spawn 老世代（刻意的 fail-closed，不是意外）。
+const TRUST_VERSION = '1.1.0';
 
 // 「版本化之前」的基线版本号。
 //
@@ -25,12 +33,46 @@ const TRUST_VERSION = '1.0.0';
 // 它没有"加一行就放行任意文件"的口子，唯一的容忍对象是"缺少版本键"这一种形态。
 const PRE_VERSIONING_TRUST_VERSION = '1.0.0';
 
+// 「应该在」的随包原生集。**刻意缺席**的成员另列在 INTENTIONALLY_ABSENT_NATIVE：
+// 两份清单并列存在，"它不在"才是一个有记录的决定，而不是某天有人手滑删掉的效果。
 const NATIVE_NAMES = [
   'trtc_electron_sdk.node',
   'liteav.dll',
   'txffmpeg.dll',
   'txsoundtouch.dll',
-  'liteav_media_server.exe',
+];
+
+// 刻意缺席的原生集成员：名字 + 理由 + 移除日期 + 实测量。
+//
+// 为什么需要这个常量：NATIVE_NAMES 只能表达"应该在"。把一个名字删掉之后，没有任何东西
+// 记得它曾经在、为什么不在、什么时候不在的，于是两个方向都会失控 ——
+// 有人当误删又加回去，有人照抄旧清单把随包 CUI 带回来。
+// 本清单不是 allowlist，而是**反向锁**，被三处引用：
+//   1. scripts/test/sidecar-package.test.js 的
+//      "the pruned native is a recorded decision and cannot come back silently"
+//      —— 断言它不在任何一份生产清单/派生副本里，且它在这里（带理由与日期）；
+//   2. scripts/lib/sidecar-package-build.js 的 pruneIntentionallyAbsentNatives
+//      —— 构建期把它的**所有副本**从 staging 剪掉（两向 fail-closed）；
+//   3. scripts/lib/sidecar-package-build.js 的 assertNoMediaFamilyApiReferences
+//      —— 引用媒体混流/推流/截屏家族 API 的随包源码一律构建期中止。
+const INTENTIONALLY_ABSENT_NATIVE = [
+  {
+    name: 'liteav_media_server.exe',
+    reason: 'TRTC 媒体混流（MediaMixing）服务进程，subsystem = 3 (WINDOWS_CUI)：'
+      + '它是休眠的（只由应用显式调用 mediaMixingService.startMediaMixingServer(path) 拉起，'
+      + '本产品从不调用），但随包下发它本身就会让客户机安装树里多一个 CUI 二进制，'
+      + '让 scripts/pe-subsystem-verify.py --installed --expect-gui 判 FAIL。'
+      + '产品决策：从随包 resources 里剔除它（脚本刻意不提供 allowlist）。',
+    removed_on: '2026-09-20',
+    // 实测量（sidecar/node_modules/trtc-electron-sdk/build/Release/，2026-09-20 独立复核）。
+    measured: {
+      bytes: 879656,
+      sha256: '976bb0f2e3430bd9db187724972903bdad7cf27422d684db206ee45b7b2c4893',
+      pe_subsystem: 3,
+      pe_e_lfanew: 0x78,
+      pe_optional_magic: 0x20b,
+    },
+  },
 ];
 
 // Conservative lower bounds far above any fixture stub and below any real
@@ -62,9 +104,10 @@ function fail(code) {
 // 边界（刻意为之，别往这里塞 subsystem 检查）
 // ------------------------------------------
 // 「这个 PE 该不该是 GUI 子系统」是**策略**问题，归 `scripts/pe-subsystem-verify.py`
-// 管辖（它读 OptionalHeader.Subsystem，2=GUI / 3=CUI）。`liteav_media_server.exe`
-// 是 CUI，但它确实是合法 PE；把 subsystem 判定塞进本函数会让它同时承担两种职责，
-// 并让 NATIVE_NAMES 的校验语义变得不可读。两侧的分工：
+// 管辖（它读 OptionalHeader.Subsystem，2=GUI / 3=CUI）。被剪除的那个媒体混流服务进程
+// （见下方 INTENTIONALLY_ABSENT_NATIVE 的 measured.pe_subsystem = 3）确实是合法 PE ——
+// 它是合法 PE **却**被剪，正说明"是不是 PE"与"该不该随包"是两件事；把 subsystem 判定
+// 塞进本函数会让它同时承担两种职责，并让 NATIVE_NAMES 的校验语义变得不可读。两侧的分工：
 //     本函数      → 是不是 PE（事实，可判真假）
 //     PE 子系统门禁 → 是不是 GUI（策略，需要产品决策）
 // `scripts/test/sidecar-trust-pe.test.js` 有专门用例把这条边界钉死。
@@ -167,6 +210,7 @@ function assertProductionTrust(input) {
 }
 
 module.exports = {
+  INTENTIONALLY_ABSENT_NATIVE,
   PRE_VERSIONING_TRUST_VERSION,
   TRUST_VERSION,
   assertProductionTrust,

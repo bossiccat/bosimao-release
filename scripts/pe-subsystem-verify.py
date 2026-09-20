@@ -48,12 +48,20 @@ CUI，全部来自 cargo 的 build-script / 测试 / 示例产物（`build/**`�
 `--dir target/release --recursive` 3 CUI（liteav）+ 98 cargo 产物。
 
 注意这两个口径含 **trtc-electron-sdk 自带的 `liteav_media_server.exe`（CUI）**。
-它是潜伏项而非在飞缺陷（sidecar 应用代码对 `startScreenCapture` /
-`localMediaServer` 零引用），但 `--installed --expect-gui` 与
-`--dir target/release --recursive --expect-gui` **今天都会 FAIL**。
-本脚本刻意**不提供 allowlist**：把「已知 CUI」静默放行正是本 claim 要消灭的
-那类假绿。要让它变绿需要产品决策（从随包 resources 里剔除该二进制，或由
-owner 签字接受），不是改这个脚本。
+它是潜伏项而非在飞缺陷（sidecar 应用代码对媒体混流 / 推流 / 截屏家族零引用，
+构建期另有 preflight 把"日后用到"变成红）。
+
+产品决策已于 2026-09-20 落地：**从随包 resources 里剔除该二进制** —— 名字 + 理由 +
+移除日期 + 实测量记录在 `scripts/lib/sidecar-trust.js` 的 `INTENTIONALLY_ABSENT_NATIVE`，
+构建期由 `scripts/lib/sidecar-package-build.js` 的 `pruneIntentionallyAbsentNatives`
+（两向 fail-closed）与 `SIDECAR_MEDIA_MIXING_REQUIRES_PRUNED_NATIVE` preflight 共同保证。
+
+本脚本刻意**不提供 allowlist**：把「已知 CUI」静默放行正是本 claim 要消灭的那类假绿。
+所以"变绿"只能靠**真的不发货那个二进制**，不是靠改这个脚本，也不是靠在某处加一行豁免。
+
+⚠️ 剪除只让**新构建的世代**干净。客户机（含本机）上已经落地的旧世代每个都含一份该
+二进制，必须另行回收，否则 `--installed --expect-gui` 仍然 FAIL（本机 2026-09-20 实测：
+13 个 exe / 4 个 CUI，4 份都来自盘上残留的 4 个世代）。
 
 debug 构建口径
 --------------

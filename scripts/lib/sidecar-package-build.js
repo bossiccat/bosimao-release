@@ -5,6 +5,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { RUNTIME_ARTIFACT_FILES } = require('./sidecar-runtime-immutable');
+// 单向依赖：build → common（common 不反向 require 本文件，无环，与既有 lib 分层一致）。
+const { APP_SOURCES, PackageError } = require('./sidecar-package-common');
+const { INTENTIONALLY_ABSENT_NATIVE } = require('./sidecar-trust');
 
 // ADR-027 generation 内的稳定 metadata 文件名（与 sidecar-package.js 常量一致）。
 const SHA_FILE = 'jax-rtc-sidecar.exe.sha256';
@@ -84,6 +87,79 @@ function pruneRuntimeArtifacts(sourceDist, targetDir, fail) {
   }
 }
 
+// 媒体混流 / 推流 / 截屏家族的 API 名字：**有界**枚举（显式名字），不做通配。
+//
+// 为什么要有这道门：这些能力依赖随包 SDK 里的 liteav_media_server.exe 或同等的外部媒体
+// 进程，而它已被剪除（见 sidecar-trust.js 的 INTENTIONALLY_ABSENT_NATIVE）。
+// 刻意**不依赖**上游 TRTC 在找不到该 exe 时的行为 —— 那是**未验证**的（没人测过）。
+// 把"日后用到"变成**构建期**的命名错误，而不是上线后在客户机器上静默坏。
+const MEDIA_FAMILY_API_PATTERN = [
+  '\\b[A-Za-z_]*[Mm]ediaMixing[A-Za-z_]*\\b',
+  '\\b(?:start|stop)(?:CloudRecording|LocalRecording|ScreenCapture|LocalPreview)\\b',
+  '\\b(?:getScreenCaptureSources|selectScreenCaptureTarget|pauseScreenCapture|resumeScreenCapture)\\b',
+  '\\bliteav_media_server\\b',
+].join('|');
+
+// 命名错误必须自带来恢复步骤：catch 的人可能只看得见 stderr 的最后一行 code。
+const MEDIA_FAMILY_RECOVERY = [
+  '恢复步骤（按顺序）：',
+  '  1) 先做产品决策：随包下发 CUI 的媒体混流服务进程必须由 owner 签字接受',
+  '     （scripts/pe-subsystem-verify.py 刻意不提供 allowlist）；',
+  '  2) 把该名字从 scripts/lib/sidecar-trust.js 的 INTENTIONALLY_ABSENT_NATIVE 移除，',
+  '     并加回全部生产清单（NATIVE_NAMES / NATIVE_REQUIRED / 两份 Rust 常量 / 冻结字面量）；',
+  '  3) 删掉本文件里对应的 pruneIntentionallyAbsentNatives 调用与这道 preflight；',
+  '  4) 重建 generation 并重装（见 outputs/prune-liteav-media-server-plan.md）。',
+].join('\n');
+
+// 扫描口径：只扫随包发货的 sidecar 应用源码闭集（APP_SOURCES 里的 *.js），
+// 不扫 node_modules（那是不可变 generation 的一部分，由 prune 与哈希覆盖处理）。
+// 边界（如实说明）：它钉得住显式名字；用字符串拼接/动态属性名绕过它是不可能的静态锁
+// 之外的形态 —— 这类绕过只能靠 review，不假装能拦。
+function assertNoMediaFamilyApiReferences(sidecarDir) {
+  if (!sidecarDir) return;
+  const pattern = new RegExp(MEDIA_FAMILY_API_PATTERN);
+  const hits = [];
+  for (const relative of APP_SOURCES) {
+    if (!relative.endsWith('.js')) continue;
+    const file = path.join(sidecarDir, relative);
+    if (!fs.existsSync(file)) continue; // 缺文件由 verifyAppSourceSet 判红，此处不重复判
+    fs.readFileSync(file, 'utf8').split('\n').forEach((line, index) => {
+      if (pattern.test(line)) hits.push(relative + ':' + (index + 1) + ': ' + line.trim());
+    });
+  }
+  if (hits.length === 0) return;
+  const error = new PackageError('SIDECAR_MEDIA_MIXING_REQUIRES_PRUNED_NATIVE');
+  error.message = [
+    'SIDECAR_MEDIA_MIXING_REQUIRES_PRUNED_NATIVE',
+    '随包源码引用了依赖已剪除原生（INTENTIONALLY_ABSENT_NATIVE）的媒体家族 API：',
+    ...hits.map((hit) => '  ' + hit),
+    MEDIA_FAMILY_RECOVERY,
+  ].join('\n');
+  throw error;
+}
+
+// 从 staging 剪除**刻意缺席**的原生集成员（名单见 sidecar-trust.js 的 INTENTIONALLY_ABSENT_NATIVE）。
+// 为什么是"剪除"而不是"不声明"：只把它从清单里删掉会留下一份谁也解释不清的载荷 ——
+// 它仍随包发货、仍占体积、仍让客户机多一个 CUI，而哈希覆盖集里却没有它。
+// 形态刻意照抄上面的 pruneRuntimeArtifacts（不另发明一套），两向 fail-closed：
+//   上游 SDK 有而 staging 里没有 ⇒ 拷贝不完整（剪除退化成空操作，必须响亮报错）；
+//   删完仍在 ⇒ 删除失败，不得带着它继续打包。
+function pruneIntentionallyAbsentNatives(sourceRelease, targetRelease, fail) {
+  for (const entry of INTENTIONALLY_ABSENT_NATIVE) {
+    const staged = path.join(targetRelease, entry.name);
+    if (fs.existsSync(path.join(sourceRelease, entry.name)) && !fs.existsSync(staged)) {
+      fail('SIDECAR_PACKAGE_PRUNED_NATIVE_COPY_INCOMPLETE');
+    }
+    if (!fs.existsSync(staged)) continue;
+    try {
+      fs.rmSync(staged, { force: true });
+    } catch (_) {
+      // 由下方向的存在性断言统一判红，避免把原始 fs 错误当成结论。
+    }
+    if (fs.existsSync(staged)) fail('SIDECAR_PACKAGE_PRUNED_NATIVE_PRUNE_FAILED');
+  }
+}
+
 function buildPackage(config, api) {  const {
     APP_SOURCES,
     createProvenance,
@@ -99,6 +175,9 @@ function buildPackage(config, api) {  const {
     closedFileMap,
   } = api;
   verifyAppSourceSet(config.sidecarDir);
+  // 媒体混流/推流/截屏家族：构建期硬错误。刻意放在**任何 npm ci / 拷贝之前** ——
+  // 这道门是便宜的纯读扫描，没有理由让它等到把包组装完才响。
+  assertNoMediaFamilyApiReferences(config.sidecarDir);
   // SIDECAR_SKIP_NPM_CI=1：跳过 npm ci（前提：调用方已手动在 sidecar/ 装好全新
   // node_modules）。背景（2026-09-02）：宿主 shell 会对长命令发起重试，两个并发
   // npm ci 在同一 node_modules 上竞态死锁（600s 无输出后 SIGTERM，连续 3 次实证）。
@@ -139,6 +218,14 @@ function buildPackage(config, api) {  const {
   const installedSdk = JSON.parse(fs.readFileSync(path.join(appDir, 'node_modules', 'trtc-electron-sdk', 'package.json'), 'utf8')).version;
   if (installedSdk !== config.sdkVersion) fail('SIDECAR_PACKAGE_SDK_VERSION_MISMATCH');
 
+  // 在写任何 manifest / 计算任何闭集之前剪除刻意缺席的原生成员：否则它会既随包发货、
+  // 又被哈希进 native_files/runtime_files（"剪除"就只剩下文档意义）。
+  // 上游侧取 sidecar/node_modules 里那份 SDK dist：它是 npm ci 结果的同源对照，
+  // 也是"上游还在发这个文件"的唯一判据（见 pruneIntentionallyAbsentNatives 的注释）。
+  const sourceRelease = path.join(config.sidecarDir, 'node_modules', 'trtc-electron-sdk', 'build', 'Release');
+  const stagedRelease = path.join(appDir, 'node_modules', 'trtc-electron-sdk', 'build', 'Release');
+  pruneIntentionallyAbsentNatives(sourceRelease, stagedRelease, fail);
+
   // provenance 与 metadata 写入 staging（生成 generation.json 之前）。
   fs.writeFileSync(path.join(stagingDir, SHA_FILE), `${sha256File(path.join(stagingDir, config.installedFile))}\n`, { encoding: 'ascii' });
   const manifest = createProvenance(config, stagingDir);
@@ -162,4 +249,10 @@ function buildPackage(config, api) {  const {
   return verifyPackage(config);
 }
 
-module.exports = { buildPackage, pruneRuntimeArtifacts };
+module.exports = {
+  MEDIA_FAMILY_API_PATTERN,
+  assertNoMediaFamilyApiReferences,
+  buildPackage,
+  pruneIntentionallyAbsentNatives,
+  pruneRuntimeArtifacts,
+};

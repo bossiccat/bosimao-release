@@ -156,30 +156,57 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
      "sidecar_trust_pe_contract"),
 
     # ---- 2026-09-19 原生闭集的跨源不变式锁 ----
-    # 同一份"原生集 5 个名字"有 5 份副本，其中 4 份在生产路径上（JS 构建期 ×2、
-    # Rust 启动期 ×2，跨语言）。此前互无锁：改了 JS 忘了改 Rust 的后果不是构建失败，
-    # 而是装机后 sidecar 拒绝 spawn（ManifestInvalid / RuntimeUntrusted），CI 全程不可见。
+    # 同一份"原生集"有 5 份副本，其中 4 份在生产路径上（JS 构建期 ×2、Rust 启动期 ×2，
+    # 跨语言）。此前互无锁：改了 JS 忘了改 Rust 的后果不是构建失败，而是装机后 sidecar
+    # 拒绝 spawn（ManifestInvalid / RuntimeUntrusted），CI 全程不可见。
+    # 2026-09-20 原生集由 5 件变 4 件（媒体混流服务进程被剪除，见 sidecar-trust.js 的
+    # INTENTIONALLY_ABSENT_NATIVE）。**变异方向随之反转**：原来的"少一个名字"锚点已不存在
+    # （它正是被有意删掉的那一行），继续留着会变成"锚点未命中 ⇒ 校验本身失效"的假结果。
+    # 现在改成"**悄悄加回来**"：任一清单多出那个名字就必须让跨源锁变红。
     # 守护是 scripts/test/sidecar-package.test.js 的
     # "the native closed set is one set across every production copy"，由
     # backend/tests/contract/test_sidecar_trust_pe_contract.py 拉起。
-    ("原生集只在 sidecar-trust.js 少一个名字（构建期可信门悄悄少验一个文件）",
+    ("原生集在 sidecar-trust.js 悄悄加回已剪除的成员（CUI 随包回来）",
      "scripts/lib/sidecar-trust.js",
-     "  'liteav_media_server.exe',\n", "",
+     "  'txsoundtouch.dll',\n",
+     "  'txsoundtouch.dll',\n  'liteav_media_server.exe',  # MUTATED: 悄悄加回来\n",
      "sidecar_trust_pe_contract"),
 
-    ("原生集只在 sidecar-package-common.js 少一个名字（provenance 哈希覆盖集缩水）",
+    ("原生集在 sidecar-package-common.js 悄悄加回已剪除的成员（哈希覆盖集与清单再分叉）",
      "scripts/lib/sidecar-package-common.js",
-     "  'liteav_media_server.exe',\n", "",
+     "  'txsoundtouch.dll',\n",
+     "  'txsoundtouch.dll',\n  'liteav_media_server.exe',  # MUTATED: 悄悄加回来\n",
      "sidecar_trust_pe_contract"),
 
-    ("原生集只在 Rust 启动期可信门少一个名字（JS/Rust 漂移，构建期完全看不见）",
+    ("原生集在 Rust 启动期可信门悄悄加回已剪除的成员（跨语言漂移，构建期完全看不见）",
      "pet-ui/src-tauri/src/sidecar_runtime_trust.rs",
-     '    "liteav_media_server.exe",\n', "",
+     '    "txsoundtouch.dll",\n',
+     '    "txsoundtouch.dll",\n    "liteav_media_server.exe",  // MUTATED: 悄悄加回来\n',
      "sidecar_trust_pe_contract"),
 
-    ("原生集只在 Rust 启动期精确集合相等少一个名字（REQUIRED 与 manifest 不一致）",
+    ("原生集在 Rust 精确集合相等里悄悄加回已剪除的成员（REQUIRED 与其派生 fixture 再分叉）",
      "pet-ui/src-tauri/src/sidecar_integrity.rs",
-     '        "resources/app/node_modules/trtc-electron-sdk/build/Release/liteav_media_server.exe",\n', "",
+     '        "resources/app/node_modules/trtc-electron-sdk/build/Release/txsoundtouch.dll",\n',
+     '        "resources/app/node_modules/trtc-electron-sdk/build/Release/txsoundtouch.dll",\n'
+     '        "resources/app/node_modules/trtc-electron-sdk/build/Release/liteav_media_server.exe",'
+     '  # MUTATED: 悄悄加回来\n',
+     "sidecar_trust_pe_contract"),
+
+    # ---- 2026-09-20 第 6 份原生集副本 + 第 3 份策略版本副本：Rust 集成测试 fixture ----
+    # pet-ui/src-tauri/tests/support.rs 的 NATIVE_NAMES 构造出喂给 validate_runtime 的
+    # manifest（sidecar.rs 的 validate_for_launch → validate_native_subset 精确集合相等）。
+    # 这份副本此前不在任何锁的视野内，而 cargo 未被任何 workflow 跑过 ——
+    # "改了生产清单忘了改 fixture"只能靠 CI 上的跨源锁拦下，故补这两条变异。
+    ("原生集在 Rust 集成测试 fixture 悄悄加回已剪除的成员（fixture 复现了一个不存在的包形态）",
+     "pet-ui/src-tauri/tests/support.rs",
+     '    "txsoundtouch.dll",\n',
+     '    "txsoundtouch.dll",\n    "liteav_media_server.exe",  // MUTATED: 悄悄加回来\n',
+     "sidecar_trust_pe_contract"),
+
+    ("只改 tests/support.rs 的 fixture 策略版本（fixture 声明的是按旧策略构建的世代）",
+     "pet-ui/src-tauri/tests/support.rs",
+     'const TRUST_VERSION: &str = "1.1.0";',
+     'const TRUST_VERSION: &str = "1.2.0";  // MUTATED: fixture 与生产策略版本分叉\n',
      "sidecar_trust_pe_contract"),
 
     # ---- 2026-09-19 可信门策略版本（trust_version）----
@@ -194,8 +221,8 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
 
     ("只改 JS 侧策略版本（Rust 启动期门禁的常量没跟着改 ⇒ 跨语言漂移）",
      "scripts/lib/sidecar-trust.js",
-     "const TRUST_VERSION = '1.0.0';",
-     "const TRUST_VERSION = '1.1.0';  // MUTATED: 只改 JS 侧",
+     "const TRUST_VERSION = '1.1.0';",
+     "const TRUST_VERSION = '1.2.0';  // MUTATED: 只改 JS 侧",
      "sidecar_trust_pe_contract"),
 
     # ---- 2026-09-19 跨语言 PE 判据锁（JS 构建期 isPeBinary ↔ Rust 启动期 is_pe_binary）----
@@ -275,6 +302,34 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
      "scripts/lib/sidecar-package-build.js",
      "    if (!fs.existsSync(staged)) continue;",
      "    continue;  // MUTATED: 剪除变成空操作",
+     "sidecar_trust_pe_contract"),
+
+    # ---- 2026-09-20 刻意剪除的原生成员（媒体混流服务进程，CUI）----
+    # 三条变异分别把三类缺陷退回去：①构建期剪除被摘掉；②剪除函数变成空操作；
+    # ③媒体家族 API 的构建期 preflight 被废。守护住在 scripts/test/sidecar-package.test.js
+    # 的四条新用例（含**阳性对照**），由本目录的 pytest 桥拉起。
+    ("构建期不再调用剪除（清单干净了、载荷仍带着那个 CUI 发货）",
+     "scripts/lib/sidecar-package-build.js",
+     "  pruneIntentionallyAbsentNatives(sourceRelease, stagedRelease, fail);\n", "",
+     "sidecar_trust_pe_contract"),
+
+    ("构建期剪除变成空操作（staging 里仍留着被剪除的原生成员）",
+     "scripts/lib/sidecar-package-build.js",
+     "    if (!fs.existsSync(staged)) continue;\n"
+     "    try {\n"
+     "      fs.rmSync(staged, { force: true });\n"
+     "    } catch (_) {\n"
+     "      // 由下方向的存在性断言统一判红，避免把原始 fs 错误当成结论。\n"
+     "    }\n"
+     "    if (fs.existsSync(staged)) fail('SIDECAR_PACKAGE_PRUNED_NATIVE_PRUNE_FAILED');",
+     "    continue;  // MUTATED: 剪除变成空操作\n"
+     "    if (fs.existsSync(staged)) fail('SIDECAR_PACKAGE_PRUNED_NATIVE_PRUNE_FAILED');",
+     "sidecar_trust_pe_contract"),
+
+    ("媒体家族 API 的构建期 preflight 被废（随包源码又能引用已剪除的能力）",
+     "scripts/lib/sidecar-package-build.js",
+     "  if (hits.length === 0) return;",
+     "  if (hits.length >= 0) return;  // MUTATED: preflight 恒返回",
      "sidecar_trust_pe_contract"),
 ]
 

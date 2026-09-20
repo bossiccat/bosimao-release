@@ -50,9 +50,11 @@ for (const [file, content] of [
 ]) write(file, content);
 const sdkRoot = 'resources/app/node_modules/trtc-electron-sdk';
 write(`${sdkRoot}/package.json`, `${JSON.stringify({ version: config.sdkVersion })}\n`);
+// 刻意缺席的成员（见 scripts/lib/sidecar-trust.js 的 INTENTIONALLY_ABSENT_NATIVE）
+// 不在这里生成：fixture 必须与生产清单同一集合，否则它复现的是一个已经不存在的包形态。
 for (const name of [
   'trtc_electron_sdk.node', 'liteav.dll', 'txffmpeg.dll',
-  'txsoundtouch.dll', 'liteav_media_server.exe',
+  'txsoundtouch.dll',
 ]) write(`${sdkRoot}/build/Release/${name}`, name);
 const manifest = createProvenance(config);
 fs.writeFileSync(hashFile, `${manifest.external_bin.sha256}\n`, 'ascii');

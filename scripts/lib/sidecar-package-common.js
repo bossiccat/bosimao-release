@@ -24,7 +24,6 @@ const NATIVE_REQUIRED = [
   'liteav.dll',
   'txffmpeg.dll',
   'txsoundtouch.dll',
-  'liteav_media_server.exe',
 ];
 const ELECTRON_REQUIRED = [
   'ffmpeg.dll',
