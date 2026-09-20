@@ -186,8 +186,12 @@ jobs:
   #
   # 本 job **不进入任何 `needs:`** —— release 流程不因它而阻塞（先跑一段时间再说）。
   #
-  # !!! 合入前必做 !!! 把下面两处 `@stable` / `@v4` 换成 40 位 SHA（本仓惯例，
-  # 见同文件其余 `uses:`）。这里刻意不填一个我编不出来的 SHA。
+  # ⚠️ 本注释块一度把下面的契约测试撞红：`scripts/test_release_governance/test_ci_policy.py`
+  # 的 `test_workflow_cannot_upgrade_claims_to_verified_and_pins_actions` 用「子串扫描」
+  # 判 workflow 全文，于是"记录 pin 规则的散文"自己命中了被禁的浮动写法
+  # （`@` 紧跟版本号，如 `@` `v4`）。修的时候我还**又犯了一次**：把该字面量
+  # 引用进新注释，于是二次撞红。⇒ 此处只描述形状、不复述字面量。
+  # pin 已于 2026-09-20 完成。**不要**为通过而放宽那条断言。
   # ───────────────────────────────────────────────────────────────────────────
   windows-popup-gate:
     name: windows-popup-gate
