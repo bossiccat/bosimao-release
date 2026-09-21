@@ -258,12 +258,22 @@ jobs:
       # 先编这两个 bin 必须先跳过 tauri_build —— 否则 build.rs 会在这个 bin 还没产出
       # 之前就去解析资源并失败。`build.rs:185-188` 的 `JAX_SKIP_TAURI_BUILD=1` 就是
       # 为这种场景留的逃生门（注释写明"纯逻辑测试不需要完整资源拷贝"）。
+      #
+      # 必须显式开 `credential-test-support`：`Cargo.toml:30-42` 把这两个 bin 声明为
+      #   required-features = ["credential-test-support"]
+      # 且写明**默认构建刻意不编译它们**——原因是 tauri main binary 的 auto-discovery
+      # 曾与这两个 bin 混淆，导致 `release/jax-pet.exe` 被硬链接成 provision 的内容。
+      # 同一段注释还写明安装器产物「已由独立 `cargo build --bins` 编译后复制」——
+      # 也就是这一步在文档里存在、但 CI 从未实现过（2026-09-21 补上）。
+      # 只编这两个 bin（不用 `--bins`）更外科：不会顺带编出 o018/o020 那几个测试助手，
+      # 也**不会**影响随后那次不带 feature 的 `cargo build --release`（主二进制照旧）。
       - name: 编出 provision 双助手（跳过 tauri_build，避免先解析不存在的资源）
         working-directory: pet-ui/src-tauri
         env:
           JAX_SKIP_TAURI_BUILD: "1"
         run: >-
           cargo build --release
+          --features credential-test-support
           --bin provision_sidecar_credential
           --bin provision_sidecar_credential_launcher
 
