@@ -4,6 +4,7 @@ These tests define the wished-for API of scripts.release_governance.model.
 Run them first: they must FAIL because the module does not exist yet.
 """
 
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -293,6 +294,43 @@ def test_evidence_kind_outside_policy_whitelist_is_rejected():
     assert exc.value.code == "EVIDENCE_KIND_NOT_ALLOWED"
     # 错误信息必须指出是哪个 kind、白名单是什么。
     assert "totally-forged-kind" in exc.value.message
+    assert "ci-command" in exc.value.message
+
+
+def test_claim_evidence_kinds_exclude_ci_command_in_the_real_policy():
+    """`ci-command` 不属于 **claim 的**证据类别 —— 这是按构造关掉一条等级伪造通道。
+
+    背景（2026-09-21 实测）：claim 的 `evidence[]` 曾经也允许 `kind="ci-command"`，
+    但校验侧**结构上无法**核实它 —— `verify_claims` 拿不到 `--evidence-root` /
+    `--release-id`（见 `release-preflight.py` 的 `_verify()` 入参），而 HMAC 封存的
+    `result.json` 只在 `release` 分支的 `_load_required_results()` 里被读。
+    于是"一条没有 HMAC 的现场日志自称 `ci-command`"会被放行 —— 而 `ci-command` 与
+    两个 field 类的**语义差别恰恰就是有没有 HMAC**。
+
+    `ci-command` 的真实身份是 **locked check 的 `evidence_class`**（`command-lock.json`）
+    与封存结果的目录名（`<release_id>/ci-command/<check_id>/result.json`）—— 它有自己
+    的通道，不经 claim。
+
+    所以把它从 claim 白名单移除：**一个没有任何东西能验证的标签，不该能被声明。**
+    （若将来真要允许 claim 携带 ci-command 证据，必须**连同校验一起**加回来 —— 那时的
+    前提是那层能拿到 sealed 结果。单独把标签加回来就是重新打开这条通道。）
+    """
+    policy_path = Path(__file__).resolve().parents[2] / "governance" / "release-policy.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    assert set(policy["allowed_evidence_kinds"]) == {"windows-field", "android-field"}, (
+        policy["allowed_evidence_kinds"]
+    )
+
+
+def test_ci_command_labelled_claim_evidence_is_rejected():
+    """按真实白名单，claim 写 `kind="ci-command"` 必须被拒。"""
+    claim = _verified_claim()
+    _evidence(claim)["kind"] = "ci-command"
+    policy = _min_policy()
+    policy["allowed_evidence_kinds"] = ["windows-field", "android-field"]
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim, policy)
+    assert exc.value.code == "EVIDENCE_KIND_NOT_ALLOWED"
     assert "ci-command" in exc.value.message
 
 

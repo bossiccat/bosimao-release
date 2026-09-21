@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "required_claim_ids": ["windows-popup-free", "android-duplex-audio"],
-  "allowed_evidence_kinds": ["ci-command", "windows-field", "android-field"],
+  "allowed_evidence_kinds": ["windows-field", "android-field"],
   "max_attempts_same_fingerprint": 2,
   "max_evidence_age_hours": 72,
   "required_checks": ["sidecar-verify", "tauri-release-build"],
