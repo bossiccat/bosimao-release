@@ -2,8 +2,11 @@
 
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
+
+FULL_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 from scripts.release_governance.model import (
     ValidationError,
@@ -38,6 +41,76 @@ def detect_worktree_clean(repo_root):
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0 and not result.stdout.strip()
+
+
+def _run_git(repo_root, *args):
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(repo_root),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _allowed_delta_prefixes(repo_root, claims_dir):
+    """artifact_commit..HEAD 之间允许出现的改动前缀。
+
+    claims 目录在仓库内 ⇒ 只允许该目录；在仓库外（例如证据仓/临时夹具）⇒ 不允许任何改动，
+    此时血缘判据退化为“HEAD 必须就是 artifact_commit”，即历史行为。
+    """
+    if repo_root is None:
+        return ()
+    try:
+        relative = Path(claims_dir).resolve().relative_to(Path(repo_root).resolve())
+    except ValueError:
+        return ()
+    return (relative.as_posix(),)
+
+
+def commit_lineage(repo_root, artifact_commit, head_commit, allowed_prefixes):
+    """返回 (proof, error)。proof 是给 model.validate_verified_claim 的血缘证明。"""
+    if not FULL_COMMIT_PATTERN.match(str(artifact_commit or "")):
+        return None, _error(
+            "COMMIT_MISMATCH", "artifact_commit must be a full lowercase SHA-1"
+        )
+    ancestor = _run_git(repo_root, "merge-base", "--is-ancestor", artifact_commit, head_commit)
+    if ancestor is None or ancestor.returncode != 0:
+        return None, _error(
+            "COMMIT_LINEAGE_INVALID",
+            "artifact_commit %s is not an ancestor of HEAD %s" % (artifact_commit, head_commit),
+        )
+    diff = _run_git(repo_root, "diff", "--name-only", "--no-renames", artifact_commit, head_commit)
+    if diff is None or diff.returncode != 0:
+        return None, _error(
+            "COMMIT_LINEAGE_INVALID", "cannot enumerate the delta between artifact_commit and HEAD"
+        )
+    changed = [line.strip() for line in diff.stdout.splitlines() if line.strip()]
+    offending = [
+        path
+        for path in changed
+        if not any(path == prefix or path.startswith(prefix.rstrip("/") + "/") for prefix in allowed_prefixes)
+    ]
+    if offending:
+        return None, _error(
+            "COMMIT_LINEAGE_INVALID",
+            "changes between artifact_commit and HEAD are not confined to claims: %s"
+            % ", ".join(offending),
+        )
+    return (
+        {
+            "artifact_commit": artifact_commit,
+            "head_commit": head_commit,
+            "is_ancestor": True,
+            "claims_only_delta": True,
+            "changed_paths": changed,
+        },
+        None,
+    )
 
 
 def _load_claims(claims_dir):
@@ -93,12 +166,25 @@ def _validate_attempt_circuit(claim, max_attempts):
     return []
 
 
-def verify_claims(policy, claims_dir, expected_commit, expected_artifact_sha256, now_utc, worktree_clean):
-    """Return {verdict: pass|fail, errors: [...]} without raising for bad inputs."""
+def verify_claims(
+    policy,
+    claims_dir,
+    expected_commit,
+    expected_artifact_sha256,
+    now_utc,
+    worktree_clean,
+    repo_root=None,
+):
+    """Return {verdict: pass|fail, errors: [...]} without raising for bad inputs.
+
+    repo_root=None 保持历史语义（artifact_commit 必须精确等于 expected_commit）；
+    给出 repo_root 时改用血缘判据（见 _allowed_delta_prefixes）。
+    """
     errors = []
     if not worktree_clean:
         errors.append(_error("DIRTY_WORKTREE", "release verification requires a clean worktree"))
 
+    allowed_prefixes = _allowed_delta_prefixes(repo_root, claims_dir)
     claims, load_errors = _load_claims(claims_dir)
     errors.extend(load_errors)
     by_id = {}
@@ -113,8 +199,23 @@ def verify_claims(policy, claims_dir, expected_commit, expected_artifact_sha256,
             validate_claim_shape(claim)
             validate_cancelled_claim(claim)
             if claim_id in policy.get("required_claim_ids", []):
+                lineage = None
+                if repo_root is not None:
+                    lineage, lineage_error = commit_lineage(
+                        repo_root,
+                        (claim.get("target") or {}).get("artifact_commit"),
+                        expected_commit,
+                        allowed_prefixes,
+                    )
+                    if lineage_error is not None:
+                        raise ValidationError(lineage_error["code"], lineage_error["message"])
                 validate_verified_claim(
-                    claim, policy, now_utc, expected_commit, expected_artifact_sha256
+                    claim,
+                    policy,
+                    now_utc,
+                    expected_commit,
+                    expected_artifact_sha256,
+                    artifact_commit_lineage=lineage,
                 )
             errors.extend(_validate_evidence_hashes(claim))
             errors.extend(

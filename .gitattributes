@@ -1,0 +1,6 @@
+# governance/claims/** 不进入 release-candidate.tar.gz。
+# 理由：claim 记录的是“它所描述的那次产物”的哈希；claim 自己不能成为那次产物的一部分，
+# 否则哈希自指（写入 claim 就会改变它所记录的哈希），任何 claim 都永远归档不了。
+# 证据与推导：outputs/claim-artifact-self-reference-proposal.md §1；
+# 复现脚本：outputs/claim-selfref-repro.sh。
+governance/claims/** export-ignore

@@ -35,10 +35,20 @@ jobs:
             exit 1
           fi
       - name: Build immutable release candidate
+        # 归档 tree 而不是 commit，并钉住条目 mtime。原因（见
+        # outputs/claim-artifact-self-reference-proposal.md §1）：
+        #   * 以 commit 为源时，归档字节里有 pax_global_header 记录的那次提交 id，
+        #     且每个条目 mtime = 那次提交的时间 ⇒ 换一个提交，字节必变
+        #     （哪怕两棵树一模一样）；
+        #   * 以 tree 为源并加 --mtime 后，产物只由树内容决定 ⇒ governance/claims/**
+        #     被 .gitattributes export-ignore 排除后，claims 那次提交与其父提交
+        #     产出**完全相同**的字节，claim 才有可能记下自己的产物哈希。
+        # 该时间戳自此属于产物身份的一部分，不可再改（改了等于换产物）。
         run: >-
           git archive --format=tar.gz
+          --mtime="2000-01-01T00:00:00Z"
           --output="${{ runner.temp }}/release-candidate.tar.gz"
-          "$GITHUB_SHA"
+          "$GITHUB_SHA^{tree}"
       - name: Write candidate checksum
         run: >-
           (cd "${{ runner.temp }}" &&

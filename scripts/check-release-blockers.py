@@ -93,6 +93,7 @@ def main() -> int:
         policy=policy, claims_dir=claims_dir, expected_commit=commit,
         expected_artifact_sha256=artifact_sha,
         now_utc=datetime.now(timezone.utc), worktree_clean=worktree_clean,
+        repo_root=ROOT,
     )
     verdict = result["verdict"]
     errors = result["errors"]

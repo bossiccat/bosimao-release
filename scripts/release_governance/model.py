@@ -6,10 +6,18 @@ Constraints enforced here:
 - A P0 claim (listed in policy.required_claim_ids) must be Verified.
 - A Verified claim must bind to the exact commit + artifact SHA-256 and carry
   unexpired evidence reviewed by someone other than its owner.
+- artifact_commit may instead be an ancestor: when the caller proves (with git)
+  that it is an ancestor of the expected commit whose delta touches only the
+  claims directory, the proof is passed in as artifact_commit_lineage. The proof
+  is caller-supplied and is shape-checked here, not re-computed — same trust
+  boundary as expected_commit itself (this module stays pure: no subprocess).
 """
 
 import hashlib
+import re
 from datetime import datetime, timezone
+
+FULL_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 ALLOWED_STATES = {
     "Draft",
@@ -93,7 +101,14 @@ def validate_transition(previous_state, next_state):
         )
 
 
-def validate_verified_claim(claim, policy, now_utc, expected_commit, expected_artifact_sha256):
+def validate_verified_claim(
+    claim,
+    policy,
+    now_utc,
+    expected_commit,
+    expected_artifact_sha256,
+    artifact_commit_lineage=None,
+):
     validate_claim_shape(claim)
 
     required = policy.get("required_claim_ids", [])
@@ -106,10 +121,16 @@ def validate_verified_claim(claim, policy, now_utc, expected_commit, expected_ar
     target = claim.get("target") or {}
     if not target.get("artifact_sha256"):
         raise ValidationError("MISSING_ARTIFACT_SHA256", "target.artifact_sha256 is required")
-    if target.get("artifact_commit") != expected_commit:
-        raise ValidationError(
-            "COMMIT_MISMATCH",
-            "artifact_commit %r != expected %r" % (target.get("artifact_commit"), expected_commit),
+    if artifact_commit_lineage is None:
+        if target.get("artifact_commit") != expected_commit:
+            raise ValidationError(
+                "COMMIT_MISMATCH",
+                "artifact_commit %r != expected %r"
+                % (target.get("artifact_commit"), expected_commit),
+            )
+    else:
+        _validate_artifact_commit_lineage(
+            target.get("artifact_commit"), expected_commit, artifact_commit_lineage
         )
     if target["artifact_sha256"] != expected_artifact_sha256:
         raise ValidationError(
@@ -144,3 +165,33 @@ def validate_cancelled_claim(claim):
                 "MISSING_SUPERSEDED_BY",
                 "cancelled claim must declare superseded_by",
             )
+
+
+def _validate_artifact_commit_lineage(artifact_commit, expected_commit, lineage):
+    """校验"产物提交是 HEAD 的祖先、且二者之差仅限 claims/"这一血缘证明。
+
+    证明由调用方（有 git 的那一层）算出；本函数只做形状与自洽性检查。
+    """
+    if not isinstance(lineage, dict):
+        raise ValidationError("COMMIT_LINEAGE_INVALID", "artifact lineage proof must be an object")
+    if lineage.get("head_commit") != expected_commit:
+        raise ValidationError(
+            "COMMIT_LINEAGE_INVALID",
+            "lineage proof was computed against %r, not the expected commit %r"
+            % (lineage.get("head_commit"), expected_commit),
+        )
+    if not FULL_COMMIT_PATTERN.match(str(artifact_commit or "")):
+        raise ValidationError(
+            "COMMIT_MISMATCH",
+            "artifact_commit must be a full lowercase SHA-1 (%r)" % (artifact_commit,),
+        )
+    if lineage.get("artifact_commit") != artifact_commit:
+        raise ValidationError("COMMIT_LINEAGE_INVALID", "lineage proof covers a different artifact_commit")
+    if lineage.get("is_ancestor") is not True:
+        raise ValidationError("COMMIT_LINEAGE_INVALID", "artifact_commit is not an ancestor of HEAD")
+    if lineage.get("claims_only_delta") is not True:
+        raise ValidationError(
+            "COMMIT_LINEAGE_INVALID",
+            "changes between artifact_commit and HEAD are not confined to the claims directory: %s"
+            % ", ".join(lineage.get("offending_paths") or []),
+        )

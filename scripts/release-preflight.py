@@ -129,6 +129,7 @@ def _verify(policy_path, claims_path, repo_root, artifact_path):
         expected_artifact_sha256=snapshot["artifact_sha256"],
         now_utc=datetime.now(timezone.utc),
         worktree_clean=True,
+        repo_root=repo_root,
     )
     return policy, snapshot, result
 
