@@ -227,7 +227,29 @@ def _invalid(message: str) -> int:
     return EXIT_INVALID
 
 
+def _force_utf8_stdio() -> None:
+    """把 stdout/stderr 强制成 UTF-8。
+
+    为什么必须这么做（2026-09-21 CI 实测）：GitHub 的 `windows-latest` runner 上
+    Python 的 stdout 编码是 **cp1252**，而本脚本的每一句 print 都含中文
+    ⇒ 第一句就 `UnicodeEncodeError: 'charmap' codec can't encode characters`
+    并以 exit 1 死掉。**机器可消费的 ASCII 标记（`PE_SUBSYSTEM=…`）根本没机会输出。**
+    本机（控制台非 cp1252）从不暴露，所以这是又一个「本机能跑、干净环境跑不了」。
+
+    `errors="replace"` 是刻意的：这是**测量工具**，编码问题绝不应该让测量本身崩掉 ——
+    宁可让某个字符显示成 `?`，也不能让整次清点丢结果。
+    （对照：`scripts/field-evidence/psprobe.py` 用纯 base64 绕开同一问题；
+      两个工具各自解决，避免互相依赖。）
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass  # 非 TextIOWrapper（例如被测试替换过的流）——保持原样。
+
+
 def main() -> int:
+    _force_utf8_stdio()
     ap = argparse.ArgumentParser(
         description="PE 子系统验证（Windows 弹窗 / 命令窗防护门禁）",
         formatter_class=argparse.RawDescriptionHelpFormatter,

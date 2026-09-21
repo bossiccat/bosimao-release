@@ -323,3 +323,33 @@ def test_pe_subsystem_gate_debug_target_is_invalid_not_fail(tmp_path: Path) -> N
     assert report.returncode == 0, report.stdout + report.stderr
     assert _marker(report.stdout) == "REPORT_ONLY"
     assert "debug 构建" in report.stdout
+
+
+def test_tool_survives_a_non_utf8_stdout(tmp_path: Path) -> None:
+    """工具必须能在**非 UTF-8 的 stdout** 下跑完。
+
+    2026-09-21 CI 实测（run 35587705247）：GitHub 的 `windows-latest` runner 上
+    Python 的 stdout 编码是 **cp1252**，而本工具每句 print 都含中文 ⇒ 第一句就
+    `UnicodeEncodeError: 'charmap' codec can't encode characters` 并以 exit 1 死掉，
+    于是**机器可消费的 `PE_SUBSYSTEM=…` 标记根本没机会输出**。
+
+    这又是一例「本机能跑、干净环境跑不了」：本机控制台不是 cp1252，所以从未暴露。
+    判据：在 `PYTHONIOENCODING=cp1252` 下，工具仍须跑完并给出**正确的 ASCII 标记** ——
+    只断言"没崩"是不够的，还得断言标记本身是对的（否则崩在中间、标记缺失也会过）。
+    """
+    target = _write_pe(tmp_path / "gui.exe", GUI)
+    env = dict(os.environ, PYTHONIOENCODING="cp1252")
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--expect-gui", str(target)],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        env=env,
+    )
+    combined = proc.stdout + proc.stderr
+    assert "UnicodeEncodeError" not in combined, combined
+    assert "charmap" not in combined, combined
+    assert _marker(proc.stdout) == "PASS", proc.stdout
