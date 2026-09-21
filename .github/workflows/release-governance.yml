@@ -330,17 +330,25 @@ jobs:
         working-directory: pet-ui/src-tauri
         run: cargo test --lib
 
-      # ── Phase 0：PE 子系统扫描（报告制）─────────────────────────────────
+      # ── PE 子系统扫描（**硬门禁**，2026-09-21 由 report-only 提升）────────
+      # 为什么现在可以判红：干净 runner 的基线已经实测为真绿 —— run 35589971758
+      # 在从零构建的 target/release 上读到 `PE_SUBSYSTEM_SCANNED=6 / NON_GUI=0`。
+      # 「先让基线在干净 runner 上真的绿，再转硬红」是既定顺序，现已满足。
+      #
+      # 一直 report-only 等于装饰：一个从不判红的检查不会阻止任何人把 CUI 装回包里。
+      # `--expect-gui` 同时钉住两件事：**清点到 0 个 exe 会 INVALID_INPUT 判红**
+      # （堵住"没扫到东西"伪装成"没有 CUI"这类假绿），且任一 CUI 即 rc=1。
+      #
       # 口径是"随包集合"而不是"随便找个目录扫"：tauri 把 bundle.resources 拷进
       # `target/release`，所以随包 resources（含 trtc-electron-sdk/build/Release
       # 下那个 CUI）本来就在这棵树里 —— 实测该口径与 `--installed` 等价。
       # `--exclude-cargo-artifacts` 剪掉的只是 build/deps/examples 里的
       # build-script 产物（98 个 CUI），它们从不随包发布。
-      - name: PE 子系统扫描（Phase 0：report-only，不判红）
+      - name: PE 子系统扫描（硬门禁：随包集合必须全 GUI）
         run: >-
           python scripts/pe-subsystem-verify.py
           --dir pet-ui/src-tauri/target/release
-          --recursive --exclude-cargo-artifacts --report-only
+          --recursive --exclude-cargo-artifacts --expect-gui
 
       # shell 用 bash 是为了让 `test/*.test.js` 由 shell 展开 —— 与现有
       # deploy-cloudrun.yml 的 `cd sidecar && node --test test/*.test.js` 同口径。
