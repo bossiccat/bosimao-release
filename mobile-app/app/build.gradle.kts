@@ -32,13 +32,18 @@ android {
         resValue("string", "jax_capture_effects",
             (project.findProperty("jaxCaptureEffects") as String? ?: "AEC_NS").trim().uppercase())
 
-        // 采集音频模式（2026-09-16 根因修复，已真机实测）：
-        // 默认 **NORMAL** —— 本机（Samsung S26U/AGM-LPI）在 AUDIOCALL 通话形态下
-        // 向自采 AudioRecord 返回全零（同机 MicRecorder 走 1ch/无音效形态 ⇒ 电平 39~72 正常）；
-        // 建 AudioRecord 那一瞬临时切 MODE_NORMAL 即恢复正常（实测 raw 最高 211/gate=true）。
-        // 回退开关：-PjaxCaptureMode=KEEP 可还原旧行为（仅用于对照，不用于发布）。
+        // 采集音频模式开关（2026-09-16 排查遗留）。
+        //
+        // 默认 **KEEP** = 生产原有行为，什么都不做。
+        //
+        // 为什么不设成 NORMAL：当天曾判定"通话形态下自采返回全零、切 MODE_NORMAL 是解药"，
+        // 但那个结论**已被推翻** —— 对齐采样证明此前所有 raw=0 读数测的都是"没人说话的静音段"，
+        // 会话内采集实测峰值 raw=1029/718/426 且与说话窗口对齐，采集链路本来就正常。
+        // 也就是说 NORMAL 与 KEEP **从未被对照实验验证过差异**；而无证据的改动不该成为生产默认
+        // （而且它在 TRTC 运行中把 AudioManager.mode 由 3 翻到 0 再翻回，属不必要的扰动）。
+        // 开关保留：将来若要 A/B 采集模式，用 -PjaxCaptureMode=NORMAL 出对照包。
         resValue("string", "jax_capture_mode",
-            (project.findProperty("jaxCaptureMode") as String? ?: "NORMAL").trim().uppercase())
+            (project.findProperty("jaxCaptureMode") as String? ?: "KEEP").trim().uppercase())
     }
 
     buildTypes {
