@@ -22,7 +22,15 @@
 
 ## CI 工件与 PR 边界
 
-`build-candidate` job 由当前 `$GITHUB_SHA` 生成唯一的 `release-candidate.tar.gz`、同目录 SHA-256 sidecar，以及受版本控制 helper 生成的 `release-candidate.provenance.json`。provenance 固定使用 `release-governance/candidate-provenance/v1` schema，并绑定 build job 当前 HEAD 的完整 commit 与候选工件精确字节的 SHA-256。
+`build-candidate` job 生成唯一的 `release-candidate.tar.gz`、同目录 SHA-256 sidecar，以及受版本控制 helper 生成的 `release-candidate.provenance.json`。provenance 固定使用 `release-governance/candidate-provenance/v1` schema，并绑定 build job 当前 HEAD 的完整 commit 与候选工件精确字节的 SHA-256。
+
+**候选包由 `$GITHUB_SHA^{tree}` + 固定 `--mtime=2000-01-01T00:00:00Z` 生成（2026-09-21 起）**，因此它的字节是**树内容的纯函数**，不随 commit id 或 commit 时间变化。这是刻意为之，原因是一个真实的死锁：
+
+- `governance/claims/**` 原先会被打进候选包；而 claim 记录的又正是"它所描述的那次产出"的哈希 ⇒ **哈希自指**（写入 claim 就改变它所记录的那个哈希），**任何 claim 都永远归档不了**，整个发布门禁构造上不可通过。
+- 只把 claims 加进 `export-ignore` 还不够：`git archive <commit>` 的字节里**内嵌 commit id**（`pax_global_header`，`git get-tar-commit-id` 可读回）、且所有条目 mtime 取该 commit 的时间 ⇒ 排除 claims 后两个不同 commit 的包字节**仍然不同**。
+- 所以必须两件一起做：`export-ignore` 排除 claims，**并且**改归档 tree + 固定 mtime。
+
+**推论（审阅本文件时请注意）**：工件 SHA-256 与 commit 的绑定**由 provenance 承担，不在包字节里** —— 只比对包字节无法区分"不同 commit 产出的同一棵树"。这正是下方 `verify_candidate_provenance.py` 要求 provenance、workflow expected commit、当前 HEAD **三者相等**的原因。
 
 `verify` 与 tag-only `release` 都显式 checkout `github.sha`，只下载这三个 artifact 文件，先执行 `sha256sum --check`，再调用 `scripts/release_governance/verify_candidate_provenance.py verify`，最后才调用各自的 preflight。helper 会重新读取当前 checkout 的 `git rev-parse HEAD`，要求 provenance `git_commit`、workflow expected commit、当前 HEAD 三者相等，并重算候选工件 SHA-256 后要求其匹配 provenance。工件下载位置位于 runner 临时目录，避免污染仓库工作区并绕过 fail-closed clean-worktree 检查。
 
