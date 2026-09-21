@@ -303,6 +303,25 @@ def test_release_rejects_missing_required_check_before_reserving_evidence(tmp_pa
     assert not (fixture["evidence_root"] / "missing-check-001").exists()
 
 
+def test_verify_rejects_missing_required_check(tmp_path):
+    """`verify` 分支必须也校验 `required_checks` 被锁住。
+
+    2026-09-21 修：此前这条判据**只在 `release` 分支**执行（`_release()` 内），而 `verify`
+    分支从不读 `--command-lock` —— 尽管它对 verify/release 两个 action 都是
+    `required=True`（必填却零消费的参数）。后果："policy 要求的锁定检查被从
+    command-lock.json 删掉"这件事**只在打 tag 跑 release 时**才暴露，失败代价高得多。
+    """
+    fixture = _fixture(tmp_path, checks=[_check("pass", "print('pass')")])
+    policy = json.loads(fixture["policy"].read_text(encoding="utf-8"))
+    policy["required_checks"] = ["missing"]
+    _write_json(fixture["policy"], policy)
+
+    result = _preflight(fixture, "verify")
+
+    assert result.returncode != 0
+    assert "REQUIRED_CHECK_NOT_LOCKED" in result.stdout
+
+
 def test_release_rejects_non_https_ci_url_before_reserving_evidence(tmp_path):
     fixture = _fixture(tmp_path, checks=[_check("pass", "print('pass')")])
 

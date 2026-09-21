@@ -119,8 +119,16 @@ def _snapshot(repo_root, artifact_path):
     return {"git_commit": get_current_commit(repo), "artifact_sha256": _sha256_file(artifact)}
 
 
-def _verify(policy_path, claims_path, repo_root, artifact_path):
+def _verify(policy_path, claims_path, repo_root, artifact_path, command_lock_path=None):
     policy = _load_json(policy_path, "INVALID_POLICY")
+    # `required_checks` 必须真的锁在命令锁里 —— 此前这条判据**只在 `release` 分支**执行
+    # （`_release()` 内），而 `verify` 分支从不读 `--command-lock`。后果：PR 阶段的 verify
+    # 查不出「policy 要求的检查被从 command-lock.json 删掉」，只在打 tag 跑 `release` 时
+    # 才暴露 —— 那时失败代价高得多。
+    # 2026-09-21 由「声明了却无人消费的字段」清点发现：`--command-lock` 对两个 action 都是
+    # `required=True`，却在 `verify` 分支**零消费**（必填却无后果的参数）。
+    if command_lock_path is not None:
+        _validate_required_checks(policy, _load_json(command_lock_path, "INVALID_COMMAND_LOCK"))
     snapshot = _snapshot(repo_root, artifact_path)
     result = verify_claims(
         policy,
@@ -265,7 +273,9 @@ def _write_manifest(release_dir, manifest):
 def _release(args):
     _validate_release_id(args.release_id)
     _validate_ci_run_url(args.ci_run_url)
-    policy, initial, verification = _verify(args.policy, args.claims, args.repo_root, args.artifact_path)
+    policy, initial, verification = _verify(
+        args.policy, args.claims, args.repo_root, args.artifact_path, args.command_lock
+    )
     if verification["verdict"] != "pass":
         return {"verdict": "fail", "errors": verification["errors"]}
     command_lock = _load_json(args.command_lock, "INVALID_COMMAND_LOCK")
@@ -338,7 +348,9 @@ def main(argv=None):
     args = _parser().parse_args(argv)
     try:
         if args.action == "verify":
-            _, _, result = _verify(args.policy, args.claims, args.repo_root, args.artifact_path)
+            _, _, result = _verify(
+                args.policy, args.claims, args.repo_root, args.artifact_path, args.command_lock
+            )
         else:
             result = _release(args)
     except (PreflightError, LockedCheckError) as exc:
