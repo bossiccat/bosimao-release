@@ -300,6 +300,18 @@ jobs:
             Write-Host "staged $($p.dst)  bytes=$n  sha256=$h"
           }
 
+      # tauri 的 `generate_context!()` 要求 `frontendDist` 存在。而 `tauri.conf.json`
+      # 把它设为 `"../dist"`，`dist/` 又被 .gitignore:25 忽略 ⇒ 干净 runner 上没有。
+      # 我们这一步是**直接** `cargo build --release`，绕过了 `tauri build`，所以它的
+      # `beforeBuildCommand`（`npm run build:bundle`）不会自动执行 —— 必须自己先建。
+      # （run 35564008878 实测：不建就 `error: proc macro panicked … The frontendDist
+      #   configuration is set to "../dist" but this path doesn't exist`，即 src/main.rs:205。）
+      - name: 构建前端产物（generate_context! 要求 frontendDist=../dist 存在）
+        working-directory: pet-ui
+        run: |
+          npm ci
+          npm run build
+
       - name: cargo build --release（内含 --verify-only 门）
         working-directory: pet-ui/src-tauri
         run: cargo build --release
