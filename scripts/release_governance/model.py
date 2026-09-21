@@ -6,6 +6,10 @@ Constraints enforced here:
 - A P0 claim (listed in policy.required_claim_ids) must be Verified.
 - A Verified claim must bind to the exact commit + artifact SHA-256 and carry
   unexpired evidence reviewed by someone other than its owner.
+- Every evidence entry must declare a non-empty `kind` that is a member of
+  `policy.allowed_evidence_kinds`; a missing or non-list policy value is
+  fail-closed (BAD_ALLOWED_EVIDENCE_KINDS), and a missing/empty/unknown kind is
+  EVIDENCE_KIND_NOT_ALLOWED.
 - Evidence freshness is anchored at `collected_at`, not at `expires_at`: at the
   verification instant, `collected_at + max_evidence_age_hours <= now` means the
   evidence is stale even if `expires_at` is still in the future. `collected_at`
@@ -158,9 +162,37 @@ def validate_verified_claim(
             "BAD_MAX_EVIDENCE_AGE",
             "policy.max_evidence_age_hours must be an integer number of hours (got %r)" % (max_age_hours,),
         )
+    allowed_kinds = policy.get("allowed_evidence_kinds")
+    if not isinstance(allowed_kinds, list):
+        # 同 BAD_MAX_EVIDENCE_AGE 的口径：判不出白名单就不能放行。
+        # policy 声明了 allowed_evidence_kinds，校验侧就必须执行它 —— 否则这条控制
+        # 只是"写在 policy 里"而已（本仓反复清的就是这一类）。
+        # 另外这道形状检查还挡住了一个更坏的失败模式：policy 缺该键时
+        # `kind not in None` 会抛 TypeError，而 verify_claims 只捕获 ValidationError
+        # ⇒ 整个验证会以未捕获异常崩掉，而不是干净地 fail-closed。
+        raise ValidationError(
+            "BAD_ALLOWED_EVIDENCE_KINDS",
+            "policy.allowed_evidence_kinds must be a list of strings (got %r)" % (allowed_kinds,),
+        )
     for idx, ev in enumerate(evidence):
         if not isinstance(ev, dict):
             raise ValidationError("BAD_EVIDENCE", "evidence[%d] must be an object" % idx)
+        # 证据等级必须显式声明且落在 policy 白名单内。
+        # 缺 kind / 空 kind 一律判红：否则"不写等级"就成了绕过白名单的后门。
+        # 放在时效判据之前 —— 等级是证据的身份，先定身份再谈新鲜度。
+        kind = ev.get("kind")
+        if not isinstance(kind, str) or not kind:
+            raise ValidationError(
+                "EVIDENCE_KIND_NOT_ALLOWED",
+                "evidence[%d].kind is missing or empty; policy.allowed_evidence_kinds=%s"
+                % (idx, allowed_kinds),
+            )
+        if kind not in allowed_kinds:
+            raise ValidationError(
+                "EVIDENCE_KIND_NOT_ALLOWED",
+                "evidence[%d].kind %r is not in policy.allowed_evidence_kinds %s"
+                % (idx, kind, allowed_kinds),
+            )
         # 时效锚在**采集时刻**，不锚在"声明被写入的时刻"。
         # 否则一份采集于很久以前的证据，只要声明是刚写的，就能拿到一个新鲜的
         # expires_at 并通关 —— 那是"看起来在有效期内，其实早已过期"的假绿通道。

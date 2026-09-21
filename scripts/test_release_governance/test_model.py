@@ -275,3 +275,74 @@ def test_non_integer_max_evidence_age_is_rejected_fail_closed():
     with pytest.raises(ValidationError) as exc:
         _validate(claim, policy)
     assert exc.value.code == "BAD_MAX_EVIDENCE_AGE"
+
+
+# --- 证据等级（kind）必须存在且落在 policy.allowed_evidence_kinds 白名单内 ---
+# 缺陷：校验侧此前对 evidence[].kind 零引用（model.py / verify.py 里检索不到 kind）
+# ⇒ policy 声明了 allowed_evidence_kinds，但门禁从未执行过这条控制。
+# 后果：一条 claim 可以把证据标成任意等级名（含白名单外的伪造名，例如把现场证据
+# 冒充成会被 HMAC 封存的 ci-command），甚至干脆不写 kind，门禁都不拦。
+# 下面这组测试钉的就是这条"证据等级伪造 / 缺省绕过"通道。
+
+
+def test_evidence_kind_outside_policy_whitelist_is_rejected():
+    claim = _verified_claim()
+    _evidence(claim)["kind"] = "totally-forged-kind"
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "EVIDENCE_KIND_NOT_ALLOWED"
+    # 错误信息必须指出是哪个 kind、白名单是什么。
+    assert "totally-forged-kind" in exc.value.message
+    assert "ci-command" in exc.value.message
+
+
+def test_evidence_kind_missing_is_rejected():
+    """不写 kind 不能成为绕过白名单的后门。"""
+    claim = _verified_claim()
+    del _evidence(claim)["kind"]
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "EVIDENCE_KIND_NOT_ALLOWED"
+
+
+def test_evidence_kind_empty_is_rejected():
+    claim = _verified_claim()
+    _evidence(claim)["kind"] = ""
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "EVIDENCE_KIND_NOT_ALLOWED"
+
+
+def test_evidence_kind_non_string_is_rejected():
+    claim = _verified_claim()
+    _evidence(claim)["kind"] = 123
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "EVIDENCE_KIND_NOT_ALLOWED"
+
+
+def test_policy_without_allowed_evidence_kinds_is_rejected_fail_closed():
+    """判不出白名单就不能放行（fail-closed），与 BAD_MAX_EVIDENCE_AGE 同口径。"""
+    claim = _verified_claim()
+    policy = _min_policy()
+    del policy["allowed_evidence_kinds"]
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim, policy)
+    assert exc.value.code == "BAD_ALLOWED_EVIDENCE_KINDS"
+
+
+def test_policy_with_non_list_allowed_evidence_kinds_is_rejected_fail_closed():
+    claim = _verified_claim()
+    policy = _min_policy()
+    policy["allowed_evidence_kinds"] = "ci-command"  # 字符串不是列表
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim, policy)
+    assert exc.value.code == "BAD_ALLOWED_EVIDENCE_KINDS"
+
+
+@pytest.mark.parametrize("kind", ["ci-command", "windows-field", "android-field"])
+def test_each_declared_kind_is_accepted(kind):
+    """白名单里的每个 kind 都必须被接受 —— 防止判据被收得过紧。"""
+    claim = _verified_claim()
+    _evidence(claim)["kind"] = kind
+    _validate(claim)

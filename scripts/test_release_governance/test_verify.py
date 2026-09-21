@@ -237,3 +237,38 @@ def test_detect_worktree_dirty_when_git_reports_entries(monkeypatch, tmp_path):
         lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, stdout=" M governance/x.json\n", stderr=""),
     )
     assert detect_worktree_clean(tmp_path) is False
+
+
+# --- 证据等级（kind）白名单必须由门禁侧执行（端到端） ---
+
+
+def test_claim_with_forged_evidence_kind_fails(tmp_path):
+    """端到端：一条 claim 的 evidence[].kind 不在 policy 白名单内 ⇒ 整体 fail。"""
+
+    def forged(evidence):
+        claim = _verified("windows-popup-free", evidence)
+        claim["evidence"][0]["kind"] = "totally-forged-kind"
+        return claim
+
+    result = _call(tmp_path, [forged, lambda evidence: _verified("android-duplex-audio", evidence)])
+    assert result["verdict"] == "fail"
+    assert any(
+        error["code"] == "EVIDENCE_KIND_NOT_ALLOWED" and error.get("claim_id") == "windows-popup-free"
+        for error in result["errors"]
+    )
+
+
+def test_policy_without_allowed_kinds_fails_closed(tmp_path):
+    """policy 缺 allowed_evidence_kinds ⇒ fail-closed，而不是"没规则就放行"。"""
+    policy = _policy()
+    del policy["allowed_evidence_kinds"]
+    result = _call(
+        tmp_path,
+        [
+            lambda evidence: _verified("windows-popup-free", evidence),
+            lambda evidence: _verified("android-duplex-audio", evidence),
+        ],
+        policy,
+    )
+    assert result["verdict"] == "fail"
+    assert any(error["code"] == "BAD_ALLOWED_EVIDENCE_KINDS" for error in result["errors"])
