@@ -200,7 +200,14 @@ def verify_claims(
             validate_cancelled_claim(claim)
             if claim_id in policy.get("required_claim_ids", []):
                 lineage = None
-                if repo_root is not None:
+                # 只在 claim 已是 Verified 时才校验 target 的提交血缘。
+                # 否则本检查会抢在 `validate_verified_claim` 的 NOT_VERIFIED（model.py:119-123）
+                # 之前 raise，把"这条 claim 根本还没归档"这个**真实阻塞**替换成一个关于
+                # 占位 commit 的血缘错误 —— 既掩盖真因，也让"待归档"看起来像"绑定错了"。
+                # 2026-09-21 实测回归：backend/tests/contract/test_release_blockers_contract.py
+                # 的 test_pending_claims_are_named_as_blockers 抓到了这次顺序错误。
+                # 那条契约测试就是这条顺序的回归防线，不要为通过而改它。
+                if repo_root is not None and claim.get("state") == "Verified":
                     lineage, lineage_error = commit_lineage(
                         repo_root,
                         (claim.get("target") or {}).get("artifact_commit"),
