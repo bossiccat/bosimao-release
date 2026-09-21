@@ -175,3 +175,103 @@ def test_shape_requires_claim_id():
 def test_shape_rejects_unknown_state():
     with pytest.raises(ValidationError):
         validate_claim_shape({"claim_id": "x", "state": "NotARealState"})
+
+
+# --- 时效判据必须以「采集时刻」为锚，而不是以声明被写入的时刻为锚 ---
+# 缺陷：expires_at 由写入时刻导出 ⇒ 一份采集于很久以前的证据，只要声明是刚写的，
+# 就能拿到一个"新鲜"的 expires_at 并通关。下面这组测试钉的就是这条假绿通道。
+
+
+def _evidence(claim):
+    return claim["evidence"][0]
+
+
+def _validate(claim, policy=None):
+    return validate_verified_claim(
+        claim,
+        policy or _min_policy(),
+        NOW,
+        expected_commit="abc123",
+        expected_artifact_sha256="sha256:deadbeef",
+    )
+
+
+def test_stale_evidence_rejected_even_when_expires_at_is_in_the_future():
+    """在验证时刻，collected_at + max_evidence_age_hours <= now ⇒ 过期，哪怕 expires_at 在未来。"""
+    claim = _verified_claim()
+    _evidence(claim)["collected_at"] = "2026-08-01T00:00:00Z"  # NOW 前 14 天
+    _evidence(claim)["expires_at"] = "2099-01-01T00:00:00Z"  # "很新鲜"，但是伪造的
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "EVIDENCE_STALE"
+
+
+def test_evidence_at_exact_max_age_boundary_is_stale():
+    """collected_at + 72h == now ⇒ 判过期（闭区间）。"""
+    claim = _verified_claim()
+    _evidence(claim)["collected_at"] = "2026-08-12T00:00:00Z"  # +72h 恰好等于 NOW
+    _evidence(claim)["expires_at"] = "2099-01-01T00:00:00Z"
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "EVIDENCE_STALE"
+
+
+def test_evidence_just_inside_max_age_is_accepted():
+    """collected_at + 72h > now ⇒ 仍新鲜（判据不放宽成更早失效）。"""
+    claim = _verified_claim()
+    _evidence(claim)["collected_at"] = "2026-08-12T00:00:01Z"
+    _evidence(claim)["expires_at"] = "2099-01-01T00:00:00Z"
+    _validate(claim)
+
+
+def test_evidence_collected_in_the_future_rejected():
+    """未来时间点是一种伪造 —— 必须拒绝，而不是当作"刚刚采集"。"""
+    claim = _verified_claim()
+    _evidence(claim)["collected_at"] = "2026-08-16T00:00:00Z"
+    _evidence(claim)["expires_at"] = "2099-01-01T00:00:00Z"
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "EVIDENCE_FROM_FUTURE"
+
+
+def test_unparseable_collected_at_rejected():
+    claim = _verified_claim()
+    _evidence(claim)["collected_at"] = "yesterday-ish"
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "BAD_TIMESTAMP"
+
+
+def test_missing_collected_at_rejected():
+    claim = _verified_claim()
+    del _evidence(claim)["collected_at"]
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "BAD_TIMESTAMP"
+
+
+def test_naive_collected_at_rejected():
+    claim = _verified_claim()
+    _evidence(claim)["collected_at"] = "2026-08-15T00:00:00"  # 无时区
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "BAD_TIMESTAMP"
+
+
+def test_policy_without_max_evidence_age_is_rejected_fail_closed():
+    """判不了新鲜度就不能放行（fail-closed），而不是默认通过。"""
+    claim = _verified_claim()
+    policy = _min_policy()
+    del policy["max_evidence_age_hours"]
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim, policy)
+    assert exc.value.code == "BAD_MAX_EVIDENCE_AGE"
+
+
+def test_non_integer_max_evidence_age_is_rejected_fail_closed():
+    claim = _verified_claim()
+    policy = _min_policy()
+    policy["max_evidence_age_hours"] = "72"
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim, policy)
+    assert exc.value.code == "BAD_MAX_EVIDENCE_AGE"

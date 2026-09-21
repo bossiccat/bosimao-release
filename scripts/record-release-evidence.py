@@ -8,8 +8,11 @@ P0 声明要变成 Verified，必须同时满足一堆机械条件（`validate_v
 就是**哈希**和**时效窗口**两项，而错了的后果是"门禁悄悄不通过"或"看似 Verified 实则无效"。
 
 本工具只做两件事：把给定的证据文件**算成正确的哈希**、
-**按 policy 算出合法的时效窗口**，然后**用治理层自己的校验器验证**，
-不通过就拒绝写盘。**它不评判证据内容** —— 见下面的诚实边界。
+**按采集时刻（`--collected-at`，缺省取当前时刻）算出合法的时效窗口**，
+然后**用治理层自己的校验器验证**，不通过就拒绝写盘。
+`expires_at` 一律由 `collected_at + policy.max_evidence_age_hours` 导出 ——
+**不由写入时刻导出**，否则一份旧证据会白拿一段虚假有效期。
+**它不评判证据内容** —— 见下面的诚实边界。
 
 诚实边界（必须写清，别把它当审批工具）
 --------------------------------------
@@ -23,7 +26,8 @@ P0 声明要变成 Verified，必须同时满足一堆机械条件（`validate_v
         --claim-id android-duplex-audio --kind android-field \
         --evidence outputs/field/android-duplex.log \
         --artifact outputs/candidate/bosimao-release-apk.tar.gz \
-        --owner impl-team --reviewer independent-qa
+        --owner impl-team --reviewer independent-qa \
+        --collected-at 2026-09-19T12:18:18Z
 """
 from __future__ import annotations
 
@@ -39,7 +43,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.release_governance.model import ValidationError, validate_verified_claim  # noqa: E402
+from scripts.release_governance.model import (  # noqa: E402
+    ValidationError,
+    _parse_utc,
+    validate_verified_claim,
+)
 from scripts.release_governance.verify import _validate_evidence_hashes  # noqa: E402
 
 EXIT_OK, EXIT_REFUSED, EXIT_UNUSABLE = 0, 1, 2
@@ -59,6 +67,9 @@ def main() -> int:
     ap.add_argument("--commit", default="")
     ap.add_argument("--owner", required=True)
     ap.add_argument("--reviewer", required=True)
+    ap.add_argument("--collected-at", default="",
+                    help="证据的**实际采集时刻**（RFC3339/UTC，如 2026-09-19T12:18:18Z）。"
+                         "省略则取当前时刻。expires_at 由它 + policy.max_evidence_age_hours 导出。")
     ap.add_argument("--policy", default="governance/release-policy.json")
     ap.add_argument("--claims-dir", default="governance/claims")
     ap.add_argument("--allow-reverify", action="store_true",
@@ -126,6 +137,18 @@ def main() -> int:
     hours = int(policy.get("max_evidence_age_hours", 72))
     ts = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
 
+    # 时效锚在**采集时刻**：证据是什么时候采的，就什么时候开始计 72h。
+    # 之前这里用写入时刻 ⇒ 采于很久以前的证据只要今天被记录，就能白拿一段
+    # 虚假有效期（实测多出约 41.9h），是一条"看起来在有效期内、其实早已过期"的假绿通道。
+    if args.collected_at.strip():
+        try:
+            collected_at = _parse_utc(args.collected_at.strip())
+        except ValidationError as exc:
+            print(f"输入不可用：--collected-at 不可解析（{exc.message}）", file=sys.stderr)
+            return EXIT_UNUSABLE
+    else:
+        collected_at = now
+
     # 从既有声明起手再覆写本工具负责的字段 —— 其余治理元数据原样留下。
     claim = dict(existing) if isinstance(existing, dict) else {}
     claim["claim_id"] = args.claim_id
@@ -139,8 +162,8 @@ def main() -> int:
     claim["target"] = target
     claim["evidence"] = [{
         "kind": args.kind,
-        "collected_at": ts(now),
-        "expires_at": ts(now + timedelta(hours=hours)),
+        "collected_at": ts(collected_at),
+        "expires_at": ts(collected_at + timedelta(hours=hours)),
         "path": args.evidence,
         "raw_sha256": _sha256_file(evidence),
     }]
@@ -162,7 +185,8 @@ def main() -> int:
     print(f"kind    : {args.kind}")
     print(f"证据    : {args.evidence}  {claim['evidence'][0]['raw_sha256'][:27]}…")
     print(f"产物    : {artifact_sha[:27]}…  @ commit {commit[:12]}")
-    print(f"有效期  : {claim['evidence'][0]['expires_at']}（policy {hours}h）")
+    print(f"采集    : {claim['evidence'][0]['collected_at']}")
+    print(f"有效期  : {claim['evidence'][0]['expires_at']}（= 采集时刻 + policy {hours}h）")
     print(f"复核    : owner={args.owner} reviewer={args.reviewer}")
     if args.dry_run:
         print("\n--dry-run：未写盘。")

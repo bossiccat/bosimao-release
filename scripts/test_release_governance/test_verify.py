@@ -137,6 +137,56 @@ def test_evidence_hash_mismatch_fails(tmp_path):
     assert any(error["code"] == "EVIDENCE_SHA256_MISMATCH" for error in result["errors"])
 
 
+def test_stale_evidence_with_future_expiry_fails(tmp_path):
+    """端到端：expires_at 在未来，但按采集时刻早已过期 ⇒ 必须 fail。"""
+
+    def stale(evidence):
+        claim = _verified("windows-popup-free", evidence)
+        claim["evidence"][0]["collected_at"] = "2026-08-01T00:00:00Z"
+        claim["evidence"][0]["expires_at"] = "2099-01-01T00:00:00Z"
+        return claim
+
+    result = _call(tmp_path, [stale, lambda evidence: _verified("android-duplex-audio", evidence)])
+    assert result["verdict"] == "fail"
+    assert any(
+        error["code"] == "EVIDENCE_STALE" and error.get("claim_id") == "windows-popup-free"
+        for error in result["errors"]
+    )
+
+
+def test_the_measured_false_green_window_is_closed(tmp_path):
+    """复现实测缺陷（写入侧按写入时刻导出 expires_at）。
+
+    采集 2026-09-19T12:18:18Z ⇒ 正确失效时刻 2026-09-22T12:18:18Z。
+    写入时刻 2026-09-21T06:11:50Z ⇒ 被写成 expires_at 2026-09-24T06:11:52Z（多出约 41.9h）。
+    在 2026-09-23 这个验证时刻：旧实现看 expires_at 仍在未来 ⇒ 假绿；新实现必须判过期。
+    """
+    collected = "2026-09-19T12:18:18Z"
+    forged_expiry = "2026-09-24T06:11:52Z"
+    now = datetime(2026, 9, 23, 0, 0, 0, tzinfo=timezone.utc)
+    evidence = tmp_path / "evidence.log"
+    evidence.write_text("field evidence", encoding="utf-8")
+
+    stale = _verified("windows-popup-free", evidence)
+    stale["evidence"][0]["collected_at"] = collected
+    stale["evidence"][0]["expires_at"] = forged_expiry
+
+    fresh = _verified("android-duplex-audio", evidence)
+    fresh["evidence"][0]["collected_at"] = "2026-09-23T00:00:00Z"
+    fresh["evidence"][0]["expires_at"] = "2026-09-26T00:00:00Z"
+
+    result = verify_claims(
+        _policy(),
+        _write_claims(tmp_path, [stale, fresh]),
+        EXPECTED_COMMIT,
+        EXPECTED_ARTIFACT_SHA,
+        now,
+        True,
+    )
+    assert result["verdict"] == "fail"
+    assert [error["code"] for error in result["errors"]] == ["EVIDENCE_STALE"]
+
+
 def test_cancelled_claim_without_replacement_fails(tmp_path):
     def cancelled(evidence):
         claim = _verified("windows-popup-free", evidence, state="Cancelled")

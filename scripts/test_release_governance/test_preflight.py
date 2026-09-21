@@ -43,7 +43,11 @@ def _write_json(path, value):
 
 
 def _claim(claim_id, commit, artifact_sha, evidence_path, state="Verified"):
-    expiry = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0)
+    # 证据时效锚在**采集时刻**：夹具必须产出"真正新鲜"的一对时间戳 ——
+    # 采集于 1 小时前、失效于采集 + 72h。
+    # 旧夹具把 collected_at 钉死在 2026-08-15 却让 expires_at = now+1d，那正是本缺陷
+    # 要堵的模式（旧证据 + 新鲜 expires_at）；判据收紧后它代表"已过期"，必须随之修正。
+    collected = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0)
     return {
         "claim_id": claim_id,
         "state": state,
@@ -53,8 +57,8 @@ def _claim(claim_id, commit, artifact_sha, evidence_path, state="Verified"):
         "evidence": [
             {
                 "kind": "windows-field" if claim_id == "windows-popup-free" else "android-field",
-                "collected_at": "2026-08-15T00:00:00Z",
-                "expires_at": expiry.isoformat().replace("+00:00", "Z"),
+                "collected_at": collected.isoformat().replace("+00:00", "Z"),
+                "expires_at": (collected + timedelta(hours=72)).isoformat().replace("+00:00", "Z"),
                 "path": str(evidence_path),
                 "raw_sha256": _sha256_file(evidence_path),
             }

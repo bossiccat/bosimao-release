@@ -6,6 +6,10 @@ Constraints enforced here:
 - A P0 claim (listed in policy.required_claim_ids) must be Verified.
 - A Verified claim must bind to the exact commit + artifact SHA-256 and carry
   unexpired evidence reviewed by someone other than its owner.
+- Evidence freshness is anchored at `collected_at`, not at `expires_at`: at the
+  verification instant, `collected_at + max_evidence_age_hours <= now` means the
+  evidence is stale even if `expires_at` is still in the future. `collected_at`
+  must itself be parseable UTC and must not be in the future.
 - artifact_commit may instead be an ancestor: when the caller proves (with git)
   that it is an ancestor of the expected commit whose delta touches only the
   claims directory, the proof is passed in as artifact_commit_lineage. The proof
@@ -15,7 +19,7 @@ Constraints enforced here:
 
 import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 FULL_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
@@ -147,9 +151,39 @@ def validate_verified_claim(
     evidence = claim.get("evidence") or []
     if not evidence:
         raise ValidationError("MISSING_EVIDENCE", "Verified claim requires at least one evidence record")
+    max_age_hours = policy.get("max_evidence_age_hours")
+    if not isinstance(max_age_hours, int) or isinstance(max_age_hours, bool):
+        # 判不出新鲜度就不能放行：缺 policy 值不是"没规则"，而是"无法验证"。
+        raise ValidationError(
+            "BAD_MAX_EVIDENCE_AGE",
+            "policy.max_evidence_age_hours must be an integer number of hours (got %r)" % (max_age_hours,),
+        )
     for idx, ev in enumerate(evidence):
         if not isinstance(ev, dict):
             raise ValidationError("BAD_EVIDENCE", "evidence[%d] must be an object" % idx)
+        # 时效锚在**采集时刻**，不锚在"声明被写入的时刻"。
+        # 否则一份采集于很久以前的证据，只要声明是刚写的，就能拿到一个新鲜的
+        # expires_at 并通关 —— 那是"看起来在有效期内，其实早已过期"的假绿通道。
+        # expires_at 只是它的一次性快照，因此这里单独校验、绝不拿它替代本判据。
+        collected_at = _parse_utc(ev.get("collected_at"))
+        if collected_at > now_utc:
+            raise ValidationError(
+                "EVIDENCE_FROM_FUTURE",
+                "evidence[%d] collected_at %s is in the future (now %s)"
+                % (idx, ev.get("collected_at"), now_utc.isoformat()),
+            )
+        if collected_at + timedelta(hours=max_age_hours) <= now_utc:
+            raise ValidationError(
+                "EVIDENCE_STALE",
+                "evidence[%d] collected at %s is older than %sh at %s: %s"
+                % (
+                    idx,
+                    ev.get("collected_at"),
+                    max_age_hours,
+                    now_utc.isoformat(),
+                    (collected_at + timedelta(hours=max_age_hours)).isoformat(),
+                ),
+            )
         expires_at = _parse_utc(ev.get("expires_at"))
         if expires_at <= now_utc:
             raise ValidationError(
