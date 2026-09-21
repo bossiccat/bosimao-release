@@ -202,7 +202,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      # !!! 合入前换成 SHA !!!
+      # （2026-09-21）此处原本有一行"合入前换成 SHA"的待办注释 —— pin 已于 2026-09-20
+      # 完成，改为在下面两个 uses 各自行尾标注来源与版本，不再留待办。
       # 两处 SHA 已按本仓惯例 pin（2026-09-20，用 gh api 从上游解析、非手抄）：
       #   dtolnay/rust-toolchain@stable 分支 tip = 6bed0761d98439e5a578e2877258200ad565ba87
       #   actions/setup-node v4 → commit       = 49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -242,6 +243,52 @@ jobs:
       # ⇒ 直接编会在第一道就红（SIDECAR_PACKAGE_POINTER_MISSING，F2）。
       - name: 物化 sidecar 世代（binaries/）
         run: node scripts/build-sidecar-external-bin.js
+
+      # ── 两个 provision 助手（externalBin 的第二、三条）────────────────────
+      # 为什么需要这一步：`tauri.conf.json` 的 `externalBin` 声明了三条
+      #   binaries/jax-rtc-sidecar、binaries/provision_sidecar_credential、
+      #   binaries/provision_sidecar_credential_launcher
+      # tauri 会按 `<name>-<target-triple><ext>` 去找。第一条由上面的 sidecar 构建
+      # 产出；后两条是**本 crate 的 bin 目标**，需要 cargo 先编出来再按三元组后缀
+      # 摆进 `binaries/`。而 `binaries/` 整个被 .gitignore 忽略 ⇒ 干净 runner 上没有。
+      # 缺它们时 `tauri_build::build()` 会以
+      #   `resource path binaries\provision_sidecar_credential-x86_64-pc-windows-msvc.exe doesn't exist`
+      # 让 `cargo build --release` 直接红（2026-09-20 run 35515153178 实测）。
+      #
+      # 先编这两个 bin 必须先跳过 tauri_build —— 否则 build.rs 会在这个 bin 还没产出
+      # 之前就去解析资源并失败。`build.rs:185-188` 的 `JAX_SKIP_TAURI_BUILD=1` 就是
+      # 为这种场景留的逃生门（注释写明"纯逻辑测试不需要完整资源拷贝"）。
+      - name: 编出 provision 双助手（跳过 tauri_build，避免先解析不存在的资源）
+        working-directory: pet-ui/src-tauri
+        env:
+          JAX_SKIP_TAURI_BUILD: "1"
+        run: >-
+          cargo build --release
+          --bin provision_sidecar_credential
+          --bin provision_sidecar_credential_launcher
+
+      - name: 把 provision 双助手按 target-triple 后缀摆进 binaries/
+        working-directory: pet-ui/src-tauri
+        shell: pwsh
+        run: |
+          $suffix = 'x86_64-pc-windows-msvc'
+          $pairs = @(
+            @{ src = 'provision_sidecar_credential';        dst = "provision_sidecar_credential-$suffix.exe" },
+            @{ src = 'provision_sidecar_credential_launcher'; dst = "provision_sidecar_credential_launcher-$suffix.exe" }
+          )
+          New-Item -ItemType Directory -Force -Path 'binaries' | Out-Null
+          foreach ($p in $pairs) {
+            $from = Join-Path 'target/release' ($p.src + '.exe')
+            $to   = Join-Path 'binaries' $p.dst
+            if (-not (Test-Path -LiteralPath $from)) {
+              Write-Error "编出来的 bin 不存在：$from（上一步应当产出它）"
+              exit 1
+            }
+            Copy-Item -LiteralPath $from -Destination $to -Force
+            $h = (Get-FileHash -LiteralPath $to -Algorithm SHA256).Hash.ToLower()
+            $n = (Get-Item -LiteralPath $to).Length
+            Write-Host "staged $($p.dst)  bytes=$n  sha256=$h"
+          }
 
       - name: cargo build --release（内含 --verify-only 门）
         working-directory: pet-ui/src-tauri
