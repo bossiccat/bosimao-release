@@ -53,18 +53,12 @@ CLAIMS_DIR = GOVERNANCE / "claims"
 # 反过来，如果某个冻结项开始被门禁读取，守卫也会红 —— 那时应当把它从本表移除，
 # 而不是让本表变成一份永不失效的豁免名册。
 ALLOWED_UNCONSUMED = {
-    "policy.schema_version": (
-        "policy 自身的版本号。全仓无任何校验器读取它的值 —— "
-        "'schema 版本变了要拦'这条控制今天并不存在。属已知缺口（见审计报告 C-1）。"
-    ),
-    "policy.release_channel": (
-        "声明 \"production\"，但**没有任何校验器读它**：门禁不会因为 channel 不是 "
-        "production 而拒发。属疑似真缺陷（见审计报告 C-2），保留原值不做改动。"
-    ),
-    "command_lock.schema_version": (
-        "同 policy.schema_version：command-lock 的版本号无人读取，"
-        "锁文件 schema 换代时没有任何迁移/兼容判据。属已知缺口（见审计报告 C-1）。"
-    ),
+    # 2026-09-21 移除三项（原审计报告 C-1 / C-2）——它们已从"声明"变成"被执行"：
+    #   policy.schema_version        -> release-preflight.py:_load_policy 判 UNSUPPORTED_POLICY_SCHEMA
+    #   policy.release_channel       -> release-preflight.py:_load_policy 判 UNSUPPORTED_RELEASE_CHANNEL
+    #   command_lock.schema_version  -> release-preflight.py:_load_command_lock 判 UNSUPPORTED_COMMAND_LOCK_SCHEMA
+    # 本文件的那条"冻结项不得变成永久豁免"断言当时**红着提醒了**，并给出读取点行号 ——
+    # 这正是它存在的意义：修好之后必须回来把豁免删掉，而不是让它悄悄留成永久豁免。
     "claim.risk": (
         "人读的语义元数据（'这条声明在断言什么'）。写入侧只做整字典合并保留"
         "（scripts/record-release-evidence.py:153-159），没有任何校验器读取或断言它。"

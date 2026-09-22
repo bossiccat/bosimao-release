@@ -322,6 +322,49 @@ def test_verify_rejects_missing_required_check(tmp_path):
     assert "REQUIRED_CHECK_NOT_LOCKED" in result.stdout
 
 
+def test_verify_rejects_unsupported_policy_schema_version(tmp_path):
+    """`policy.schema_version` 此前是**零读取点**（2026-09-21「声明了却无人消费的字段」清点）。
+
+    ⇒ 换了 policy 的 schema 也不会有任何东西拒绝它。夹具用 `Verified` 状态，让形状错误成为
+    唯一失败原因（否则会被 NOT_VERIFIED 混过去）。
+    """
+    fixture = _fixture(tmp_path)
+    policy = json.loads(fixture["policy"].read_text(encoding="utf-8"))
+    policy["schema_version"] = 2
+    _write_json(fixture["policy"], policy)
+
+    result = _preflight(fixture, "verify")
+
+    assert result.returncode != 0
+    assert "UNSUPPORTED_POLICY_SCHEMA" in result.stdout
+
+
+def test_verify_rejects_non_production_release_channel(tmp_path):
+    """`policy.release_channel` 此前是零读取点 ⇒「这份 policy 只对 production 生效」无后果。"""
+    fixture = _fixture(tmp_path)
+    policy = json.loads(fixture["policy"].read_text(encoding="utf-8"))
+    policy["release_channel"] = "staging"
+    _write_json(fixture["policy"], policy)
+
+    result = _preflight(fixture, "verify")
+
+    assert result.returncode != 0
+    assert "UNSUPPORTED_RELEASE_CHANNEL" in result.stdout
+
+
+def test_verify_rejects_unsupported_command_lock_schema_version(tmp_path):
+    """`command-lock.json#schema_version` 此前同样是零读取点。"""
+    fixture = _fixture(tmp_path)
+    lock = json.loads(fixture["lock"].read_text(encoding="utf-8"))
+    lock["schema_version"] = 2
+    _write_json(fixture["lock"], lock)
+
+    result = _preflight(fixture, "verify")
+
+    assert result.returncode != 0
+    assert "UNSUPPORTED_COMMAND_LOCK_SCHEMA" in result.stdout
+
+
 def test_release_rejects_non_https_ci_url_before_reserving_evidence(tmp_path):
     fixture = _fixture(tmp_path, checks=[_check("pass", "print('pass')")])
 

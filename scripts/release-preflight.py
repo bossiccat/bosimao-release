@@ -96,6 +96,47 @@ def _load_json(path, code):
         raise PreflightError(code, "cannot load JSON: %s" % exc) from exc
 
 
+# 本 harness 支持的 schema 版本。两处都读、都判 —— 2026-09-21 的
+# 「声明了却无人消费的字段」清点发现这两个 `schema_version` 此前**零读取点**：
+# 也就是说"换了 writer 的 schema 也不会被拒"。判不出来就不放行。
+REQUIRED_POLICY_SCHEMA_VERSION = 1
+REQUIRED_COMMAND_LOCK_SCHEMA_VERSION = 1
+
+# 本 harness 只对 production 发布生效。同一清点发现 `release_channel` 此前**零读取点** ——
+# 于是"这份 policy 只对 production 生效"这句声明**完全无后果**（把它改成 staging 也不会有
+# 任何东西变化，而 CI 的 environment: production 与它之间也没有任何一致性判据）。
+# 这里给它真实后果：非白名单值直接拒发。**放宽要改这里、并走评审**，不是改数据就行。
+SUPPORTED_RELEASE_CHANNELS = ("production",)
+
+
+def _load_policy(path):
+    policy = _load_json(path, "INVALID_POLICY")
+    version = policy.get("schema_version")
+    if version != REQUIRED_POLICY_SCHEMA_VERSION:
+        raise PreflightError(
+            "UNSUPPORTED_POLICY_SCHEMA",
+            "release-policy schema_version must be %r (got %r)" % (REQUIRED_POLICY_SCHEMA_VERSION, version),
+        )
+    channel = policy.get("release_channel")
+    if channel not in SUPPORTED_RELEASE_CHANNELS:
+        raise PreflightError(
+            "UNSUPPORTED_RELEASE_CHANNEL",
+            "release_channel %r is not supported: %s" % (channel, ", ".join(SUPPORTED_RELEASE_CHANNELS)),
+        )
+    return policy
+
+
+def _load_command_lock(path):
+    command_lock = _load_json(path, "INVALID_COMMAND_LOCK")
+    version = command_lock.get("schema_version")
+    if version != REQUIRED_COMMAND_LOCK_SCHEMA_VERSION:
+        raise PreflightError(
+            "UNSUPPORTED_COMMAND_LOCK_SCHEMA",
+            "command-lock schema_version must be %r (got %r)" % (REQUIRED_COMMAND_LOCK_SCHEMA_VERSION, version),
+        )
+    return command_lock
+
+
 def _validate_release_id(release_id):
     if not isinstance(release_id, str) or not RELEASE_ID_PATTERN.fullmatch(release_id):
         raise PreflightError("INVALID_RELEASE_ID", "release_id has an invalid format")
@@ -120,7 +161,7 @@ def _snapshot(repo_root, artifact_path):
 
 
 def _verify(policy_path, claims_path, repo_root, artifact_path, command_lock_path=None):
-    policy = _load_json(policy_path, "INVALID_POLICY")
+    policy = _load_policy(policy_path)
     # `required_checks` 必须真的锁在命令锁里 —— 此前这条判据**只在 `release` 分支**执行
     # （`_release()` 内），而 `verify` 分支从不读 `--command-lock`。后果：PR 阶段的 verify
     # 查不出「policy 要求的检查被从 command-lock.json 删掉」，只在打 tag 跑 `release` 时
@@ -128,7 +169,7 @@ def _verify(policy_path, claims_path, repo_root, artifact_path, command_lock_pat
     # 2026-09-21 由「声明了却无人消费的字段」清点发现：`--command-lock` 对两个 action 都是
     # `required=True`，却在 `verify` 分支**零消费**（必填却无后果的参数）。
     if command_lock_path is not None:
-        _validate_required_checks(policy, _load_json(command_lock_path, "INVALID_COMMAND_LOCK"))
+        _validate_required_checks(policy, _load_command_lock(command_lock_path))
     snapshot = _snapshot(repo_root, artifact_path)
     result = verify_claims(
         policy,
@@ -278,7 +319,7 @@ def _release(args):
     )
     if verification["verdict"] != "pass":
         return {"verdict": "fail", "errors": verification["errors"]}
-    command_lock = _load_json(args.command_lock, "INVALID_COMMAND_LOCK")
+    command_lock = _load_command_lock(args.command_lock)
     _validate_required_checks(policy, command_lock)
     release_dir = _reserve_new_release(args.evidence_root, args.release_id)
     for check_id in policy.get("required_checks", []):
