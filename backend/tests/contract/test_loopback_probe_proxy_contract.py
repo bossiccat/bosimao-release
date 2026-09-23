@@ -205,7 +205,16 @@ def _iter_py_files(root: Path = REPO_ROOT) -> list[Path]:
         if not base.is_dir():
             continue
         for p in base.rglob("*.py"):
-            if any(part in SKIP_PARTS for part in p.parts):
+            # SKIP_PARTS 只该作用于**扫描根之下**的路径分量。
+            # 2026-09-24 实测事故：这里原本比对的是 `p.parts`（整条**绝对**路径），
+            # 于是 Linux 上 pytest 的 tmp_path（/tmp/pytest-of-runner/...）里那个
+            # `tmp` 分量命中了 SKIP_PARTS 里的 "tmp" ⇒ 变异用例摆进 tmp 的样本
+            # **一个都扫不到** ⇒ 检测器返回 {} ⇒ 两条"锁有没有牙齿"的变异用例
+            # 在 ubuntu 上双双失败。Windows 上侥幸不炸（Temp 与 tmp 大小写不同）。
+            # 相对扫描根取分量后，仓内语义完全不变（base = REPO_ROOT/<root_name>，
+            # 相对分量就是仓内那几层），而任意 tmp 目录都不再被误跳过。
+            rel_parts = p.relative_to(base).parts
+            if any(part in SKIP_PARTS for part in rel_parts):
                 continue
             if p.resolve() in _SELF_EXCLUDED_ABS:
                 continue
@@ -780,8 +789,17 @@ def test_lock_turns_red_when_a_bypass_is_removed(tmp_path: Path) -> None:
         "变异目标不唯一/找不到 —— 变异未生效，本用例失去意义。"
     )
 
-    # 阳性对照：未变异的真实文件，检测器必须安静
+    # 仪器自检（**必须排在一切判断之前**）：检测器真的看到了这份样本吗？
+    # 2026-09-24 事故教训：阳性对照 `assert not _unbypassed_build_openers(tmp_path)`
+    # 在"检测器一个文件都没扫到"时**也会通过**（{} 是假绿），于是"锁没有牙齿"被当成
+    # "锁很干净"。linux 上 SKIP_PARTS 误跳过 /tmp 就是这个形态。
+    # 所以先证明"仪器看到了样本"，再谈它判红还是判绿。
     _stage(tmp_path, _MUTATION_FILE, src)
+    assert _MUTATION_FILE in _loopback_texts(tmp_path), (
+        "仪器没看到样本：变异文件根本没被扫描到，后面的判红/判绿都不可信"
+    )
+
+    # 阳性对照：未变异的真实文件，检测器必须安静
     assert not _unbypassed_build_openers(tmp_path), (
         "阳性对照失败：未变异的真实文件被判违规（检测器过严）"
     )
@@ -820,8 +838,13 @@ def test_lock_turns_red_when_httpx_or_ws_bypass_is_removed(tmp_path: Path) -> No
         "变异目标不唯一/找不到 —— 变异未生效"
     )
 
-    # 阳性对照：未变异的真实文件，两族检测都必须安静
+    # 仪器自检（必须排在一切判断之前）：两族检测都真的看到了这份样本吗？
     _stage(tmp_path, httpx_rel, httpx_src)
+    assert set(_loopback_texts(tmp_path)) >= {httpx_rel, ws_rel}, (
+        "仪器没看到样本：变异文件根本没被扫描到，后面的判红/判绿都不可信"
+    )
+
+    # 阳性对照：未变异的真实文件，两族检测都必须安静
     assert not _httpx_violations(tmp_path), "阳性对照失败：未变异的真实文件被判 httpx 违规"
     assert not _ws_violations(tmp_path), "阳性对照失败：未变异的真实文件被判 ws 违规"
 

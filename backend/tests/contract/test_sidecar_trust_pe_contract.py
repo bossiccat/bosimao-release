@@ -119,6 +119,18 @@ def test_node_is_available_for_the_trust_gate_suites() -> None:
     )
 
 
+def _describe_case(case: ET.Element) -> str:
+    """把 junit 的 <testcase> 压成"名字 + 首行失败信息"，便于在 CI 日志里定位。"""
+    bad = case.find("failure")
+    if bad is None:
+        bad = case.find("error")
+    message = ((bad.get("message") if bad is not None else "") or "").strip()
+    if not message and bad is not None:
+        message = (bad.text or "").strip()
+    first_line = next((ln.strip() for ln in message.splitlines() if ln.strip()), "")
+    return f"  - {case.get('name')}\n      {first_line[:400]}"
+
+
 def test_pe_trust_suites_run_green_and_keep_their_teeth(tmp_path: Path) -> None:
     node = _NODE or "node"
     for suite in _JS_SUITES:
@@ -152,7 +164,12 @@ def test_pe_trust_suites_run_green_and_keep_their_teeth(tmp_path: Path) -> None:
     detail = (
         f"rc={proc.returncode} tests={len(cases)} "
         f"failures={len(failures)} errors={len(errors)}\n"
-        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        # 2026-09-24：原先只打计数，于是"29/63 在 ubuntu 上红"这种**平台/前置条件**
+        # 差异在日志里查不出是哪 29 条（node 的 junit reporter 把细节写进文件，
+        # stdout/stderr 是空的）。判红必须同时给出**是哪几条红**，否则只能靠猜。
+        f"--- 失败用例（最多列 40 条）---\n"
+        + "\n".join(_describe_case(c) for c in (failures + errors)[:40])
+        + f"\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
     )
     assert proc.returncode == 0, f"PE 信任契约套件未通过\n{detail}"
     assert not failures and not errors, f"PE 信任契约套件有失败用例\n{detail}"
