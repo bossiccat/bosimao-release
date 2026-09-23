@@ -27,9 +27,10 @@ CI（ubuntu，干净检出）跑 `pytest backend/tests/contract` 时套件在**�
   · 干净检出（CI / 新同事的机器）→ 补测试值，套件可收集、可运行；
   · 开发机（只有 .env）→ 也用测试值，于是每台机器结果一致（确定性）。
 
-⚠️ 用 `not os.environ.get(...)` 而**不是** `os.environ.setdefault(...)`：
-`setdefault` 会把**空串**当成"已设置"而放过，而空串与未设置对 fail-closed 门禁是
-等价的 —— 那正是本次事故的形态。
+⚠️ 判"有没有提供"用的是 `_is_unset()`，**不是** `os.environ.setdefault()`：
+`setdefault` 只判"键在不在"，于是**空串**会被当成"已设置"而放过 —— 而空串与未设置
+对 fail-closed 门禁是等价的，那正是本次事故的形态。同理，int 字段的"未提供"是 `"0"`
+而不是空串，字符串 `"0"` 又是真值，也必须单独判（见 `_INT_DEFAULT_FIELDS`）。
 
 ⚠️ 这里给的都是**明显的测试值**，不是可用凭据：hello 装配期不解析密钥材料，
 控制面凭据只被 hash 后比对。将来若有测试真的要签名或验签，请在那里显式注入
@@ -64,12 +65,46 @@ CONTROL_PLANE_CREDENTIAL_ENV = (
     "VOICE_SIDECAR_CREDENTIAL",
 )
 
-# 键名 → 补进去的测试值。值只需非空，且一眼看得出是测试用。
-_TEST_VALUES = {
-    _name: f"backend-test-only-{_name.lower()}"
-    for _name in (*HELLO_CAPABILITY_ENV, *CONTROL_PLANE_CREDENTIAL_ENV)
+# ③ TRTC 签发凭据 —— `runtime_missing()`（backend/app/voice/config.py:250-256）
+#    要求 owner/sidecar 凭据**之外**还要 trtc_sdk_app_id 与 trtc_secret_key 非空；
+#    缺任一 → 安全路由**请求级** fail-closed 返回 503
+#    （见 backend/app/api/routes_voice_sessions.py:84-85）。
+#    实测教训：只补 ② 是不够的 —— 第一次修复漏了这两项，CI 上依然是 503。
+#    ⚠️ TRTC_SDKAPPID 是 **int** 字段（backend/app/config.py:208），测试值必须是数字串。
+TRTC_SIGNING_ENV = {
+    # 与 backend/tests/integration/voice_security_fixture.py 的 FAKE_SDK_APP_ID 同值，
+    # 避免两处"假的 TRTC 应用号"各说各话。
+    "TRTC_SDKAPPID": "1600155678",
+    "TRTC_SECRETKEY": "backend-test-only-trtc-secretkey",
 }
 
+# 键名 → 补进去的测试值。值只需非空，且一眼看得出是测试用。
+_TEST_VALUES = {
+    **{_n: f"backend-test-only-{_n.lower()}"
+       for _n in (*HELLO_CAPABILITY_ENV, *CONTROL_PLANE_CREDENTIAL_ENV)},
+    **TRTC_SIGNING_ENV,
+}
+
+# 值等同于**未提供**的 int 字段：它们的"没配置"不是空串，而是数字 0
+# （字段默认值，见 backend/app/config.py:208 `trtc_sdkappid: int = 0`）。
+# ⚠️ 这里必须单独处理：字符串 "0" 是**真值**，所以 `not os.environ.get(name)`
+#    判不出来 —— 第一版就是这么漏的：TRTC_SDKAPPID 被设成 "0" 后 conftest 不去补，
+#    应用拿到的仍是 0 ⇒ runtime_missing 里 trtc_sdk_app_id 缺失 ⇒ 依旧 503。
+_INT_DEFAULT_FIELDS = frozenset({"TRTC_SDKAPPID"})
+
+
+def _is_unset(name: str, value: str | None) -> bool:
+    """环境里这个键是否等于"没提供"（对 fail-closed 门禁而言）。"""
+    if value is None or not value.strip():
+        return True
+    if name in _INT_DEFAULT_FIELDS:
+        try:
+            return int(value) == 0
+        except ValueError:
+            return False
+    return False
+
+
 for _name, _value in _TEST_VALUES.items():
-    if not os.environ.get(_name):
+    if _is_unset(_name, os.environ.get(_name)):
         os.environ[_name] = _value

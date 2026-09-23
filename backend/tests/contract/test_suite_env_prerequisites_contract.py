@@ -57,17 +57,31 @@ CONTROL_PLANE_CREDENTIAL_ENV = (
     "VOICE_SIDECAR_CREDENTIAL",
 )
 
-ALL_DECLARED_ENV = HELLO_CAPABILITY_ENV + CONTROL_PLANE_CREDENTIAL_ENV
+# TRTC 签发凭据：`runtime_missing()`（backend/app/voice/config.py:250-256）把
+# trtc_sdk_app_id / trtc_secret_key 也算作必需能力，缺了同样是 503。
+TRTC_SIGNING_ENV = ("TRTC_SDKAPPID", "TRTC_SECRETKEY")
+
+# "干净检出"的等价环境：字符串字段用空串（对这些字段空串 == 未设置）。
+# ⚠️ TRTC_SDKAPPID 是 **int** 字段（backend/app/config.py:208），必须用它的默认值 "0"；
+#    给它空串会让 pydantic 解析失败 —— 那是"仪器坏了"，会把守卫变成假红。
+NEUTRALISED_ENV = {
+    **{_n: "" for _n in (*HELLO_CAPABILITY_ENV, *CONTROL_PLANE_CREDENTIAL_ENV)},
+    "TRTC_SDKAPPID": "0",
+    "TRTC_SECRETKEY": "",
+}
 
 # 三处都会走到 app.main 的导入期装配，因此都要在干净环境下可收集。
 SUITES = ("backend/tests/contract", "backend/tests/integration", "backend/tests/unit")
 
 
 def _clean_env() -> dict[str, str]:
-    """抹掉全部 VOICE_*，再把 conftest 应当声明的键置为空串（空串覆盖 .env）。"""
+    """复现干净检出：抹掉全部 VOICE_*，并把已声明的键重置成"未提供"的等价值。
+
+    对字符串字段用空串而不是 unset：unset 会被开发机的 .env 兜住，那样这条守卫
+    在本地就是假绿。空串（以及 int 字段的默认值）是**显式值**，优先级高于 .env。
+    """
     env = {k: v for k, v in os.environ.items() if not k.startswith("VOICE_")}
-    for name in ALL_DECLARED_ENV:
-        env[name] = ""
+    env.update(NEUTRALISED_ENV)
     return env
 
 
