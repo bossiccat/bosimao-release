@@ -18,6 +18,11 @@ from pathlib import Path
 
 sys.path.insert(0, "backend")
 
+# 环境前提由 backend/tests/conftest.py 统一提供（hello 的 5 项安全能力）。
+# 本文件是 contract/ 里唯一在模块级 import app.main 的：app.main 在**导入期**装配
+# 生产应用，而 hello 装配 fail-closed（backend/app/voice/hello_runtime.py:42-45），
+# 干净检出上缺任一项会让**整层契约**在收集阶段就死掉（2026-09-24 CI 实测）。
+# 别在这里再抄一份环境设置——重复的声明迟早会漂移。
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
