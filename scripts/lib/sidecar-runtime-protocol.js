@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { RUNTIME_ARTIFACT_FILES, makeImmutableGeneration } = require('./sidecar-runtime-immutable');
+const { RUNTIME_ARTIFACT_FILES, makeImmutableGeneration, sealTopDirectory } = require('./sidecar-runtime-immutable');
 const { replacePointer } = require('./sidecar-pointer-replace');
 
 const GENERATION_RE = /^g-[0-9a-f]{64}$/;
@@ -216,9 +216,9 @@ function finalizeStagedGeneration({ runtimeDir, stagingDir, provenanceBytes, exp
     files,
   });
   fs.writeFileSync(path.join(resolvedStaging, 'generation.json'), `${JSON.stringify(metadata)}\n`, { flag: 'wx' });
-  // 在 staging 内先完成冻结；冻结失败不得把可写 generation 暴露到 generations/。
-  makeImmutableGeneration(resolvedStaging);
+  makeImmutableGeneration(resolvedStaging, { sealTopDirectory: false });
   fs.renameSync(resolvedStaging, generationDir);
+  sealTopDirectory(generationDir); // rename(2) 要求被移动目录自身可写 → 只能落位后再封顶层
   return { generation, generationDir, metadata };
 }
 

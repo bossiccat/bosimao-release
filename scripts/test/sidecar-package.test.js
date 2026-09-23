@@ -1182,3 +1182,54 @@ test('the build path actually calls the pruned-native prune and the media family
   }
 });
 
+test('publishing never renames a read-only directory and seals the top only after landing', () => {
+  // 2026-09-24：把一条 **POSIX 规则**搬到任何平台上测 —— 因为原缺陷只在 Linux 上现形。
+  //
+  // 缺陷原形：finalizeStagedGeneration 曾在 rename **之前**把 staging 顶层 chmod 0o555。
+  // 而 rename(2) 移动目录时要求**被移动目录自身可写**（EACCES 条款逐字：
+  //   "oldpath is a directory and does not allow write permission
+  //    (needed to update the ..  entry)"）
+  // ⇒ Linux 上那次 rename 必然 EACCES，publisher 根本发布不出世代
+  //   （ubuntu 上本文件 63 个用例里 29 个红，全部同一个 errno）。
+  // Windows 容忍重命名只读目录，所以本机长期全绿 —— 这正是"平台不对称"型缺陷的可怕之处：
+  // **开发者的机器上看不见它**。所以这里在 Windows 上主动模拟该规则。
+  //
+  // 做法：拦截 fs.renameSync，遇到"源是目录且 owner 写位已清"就抛 EACCES。
+  // 修好之后发布路径不应再触发它；同时断言落位后顶层确实被封（不变量不能被"修复"掉）。
+  const realRenameSync = fs.renameSync;
+  const violations = [];
+  fs.renameSync = function renameSyncSimulatingPosix(from, to) {
+    let stat = null;
+    try {
+      stat = fs.lstatSync(from);
+    } catch {
+      // 源不存在：交给真实调用去报它自己的错。
+    }
+    if (stat && stat.isDirectory() && (stat.mode & 0o200) === 0) {
+      violations.push(`${from} -> ${to}`);
+      const error = new Error(`EACCES: permission denied, rename '${from}' -> '${to}'`);
+      error.code = 'EACCES';
+      throw error;
+    }
+    return realRenameSync.call(fs, from, to);
+  };
+  try {
+    const { generationDir } = fixture();
+    assert.deepEqual(
+      violations,
+      [],
+      '发布过程中重命名了只读目录 —— 在 POSIX 上会 EACCES（Windows 容忍，故本机测不出来）',
+    );
+    // 不变量：落位后顶层必须已封。判据用"owner 写位已清"而不是精确 0o555 ——
+    // Windows 的 chmod 0o555 只映射成 read-only 属性（statSync 报 0o444、没有执行位），
+    // 断言精确 0o555 会在 Windows 上假红；而这一位才是"不可写"的可移植本质。
+    assert.equal(
+      (fs.statSync(generationDir).mode & 0o200) === 0,
+      true,
+      '世代顶层落位后必须是只读的（0o555 的实质：owner 写位已清）',
+    );
+  } finally {
+    fs.renameSync = realRenameSync;
+  }
+});
+
