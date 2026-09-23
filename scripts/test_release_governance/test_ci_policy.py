@@ -32,8 +32,56 @@ def test_pull_requests_run_governance_verify_and_regression_test_jobs():
     assert "github.ref_type == 'tag'" in workflow
     assert "startsWith(github.ref_name, 'v')" in workflow
     assert "needs: build-candidate" in workflow
-    assert "needs: [build-candidate, verify, test]" in workflow
+    # 2026-09-19：契约层门禁接进发布链 —— 契约红则 tag 发布也出不去。
+    assert "needs: [build-candidate, verify, test, contract-gate]" in workflow
     assert "PR 仍运行无密钥回归测试" in _harness_doc()
+
+
+def test_pull_requests_run_the_contract_and_integration_gates():
+    """契约层与集成层必须在 PR 上执行，且必须挡在 release 前面。
+
+    这条断言存在的理由（2026-09-19 审计）：
+      `backend/tests/contract`（59 文件 / 587 用例）此前只被 deploy-cloudrun.yml 引用，
+      而那个 workflow 的触发器是 workflow_dispatch（需人工填 confirm=deploy）与
+      tag push，**没有 pull_request**。于是"守护控制面的核心契约层"在整条 PR 流程里
+      从不执行：回归拦不住，只能靠人手动发一次部署才知道。
+      守卫存在但没有自动入口 = 守卫不存在。故此处把"它在 PR 上跑"钉成契约。
+    """
+    workflow = _workflow()
+
+    assert "contract-gate:" in workflow
+    assert "needs: [build-candidate, verify, test, contract-gate]" in workflow
+    assert "python -m pytest backend/tests/contract backend/tests/integration -q" in workflow
+    # 依赖清单必须是唯一真源那个文件，而不是在本 workflow 里再抄一份。
+    assert "-r ci/test-requirements.txt" in workflow
+    # 门禁步骤不得带 if / continue-on-error（本 workflow 只允许 release job 有 if）。
+    # 断言只看**去注释后的代码行**：这个仓已经两次栽在"记录规则的散文自己命中了被禁
+    # 写法"上（见本文件 test_workflow_cannot_upgrade_claims_to_verified_and_pins_actions
+    # 上方注释），所以这里不拿原文做子串扫描。
+    gate_section = workflow.split("  contract-gate:", 1)[1].split("\n  release:", 1)[0]
+    gate_code = "\n".join(
+        line for line in gate_section.splitlines() if not line.strip().startswith("#")
+    )
+    assert "continue-on-error" not in gate_code
+    assert "if:" not in gate_code
+
+
+def test_windows_leg_runs_the_suites_no_other_workflow_executes():
+    """两条此前"任何自动触发都不执行"的守卫必须在 Windows 腿真跑。
+
+    这条断言存在的理由（2026-09-19 审计）：
+      · `scripts/test/`（17 文件 / 177 用例）与 `backend/tests/unit`（84 文件 / 789 用例）
+        此前**没有任何 workflow 执行它们**；
+      · 二者都只能放 Windows 腿：unit 里 test_tts_edge.py 需要 edge-tts、
+        test_transcript_storage.py 需要 pywin32（Linux 无 wheel）；scripts/test 里
+        12 个用例在非 win32 平台会静默跳过（放 ubuntu 只会拿到更薄的绿）。
+      同时钉住"不许用 importorskip 把守卫静默跳过"——真装依赖才是让守卫继续守。
+    """
+    workflow = _workflow()
+
+    assert "python -m pytest backend/tests/unit -q" in workflow
+    assert "node --test scripts/test/*.test.js scripts/test/*.test.mjs" in workflow
+    assert "-r ci/test-requirements-windows.txt" in workflow
 
 
 def test_candidate_is_built_once_and_verified_by_sha_in_verify_and_release():

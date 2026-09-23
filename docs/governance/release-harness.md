@@ -36,7 +36,11 @@
 
 artifact store 的 checksum 只证明下载的字节与上传的 checksum sidecar 一致，即传输完整性；它不单独证明该工件属于本次 workflow 所 checkout 的源码。provenance 绑定只用于阻断候选工件、commit 和 runner HEAD 之间的身份错配；它不替代远端 protected branch、受限 tag 创建、required status、production reviewer、CI-only 凭据或 artifact store 的访问控制。
 
-PR 仍运行无密钥回归测试：`test` job 覆盖 release-governance 的静态与行为回归，`verify` job 对同一候选工件执行 Claim 检查；两者均不接收 production environment 或 `RELEASE_EVIDENCE_HMAC_KEY`。PR 不会调度 `release` job，因而不会创建官方发布或访问发布环境。
+PR 仍运行无密钥回归测试：`test` job 覆盖 release-governance 的静态与行为回归，`contract-gate` job 覆盖控制面契约层（`backend/tests/contract`）与集成层（`backend/tests/integration`），`verify` job 对同一候选工件执行 Claim 检查；三者均不接收 production environment 或 `RELEASE_EVIDENCE_HMAC_KEY`。PR 不会调度 `release` job，因而不会创建官方发布或访问发布环境。
+
+`contract-gate` 的由来（2026-09-19 审计）：`backend/tests/contract`（59 文件 / 587 用例）此前**只**被 `deploy-cloudrun.yml` 引用，而那个 workflow 的触发器是 `workflow_dispatch`（需人工填 `confirm=deploy`）与 tag push，**没有 `pull_request`**。于是这层"守护控制面的核心契约"在整条 PR 流程里从不执行——守卫存在但没有任何自动入口，等于守卫不存在。现把它与集成层一起放进每次 PR，并加入 `release.needs`：契约红则任何 tag 发布都出不去。
+
+平台分工不是随意的：`backend/tests/unit`（789 用例）与 `scripts/test`（177 用例）只能放在 `windows-popup-gate`（`windows-latest`）上——前者需要的 pywin32 在 Linux 上装不上，后者有 12 个用例在非 Windows 平台会**静默跳过**。把它们放 ubuntu 只会得到一个"更薄的绿"，所以刻意不这么做。两条腿的依赖闭包由 `ci/test-requirements.txt` 与 `ci/test-requirements-windows.txt` 唯一定义；清单原先内联在 `deploy-cloudrun.yml` 里，第二处引用必然漂移，故改为唯一真源并由契约测试钉住。
 
 当前 release job 只完成 preflight 与证据上传；它不会执行官方发布命令。官方发布命令与最小权限发布凭据未接入，因此凭据锁定目标未完成。此状态不代表生产就绪，也不能作为产品已发布或生产审批已生效的证据。
 

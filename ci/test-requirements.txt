@@ -1,0 +1,33 @@
+# CI 测试依赖闭包 —— **唯一真源**
+# =============================================================================
+# 为什么单独一个文件、而不是直接用根目录 requirements.txt：
+#   根 requirements.txt 里的 windows-capture / pywin32 / sounddevice / silero-vad /
+#   sherpa-onnx 是 Windows 或原生专属，ubuntu runner 上根本装不上；混进安装清单
+#   会红在 pip 步骤上，而不是红在测试结论上 —— 那是"门禁坏了"，不是"代码坏了"。
+#
+# 谁在引用（改这里等于同时改两处；二者由契约测试钉住，不许各自演化）：
+#   .github/workflows/deploy-cloudrun.yml     部署前的 backend 契约门禁
+#   .github/workflows/release-governance.yml  PR 期的 contract-gate（契约 + 集成层）
+#
+# 版本与根 requirements.txt 保持一致，避免出现两套锁。
+#
+# 只装得上/只该在 Windows 上跑的补充包在 ci/test-requirements-windows.txt，本文件
+# 必须保持"linux 可安装"这一性质。
+# =============================================================================
+pytest==9.1.1
+pytest-asyncio==1.4.0
+PyYAML==6.0.3
+fastapi==0.141.1
+httpx==0.28.1
+pydantic==2.13.4
+pydantic-settings==2.14.2
+numpy==2.4.6
+pillow==12.3.0
+psutil==7.2.2
+cryptography==50.0.0
+PyJWT==2.10.1
+uvicorn==0.52.1
+websockets==17.0.1
+jsonschema==4.26.0
+openapi-schema-validator==0.9.0
+openapi-spec-validator==0.9.0

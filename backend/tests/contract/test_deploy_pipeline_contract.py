@@ -26,6 +26,11 @@ ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".github" / "workflows" / "deploy-cloudrun.yml"
 CLOUDAPI_DOCKERFILE = ROOT / "cloudapi" / "Dockerfile"
 
+# CI 测试依赖清单的**唯一真源**（2026-09-19 起）。deploy-cloudrun.yml 与
+# release-governance.yml 的 contract-gate 都只引用它，各自不再抄第二份。
+CI_REQUIREMENTS = ROOT / "ci" / "test-requirements.txt"
+CI_REQUIREMENTS_WINDOWS = ROOT / "ci" / "test-requirements-windows.txt"
+
 # 每个服务在 preflight 里必须校验、并在部署前注入的运行时键（单一真源）。
 # preflight 与注入都遍历 workflow 矩阵里的 required_env，因此这里与 workflow
 # 必须一一对应；任何一侧加了键而另一侧没加，下面的测试会失败。
@@ -117,6 +122,19 @@ def _command_lines(step_name: str) -> str:
     """
     run = _step(step_name)["run"]
     return "\n".join(line for line in run.splitlines() if not line.strip().startswith("#"))
+
+
+def _requirements_body_lines(path: Path) -> str:
+    """requirements 文件里**去掉注释行**后的内容。
+
+    与 _command_lines 同理：注释里可以提到包名（说明"为什么刻意不装 pywin32"），
+    那不算安装清单的一部分。
+    """
+    return "\n".join(
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if not line.strip().startswith("#")
+    )
 
 
 def _header_comment() -> str:
@@ -380,6 +398,21 @@ _WINDOWS_ONLY_PACKAGES = (
     "sherpa-onnx",
 )
 
+# 跨平台闭包里**必须**出现的包 —— 即运行 backend 契约层所需的最小 import 闭包。
+_REQUIRED_CROSS_PLATFORM_PACKAGES = (
+    "pytest==",
+    "fastapi==",
+    "httpx==",
+    "numpy==",
+    "pillow==",
+    "psutil==",
+    "pydantic-settings==",
+    "PyYAML==",
+    "cryptography==",
+    "PyJWT==",
+    "jsonschema==",
+)
+
 
 def test_pre_deploy_gate_runs_before_the_build() -> None:
     """测试门禁必须排在 build 之前：建好镜像再测就没意义了。"""
@@ -448,6 +481,10 @@ def test_test_dependencies_are_linux_installable_and_precede_the_gate() -> None:
     openapi-* / cryptography / PyJWT / uvicorn / websockets / pytest(-asyncio)。
     而仓库 requirements.txt 里的 windows-capture / pywin32 / sounddevice / silero-vad /
     sherpa-onnx 在 ubuntu runner 上装不上——混进来门禁会直接红在安装步骤上。
+
+    2026-09-19 重构：清单有了唯一真源 `ci/test-requirements.txt`，workflow 只引用它。
+    于是"清单内容"这类断言改为**读那个文件**。断言强度不变（逐项要求必需包、逐项
+    禁止 Windows-only 包），但不再存在两份会各自漂移的清单。
     """
     order = _step_order()
     assert _TEST_DEPS in order
@@ -455,22 +492,47 @@ def test_test_dependencies_are_linux_installable_and_precede_the_gate() -> None:
 
     commands = _command_lines(_TEST_DEPS)
     assert "python -m pip install" in commands
-    for required in (
-        "pytest==",
-        "fastapi==",
-        "httpx==",
-        "numpy==",
-        "pillow==",
-        "psutil==",
-        "pydantic-settings==",
-        "PyYAML==",
-        "cryptography==",
-        "PyJWT==",
-        "jsonschema==",
-    ):
-        assert required in commands, f"缺少运行契约套件所必需的依赖: {required}"
+    # 依赖版本只允许写在唯一真源文件里；workflow 里**不得内联**任何 name==version。
+    # 这一条比"包含 -r 某个文件"更强：它同时堵住"既引用了文件、又偷偷附加内联包"。
+    install_lines = [line for line in commands.splitlines() if "pip install" in line]
+    assert install_lines, f"{_TEST_DEPS} 里找不到 pip 安装行"
+    install_commands = " ".join(install_lines)
+    assert "-r ci/test-requirements.txt" in install_commands, "安装步骤必须引用唯一真源清单，不得内联清单"
+    assert "==" not in install_commands, (
+        "依赖版本只允许写在 ci/test-requirements.txt，不得内联到 workflow"
+    )
+
+    assert CI_REQUIREMENTS.is_file(), f"依赖清单不存在: {CI_REQUIREMENTS}"
+    declared = _requirements_body_lines(CI_REQUIREMENTS)
+    for required in _REQUIRED_CROSS_PLATFORM_PACKAGES:
+        assert required in declared, f"跨平台闭包缺少运行契约套件所必需的依赖: {required}"
     for forbidden in _WINDOWS_ONLY_PACKAGES:
-        assert forbidden not in commands, f"{forbidden} 在 ubuntu runner 上装不上，不得进安装清单"
+        assert forbidden not in declared, (
+            f"{forbidden} 在 ubuntu runner 上装不上，不得进跨平台闭包：{CI_REQUIREMENTS}"
+        )
+
+
+def test_windows_dependency_closure_keeps_the_two_windows_only_guards_alive() -> None:
+    """Windows 腿的补充闭包必须真的装上 pywin32 与 edge-tts。
+
+    为什么专门钉这一条（2026-09-19）：`backend/tests/unit` 里 test_tts_edge.py 依赖
+    edge-tts、test_transcript_storage.py 的 DPAPI 往返依赖 pywin32。缺任一个都会让
+    unit 套件红 —— 而"让 CI 变绿"最省事的错法是给这两组测试加 importorskip/skipif，
+    那是**把守卫拆掉**而不是让守卫通过。此处把"必须真装"钉成契约，堵住这条路。
+
+    断言口径：**必须逐行是 name==version 的钉版形式**，再按包名集合比对。
+    刻意不用 `"pywin32" in body` 这类子串判断 —— 我第一次就是这么写的，变异检验
+    立刻证明它是假绿：把 `pywin32==312` 改成 `pywin32-REMOVED` 仍含子串 `pywin32`，
+    测试照样通过。子串不是钉版。
+    """
+    body = _requirements_body_lines(CI_REQUIREMENTS_WINDOWS)
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    assert lines, f"Windows 闭包不得为空: {CI_REQUIREMENTS_WINDOWS}"
+    for line in lines:
+        assert "==" in line, f"依赖必须钉住版本（name==version）: {line!r}"
+    pinned = {line.split("==", 1)[0].strip().lower() for line in lines}
+    assert "pywin32" in pinned, "Windows 闭包必须钉住 pywin32（DPAPI 往返测试需要）"
+    assert "edge-tts" in pinned, "Windows 闭包必须钉住 edge-tts（tts_edge 契约测试需要）"
 
 
 def test_sidecar_gate_excludes_only_electron_dependent_files() -> None:

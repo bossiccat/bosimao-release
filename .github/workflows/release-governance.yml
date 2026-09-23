@@ -121,12 +121,56 @@ jobs:
       - name: Run release governance regression tests
         run: python -m pytest scripts/test_release_governance -q
 
+  # ── 契约层门禁（每次 PR 都跑）──────────────────────────────────────────────
+  # 存在的理由（2026-09-19 审计发现）：`backend/tests/contract`（59 文件 / 587 用例）
+  # 此前**只**被 deploy-cloudrun.yml 引用，而那个 workflow 的触发器只有
+  # `workflow_dispatch`（还需人工填 confirm=deploy）与 tag push
+  # （voice-api-v* / voice-bridge-v*），**没有 pull_request**。
+  # 于是"守护控制面的核心契约层"在整条 PR 流程里是隐形的：回归拦不住，只能靠人
+  # 手动发一次部署才知道。这是「守卫存在、但没有任何自动入口会执行它」的典型形态
+  # —— 不跑的守卫等于不存在。
+  #
+  # 为什么落在这个 workflow：它本来就有 `pull_request:`（且无任何 paths 过滤），
+  # 本身就是发布治理管线；再把它接进 `release.needs`，契约红 ⇒ 任何 tag 发布出不去。
+  #
+  # 口径与平台分工（**刻意不在 ubuntu 上跑 backend/tests/unit**）：
+  #   · contract    —— 控制面 / 桥 / 桌面端的契约层，本次要救回 PR 流程的主体；
+  #   · integration —— 97 用例，实测在下面的依赖闭包下全绿；
+  #   · unit        —— 789 用例，其中 test_tts_edge.py 依赖 edge-tts、
+  #                    test_transcript_storage.py 依赖 pywin32（Linux 无 wheel），
+  #                    因此只在 windows-popup-gate 腿跑，本 job 不碰。
+  contract-gate:
+    name: contract-gate
+    runs-on: ubuntu-latest
+    # 与 windows-popup-gate 同口径：给个上界，免得某条测试静默挂住时一直烧到
+    # GitHub 默认的 6 小时，而且没有输出能告诉你卡在哪。
+    # 20 分钟是"本机跑这批测试的实测值 × 宽裕倍数"的量级；若真超时，那本身就是要
+    # 处理的问题（超时是明确信号），而不是把上界调大掩盖掉。
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      # 与 deploy-cloudrun.yml 引用同一份清单（ci/test-requirements.txt 是唯一真源），
+      # 避免出现第二份会漂移的闭包。
+      - name: Install CI test dependency closure
+        run: python -m pip install --disable-pip-version-check -r ci/test-requirements.txt
+      - name: Contract and integration gates
+        run: |
+          set -euo pipefail
+          # 这两层是守护控制面的核心。任一失败即红，不加 if / continue-on-error，
+          # 确保不存在「测试没跑却照样往下走」的路径。
+          python -m pytest backend/tests/contract backend/tests/integration -q
+
   release:
     name: release
     if: >-
       github.event_name == 'push' && github.ref_type == 'tag' &&
       startsWith(github.ref_name, 'v')
-    needs: [build-candidate, verify, test]
+    needs: [build-candidate, verify, test, contract-gate]
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -357,6 +401,27 @@ jobs:
         working-directory: sidecar
         shell: bash
         run: node --test test/*.test.js
+
+      # ── 2026-09-19 审计补回：两条"从未被任何 workflow 执行"的守卫 ────────────
+      # 1) scripts/test/（17 个测试文件 / 177 用例）此前没有任何 workflow 执行它。
+      #    它是纯 node:test，只依赖 node 内建与仓内相对路径，**不需要 npm install**。
+      #    刻意放在 Windows 腿：其中 12 个用例带 process.platform 的 win32 反向门，
+      #    在 ubuntu 上会静默跳过 —— 放 ubuntu 只能拿到一个"更薄的绿"。
+      # 2) backend/tests/unit（84 文件 / 789 用例）同样无人执行。
+      #    它需要 pywin32 与 edge-tts（见 ci/test-requirements-windows.txt），
+      #    而 pywin32 在 Linux 上装不上，因此也只能在 Windows 腿跑。
+      - name: Install Windows test dependency closure
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r ci/test-requirements.txt
+          -r ci/test-requirements-windows.txt
+
+      - name: unit 套件（Python；Windows-only 依赖所在）
+        run: python -m pytest backend/tests/unit -q
+
+      - name: scripts 单测（node:test 全量；ubuntu 上会静默跳过的那些在此真跑）
+        shell: bash
+        run: node --test scripts/test/*.test.js scripts/test/*.test.mjs
 
       # "有现场"：即使上面某步红了，npm 日志也必须留下来
       - name: 上传诊断现场（npm 日志）

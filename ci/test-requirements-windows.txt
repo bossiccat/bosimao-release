@@ -1,0 +1,25 @@
+# Windows 腿专用补充依赖（在 ci/test-requirements.txt 之上再加这两个）
+# =============================================================================
+# 为什么这两个必须真装、而不能用 pytest.importorskip 放行：
+#   · backend/tests/unit/test_tts_edge.py 用 monkeypatch.setattr("edge_tts.Communicate", ...)
+#     强制导入 edge-tts —— 而 backend/app/voice/tts_edge.py 是**活代码**
+#     （被 backend/app/api/routes_voice.py 与 backend/app/voice/half_duplex.py 引用），
+#     所以这组测试守的是在产功能，不是死代码；
+#   · backend/tests/unit/test_transcript_storage.py 的
+#     test_windows_dpapi_cipher_roundtrip 需要 pywin32 的 win32crypt
+#     （Windows DPAPI），Linux 上没有 wheel。
+#
+# 实测口径（2026-09-19，本机 venv）：
+#   只装 ci/test-requirements.txt           → backend/tests/unit = 783 passed / 2 failed / 4 errors
+#   补上本文件这两个包                       → backend/tests/unit = 789 passed / 0 failed / 0 errors
+#   干净 CI 模拟（屏蔽闭包外的全部已装发行版）给出同样结论，见
+#   ci/test-requirements.txt 的说明。
+#
+# ⚠️ 不要为了"让 CI 变绿"把这两组测试改成 importorskip / skipif：
+#    静默跳过是**把守卫拆掉**，不是让守卫通过。要跳就显式说明并有人接手。
+#
+# 用法（必须从仓库根目录调用，两个 -r 并列传入）：
+#   python -m pip install -r ci/test-requirements.txt -r ci/test-requirements-windows.txt
+# =============================================================================
+pywin32==312
+edge-tts==7.2.8

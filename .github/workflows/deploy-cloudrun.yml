@@ -244,16 +244,15 @@ jobs:
       - name: Install pre-deploy test dependencies
         run: |
           set -euo pipefail
-          # 干净检出上的**最小依赖闭包**（实测：只有这些也能让 backend/tests/contract 全绿）。
-          # 刻意不用 requirements.txt：其中 windows-capture / pywin32 / sounddevice /
-          # silero-vad / sherpa-onnx 是 Windows 或原生专属，ubuntu runner 根本装不上。
-          # 版本与仓库 requirements.txt 保持一致，避免两套锁。
-          python -m pip install --disable-pip-version-check \
-            pytest==9.1.1 pytest-asyncio==1.4.0 PyYAML==6.0.3 \
-            fastapi==0.141.1 httpx==0.28.1 pydantic==2.13.4 pydantic-settings==2.14.2 \
-            numpy==2.4.6 pillow==12.3.0 psutil==7.2.2 \
-            cryptography==50.0.0 PyJWT==2.10.1 uvicorn==0.52.1 websockets==17.0.1 \
-            jsonschema==4.26.0 openapi-schema-validator==0.9.0 openapi-spec-validator==0.9.0
+          # 依赖清单的**唯一真源**自 2026-09-19 起是 ci/test-requirements.txt。
+          # 为什么单独一个文件、而不是根目录 requirements.txt：后者里的
+          # windows-capture / pywin32 / sounddevice / silero-vad / sherpa-onnx 是
+          # Windows 或原生专属，ubuntu runner 根本装不上。
+          # 同一份清单也被 release-governance.yml 的契约层门禁用来在每次 PR 上跑
+          # 契约层 —— 两处引用同一文件，由
+          # backend/tests/contract/test_deploy_pipeline_contract.py 的断言钉住，
+          # 不许各自演化出第二份清单。
+          python -m pip install --disable-pip-version-check -r ci/test-requirements.txt
 
       - name: Pre-deploy gate - backend contract tests
         run: |
