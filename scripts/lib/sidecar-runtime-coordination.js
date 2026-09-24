@@ -75,6 +75,17 @@ function readOwner(lockFile) {
   return parsed;
 }
 
+// 探针预算：Get-CimInstance 是冷启动很慢的 WMI 查询（本机**空闲态**实测 82–156ms，
+// 但 runner 上冷 WMI + 刚跑完 cargo 的负载可轻松超过数秒）。
+// 2026-09-24 实测事故：原值 5s 一旦被打满，spawnSync 返回 error(ETIMEDOUT)，
+// 探针退化成 {status:'unknown'}，调用方 fail-closed 报
+// SIDECAR_RUNTIME_COORDINATION_PROBE_UNAVAILABLE —— 行为是安全的（拒绝迁移、不建备份），
+// 但**合法迁移会被挡掉**。CI 上该分支在同一 commit 连续复现，且把上一个 commit 重跑
+// 同样复现 ⇒ 属工具健壮性缺陷，与业务改动无关。
+// 放宽预算 + 超时重试一次，语义不变（仍以创建时刻做身份，PID 复用防护照旧）。
+const PROBE_TIMEOUT_MS = 20000;
+const PROBE_ATTEMPTS = 2;
+
 function inspectProcessWindows(pid, options = {}) {
   if (!Number.isInteger(pid) || pid <= 0) return { status: 'unknown' };
   const script = `$p = Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId = ${pid}';`
@@ -85,13 +96,25 @@ function inspectProcessWindows(pid, options = {}) {
     || ((command, args) => {
       // eslint-disable-next-line global-require
       const { spawnSync } = require('node:child_process');
-      return spawnSync(command, args, { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+      return spawnSync(command, args, {
+        encoding: 'utf8', windowsHide: true, timeout: PROBE_TIMEOUT_MS,
+      });
     });
-  let result;
-  try {
-    result = runner('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
-  } catch {
-    return { status: 'unknown' };
+  // 重试包在**runner 调用**这一层（而不是 runner 内部）：这样注入 runPowerShell 的
+  // 用例也能驱动重试，超时语义可被真正测到。
+  const attempts = Number.isInteger(options.probeAttempts) && options.probeAttempts > 0
+    ? options.probeAttempts : PROBE_ATTEMPTS;
+  let result = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      result = runner('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
+    } catch {
+      result = null;
+    }
+    const retryable = result === null
+      || Boolean(result.error && (result.error.code === 'ETIMEDOUT'
+        || result.error.code === 'EAGAIN' || result.signal));
+    if (!retryable) break;
   }
   if (!result || result.error || result.status !== 0 || typeof result.stdout !== 'string') {
     return { status: 'unknown' };

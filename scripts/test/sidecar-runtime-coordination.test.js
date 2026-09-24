@@ -293,3 +293,54 @@ test('a missing runtime parent yields a stable diagnostic instead of raw ENOENT'
     (error) => error.code === 'SIDECAR_RUNTIME_COORDINATION_RUNTIME_PARENT_MISSING',
   );
 });
+
+
+test('a probe that times out once is retried instead of reported unavailable', () => {
+  // 2026-09-24：CI 上 Get-CimInstance 冷启动打满原 5s 预算 ⇒ spawnSync 返回 ETIMEDOUT
+  // ⇒ 探针退化成 {status:'unknown'} ⇒ 合法迁移被 PROBE_UNAVAILABLE 挡掉。
+  // 这里用"第一次超时、第二次成功"的注入 runner 钉住重试行为。
+  const { runtimeDir: target } = tempIdentity();
+  acquireRuntimeLease(target, { inspectProcess: liveProcess() });
+  const owner = JSON.parse(fs.readFileSync(coordinationLockPath(target), 'utf8'));
+
+  let calls = 0;
+  const flaky = () => {
+    calls += 1;
+    if (calls === 1) {
+      const error = new Error('spawnSync powershell.exe ETIMEDOUT');
+      error.code = 'ETIMEDOUT';
+      return { error, status: null, stdout: '', signal: 'SIGTERM' };
+    }
+    return {
+      status: 0,
+      signal: null,
+      stdout: JSON.stringify({
+        status: 'alive', pid: owner.pid, creationTime: owner.process_creation_time,
+      }),
+    };
+  };
+
+  assert.throws(
+    () => acquireRuntimeLease(target, { runPowerShell: flaky }),
+    (error) => error.code === 'SIDECAR_RUNTIME_COORDINATION_BUSY',
+  );
+  assert.equal(calls, 2, '第一次超时后必须重试一次，而不是直接判 PROBE_UNAVAILABLE');
+});
+
+test('a probe that times out every time still fails closed as unavailable', () => {
+  // 阴性对照：重试不得把"探针真的跑不成"变成"锁可用"。
+  const { runtimeDir: target } = tempIdentity();
+  acquireRuntimeLease(target, { inspectProcess: liveProcess() });
+  let calls = 0;
+  const alwaysTimeout = () => {
+    calls += 1;
+    const error = new Error('spawnSync powershell.exe ETIMEDOUT');
+    error.code = 'ETIMEDOUT';
+    return { error, status: null, stdout: '', signal: 'SIGTERM' };
+  };
+  assert.throws(
+    () => acquireRuntimeLease(target, { runPowerShell: alwaysTimeout }),
+    (error) => error.code === 'SIDECAR_RUNTIME_COORDINATION_PROBE_UNAVAILABLE',
+  );
+  assert.equal(calls, 2, '重试次数应为 2，不得无限重试');
+});
