@@ -84,6 +84,28 @@ def test_windows_leg_runs_the_suites_no_other_workflow_executes():
     assert "-r ci/test-requirements-windows.txt" in workflow
 
 
+def test_windows_leg_runs_the_rust_integration_test_targets():
+    """`pet-ui/src-tauri/tests/` 的集成目标必须在 Windows 腿真跑。
+
+    这条断言存在的理由（2026-09-24 审计）：
+      CI 一直跑的是 `cargo test --lib` —— **`--lib` 只构建 lib 目标，不编译 `tests/`**。
+      于是 `pet-ui/src-tauri/tests/` 下 15 个集成测试目标（+ `support.rs` 共享助手）
+      虽然进了版本控制、也能编译，却**从未在任何自动触发上执行过**。
+      又一例"守卫存在但没有入口 = 守卫不存在"。
+    另外钉住两个必需细节，防止有人"简化"成跑不动的写法：
+      · 必须带 `--features credential-test-support`：o020_probe_contract.rs 用
+        `env!("CARGO_BIN_EXE_o020_credential_probe")`，该 bin 有 required-features，
+        不开 feature 连编译都过不去；
+      · 必须保留不带 feature 的 `cargo test --lib`（覆盖发布配置下的 lib 单测）。
+    """
+    workflow = _workflow()
+
+    assert "cargo test --release --tests --features credential-test-support" in workflow
+    assert "cargo test --lib" in workflow, (
+        "不带 feature 的 `cargo test --lib` 覆盖的是发布配置（feature 关）下的 lib 单测，不得被替换掉"
+    )
+
+
 def test_candidate_is_built_once_and_verified_by_sha_in_verify_and_release():
     workflow = _workflow()
 
