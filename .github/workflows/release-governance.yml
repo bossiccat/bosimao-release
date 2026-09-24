@@ -374,24 +374,6 @@ jobs:
         working-directory: pet-ui/src-tauri
         run: cargo test --lib
 
-      # 2026-09-24：`--lib` **不编译 `tests/` 目录**，于是 pet-ui/src-tauri/tests/ 下
-      # 15 个集成测试目标**从未在任何自动触发上执行过**（`cargo test --lib` 只构建 lib 目标）。
-      # 这是"守卫存在但没有入口"的又一例：文件在版本控制里、编译得过，却没人跑。
-      - name: cargo test --release --tests（lib 单测 + tests/ 集成目标）
-        working-directory: pet-ui/src-tauri
-        run: cargo test --release --tests --features credential-test-support
-      # 三个取舍说明（都不是随手写的）：
-      #  · `--tests` 而不是 `--lib`：前者=lib 单测 + tests/ 下每个集成目标。
-      #  · 必须带 `--features credential-test-support`：o020_probe_contract.rs 用
-      #    `env!("CARGO_BIN_EXE_o020_credential_probe")`，而该 bin 在 Cargo.toml 里声明了
-      #    required-features，不开 feature 连**编译**都过不去。
-      #  · 刻意用 `--release`：复用上一行 `cargo build --release` 已编好的 release 依赖树。
-      #    debug 依赖树要另编一份（本机实测十几分钟且中途卡死过），runner 上则是纯浪费。
-      #    —— 上面那条 `cargo test --lib`（debug、不带 feature）**原样保留**，因为它覆盖的是
-      #    发布配置（feature 关）下的 lib 单测；这条新的覆盖"开了 feature 的完整目标集"。
-      #  · 不会污染下一行的 PE 门禁：测试二进制落在 target/release/deps/，而该门禁带
-      #    --exclude-cargo-artifacts，会剪掉扫描根的直接子级 deps/（见 pe-subsystem-verify.py:130）。
-
       # ── PE 子系统扫描（**硬门禁**，2026-09-21 由 report-only 提升）────────
       # 为什么现在可以判红：干净 runner 的基线已经实测为真绿 —— run 35589971758
       # 在从零构建的 target/release 上读到 `PE_SUBSYSTEM_SCANNED=6 / NON_GUI=0`。
@@ -411,6 +393,33 @@ jobs:
           python scripts/pe-subsystem-verify.py
           --dir pet-ui/src-tauri/target/release
           --recursive --exclude-cargo-artifacts --expect-gui
+
+      # ── 集成测试目标（2026-09-24 补入；**必须排在 PE 门禁之后**）──────────────
+      # 为什么以前没跑过：`cargo test --lib` **只构建 lib 目标、不编译 `tests/`**，
+      # 于是 pet-ui/src-tauri/tests/ 下 15 个集成测试目标从未在任何自动触发上执行过 ——
+      # 又一例「守卫存在但没有入口 = 守卫不存在」。
+      #
+      # ⚠️ 顺序是硬约束，别把它挪到 PE 门禁前面 —— 首跑实测（run 35959817978）就是这么红的：
+      #   带 `--features credential-test-support` 跑测试时，cargo 会把三个 CUI 测试辅助 bin
+      #   直接落到 `target/release/` **根**下：
+      #     o018_transport_test_helper.exe / o020_credential_controller.exe / o020_credential_probe.exe
+      #   而 PE 门禁把 `target/release` 整棵树当作**随包集合**，--exclude-cargo-artifacts 只剪
+      #   `build/ deps/ examples/ ...` 这些**直接子目录**（pe-subsystem-verify.py:130, :200），
+      #   落在根上的 bin 剪不掉 ⇒ PE_SUBSYSTEM_SCANNED 6→9、NON_GUI 0→3 ⇒ 门禁判红。
+      #   门禁的语义是「`cargo build --release` 留下的那棵树」，所以必须先让它观察完，
+      #   再跑会往同一棵树里写东西的测试。
+      #
+      # 三个取舍：
+      #  · `--tests` 而非 `--lib`：前者 = lib 单测 + tests/ 下每个集成目标。
+      #  · 必须带 `--features credential-test-support`：o020_probe_contract.rs 用
+      #    `env!("CARGO_BIN_EXE_o020_credential_probe")`，该 bin 声明了 required-features，
+      #    不开 feature 连**编译**都过不去。
+      #  · 用 `--release` 复用 `cargo build --release` 已编好的 release 依赖树；
+      #    上面那条 `cargo test --lib`（debug、不带 feature）**原样保留**，它覆盖的是
+      #    发布配置（feature 关）下的 lib 单测。
+      - name: cargo test --release --tests（lib 单测 + tests/ 集成目标）
+        working-directory: pet-ui/src-tauri
+        run: cargo test --release --tests --features credential-test-support
 
       # shell 用 bash 是为了让 `test/*.test.js` 由 shell 展开 —— 与现有
       # deploy-cloudrun.yml 的 `cd sidecar && node --test test/*.test.js` 同口径。

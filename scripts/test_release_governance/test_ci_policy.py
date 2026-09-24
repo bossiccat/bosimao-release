@@ -105,6 +105,23 @@ def test_windows_leg_runs_the_rust_integration_test_targets():
         "不带 feature 的 `cargo test --lib` 覆盖的是发布配置（feature 关）下的 lib 单测，不得被替换掉"
     )
 
+    # ⚠️ 顺序硬约束：集成测试步骤必须排在 PE 门禁**之后**。
+    # 2026-09-24 首跑（run 35959817978）就是这么红的：带 `credential-test-support` 跑测试时
+    # cargo 会把 o018_transport_test_helper / o020_credential_controller / o020_credential_probe
+    # 三个 CUI bin 直接落到 `target/release/` **根**下；而 PE 门禁把该目录整棵树当随包集合，
+    # `--exclude-cargo-artifacts` 只剪 `build/ deps/ examples/` 等**直接子目录**
+    # （pe-subsystem-verify.py:130, :200），落在根上的 bin 剪不掉 ⇒
+    # PE_SUBSYSTEM_SCANNED 6→9、NON_GUI 0→3 ⇒ 门禁判红。
+    # 门禁语义是「`cargo build --release` 留下的那棵树」，所以必须先让它观察完再跑测试。
+    pe_gate = workflow.index("--recursive --exclude-cargo-artifacts --expect-gui")
+    integration_tests = workflow.index(
+        "cargo test --release --tests --features credential-test-support"
+    )
+    assert pe_gate < integration_tests, (
+        "集成测试步骤被挪到了 PE 门禁之前：它会往 target/release/ 根下写 CUI 测试辅助 bin，"
+        "污染随包集合的测量 ⇒ PE 门禁必红（见上方 run 35959817978 的实测）"
+    )
+
 
 def test_candidate_is_built_once_and_verified_by_sha_in_verify_and_release():
     workflow = _workflow()
