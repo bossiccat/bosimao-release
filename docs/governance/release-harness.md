@@ -65,6 +65,8 @@ PR 仍运行无密钥回归测试：`test` job 覆盖 release-governance 的静�
 每个 required P0 Claim 必须是 `Verified`，绑定当前 commit 和现场计算的 artifact SHA，并具有未过期、可校验、由独立 reviewer 复核的 evidence。当前项目的 Windows 与 Android Claim 仍为 `EvidencePending`；在取得真实 Windows 交互桌面、Android Emulator/真机、packaged sidecar 和连续双端语音证据前，官方发布必须保持 FAIL。
 
 静态测试、health endpoint、进程存活、sidecar smoke 和单独的 `/health` 不能升级为 Windows field 或 Android field evidence。
+**场景覆盖（2026-09-24 起为必填）**：每条 evidence 必须带 `scenario_coverage`，把该 claim `required_scenarios` 里的条目逐条映射为判定值，且**只有 `PASS` 才算覆盖**。`validate_verified_claim` 会逐条核对，任一场景缺失或非 PASS 即 `SCENARIO_COVERAGE_INCOMPLETE` 并点名具体场景。这条判据的由来是一次真实事故：`required_scenarios` 原是**纯人读字段**（模型从不读它），于是 `windows-popup-free` 的场景 6「正常退出后重启」可以用 `taskkill /F` 近似 —— 其证据报告自己写着「该路径本次未被执行，属未覆盖项，**不得据此声称已覆盖**」—— 而门禁照样会把该 claim 判成 `Verified`。即：**一条声明得比证据更强的 claim，机械上无法被发现。** 覆盖不了只有两条路，且都要在 diff 里可见、由独立 reviewer 复核：补测把场景真做掉，或修改 `required_scenarios` 把要求收窄到实际验证过的范围。刻意**不设**「部分覆盖/已接受的限定也算过」的档位 —— 那等于把近似合法化。
+
 
 ## Locked check 结果
 

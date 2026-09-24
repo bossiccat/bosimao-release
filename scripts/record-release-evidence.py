@@ -75,7 +75,24 @@ def main() -> int:
     ap.add_argument("--allow-reverify", action="store_true",
                     help="允许覆盖一条已 Verified 的声明（默认拒绝）")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--scenario-coverage", action="append", default=[], metavar="场景=判定",
+                    help="逐条声明该 claim `required_scenarios` 的覆盖判定，可重复"
+                         "（例：--scenario-coverage \"首次启动=PASS\"）。"
+                         "2026-09-24 起门禁只认 PASS：缺项或非 PASS 会以 "
+                         "SCENARIO_COVERAGE_INCOMPLETE 拒绝写盘。")
     args = ap.parse_args()
+
+    # --scenario-coverage 解析：`场景=判定`。这里**只做形状**判断，
+    # "覆盖是否完整"交给治理层校验器 —— 不在本工具里重写第二套规则（见下方 validate 调用）。
+    coverage = {}
+    for item in args.scenario_coverage:
+        name, sep, verdict = item.partition("=")
+        name, verdict = name.strip(), verdict.strip()
+        if not sep or not name or not verdict:
+            print(f"输入不可用：--scenario-coverage 需要 `场景=判定` 形式（收到 {item!r}）",
+                  file=sys.stderr)
+            return EXIT_UNUSABLE
+        coverage[name] = verdict
 
     try:
         policy = json.loads((ROOT / args.policy).read_text(encoding="utf-8"))
@@ -160,13 +177,17 @@ def main() -> int:
     target["artifact_commit"] = commit
     target["artifact_sha256"] = artifact_sha
     claim["target"] = target
-    claim["evidence"] = [{
+    entry = {
         "kind": args.kind,
         "collected_at": ts(collected_at),
         "expires_at": ts(collected_at + timedelta(hours=hours)),
         "path": args.evidence,
         "raw_sha256": _sha256_file(evidence),
-    }]
+    }
+    # 只有显式给了才写这一键：claim 未声明 required_scenarios 时写了也没有意义。
+    if coverage:
+        entry["scenario_coverage"] = coverage
+    claim["evidence"] = [entry]
     # attempts 已有就保留（电路判据依赖历史）；只有缺省时才补空列表。
     claim.setdefault("attempts", [])
 
@@ -175,6 +196,17 @@ def main() -> int:
         validate_verified_claim(claim, policy, now, commit, artifact_sha)
     except ValidationError as exc:
         print(f"拒绝：构造出的声明未通过治理层校验 {exc.code}: {exc.message}", file=sys.stderr)
+        if exc.code == "SCENARIO_COVERAGE_INCOMPLETE":
+            # 这条错误只有两条出路，且都必须留下可见痕迹 —— 不要用"先写进去再补"绕过：
+            # 门禁的存在意义就是不让"声明得比证据强"的 claim 落地。
+            print(
+                "提示：该 claim 声明了 required_scenarios，需用 --scenario-coverage \"<场景>=PASS\"\n"
+                "      逐条声明覆盖（可重复）。两条合法出路：\n"
+                "        ① 补测，把该场景真做掉；\n"
+                "        ② 修改该 claim 的 required_scenarios，把要求收窄到实际验证过的范围\n"
+                "           （改动会落在 diff 里，由独立复核人看）。",
+                file=sys.stderr,
+            )
         return EXIT_REFUSED
     hash_errors = _validate_evidence_hashes(claim)
     if hash_errors:
@@ -188,6 +220,10 @@ def main() -> int:
     print(f"采集    : {claim['evidence'][0]['collected_at']}")
     print(f"有效期  : {claim['evidence'][0]['expires_at']}（= 采集时刻 + policy {hours}h）")
     print(f"复核    : owner={args.owner} reviewer={args.reviewer}")
+    if coverage:
+        passed = sum(1 for verdict in coverage.values() if verdict == "PASS")
+        print(f"覆盖    : 声明 {len(coverage)} 条，其中 PASS {passed} 条"
+              "（门禁要求 required_scenarios 逐条 PASS）")
     if args.dry_run:
         print("\n--dry-run：未写盘。")
         return EXIT_OK

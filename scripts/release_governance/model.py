@@ -223,6 +223,55 @@ def validate_verified_claim(
                 "evidence[%d] expired at %s" % (idx, ev.get("expires_at")),
             )
 
+    # ── 场景覆盖：声明的 required_scenarios 必须**逐条**被证据覆盖为 PASS ──────────
+    # 为什么需要这一条（2026-09-24 实测事故，不是预防性设计）：
+    #   `required_scenarios` 此前是**纯人读字段** —— 本模块从头到尾没有读过它。
+    #   于是 windows-popup-free 的现场证据报告可以自述
+    #   「6/6 PASS 是真的，但它不是『6 条 required_scenario 全部字面满足』」：
+    #   其中场景 6「正常退出后重启」是用 `taskkill /F` **近似**的，证据报告自己写着
+    #   「该路径（tray 优雅退出）本次未被执行，属未覆盖项，**不得据此声称已覆盖**」——
+    #   而门禁照样会把这条 claim 判成 Verified。
+    #   即：**一条声明得比证据更强的 claim，机械上无法被发现。**（与人读字段其它
+    #   同类问题同族：C-4 的四个人读字段。）
+    #
+    # 口径：**只有显式 PASS 才算覆盖**；同一场景若在任一条证据里被声明为非 PASS，
+    #   即视为未覆盖（严格取交集方向，不取"有一条 PASS 就算过"）。
+    #   覆盖不了只有两条路，且两条都是**可见动作**：
+    #     ① 补测，把该场景真做掉；
+    #     ② 改 claim.required_scenarios，把要求收窄到实际验证过的范围
+    #        —— 改动会落在 diff 里，由独立 reviewer 复核。
+    # 刻意**不提供** "ACCEPTED_LIMITATION / PARTIAL 也算过" 的档位：那等于把"近似"
+    #   合法化。本次用户明确选择的是「不接受带限定披露后归档」，故不设该后门。
+    required_scenarios = claim.get("required_scenarios") or []
+    if required_scenarios:
+        declared: dict = {}
+        for idx, ev in enumerate(evidence):
+            coverage = ev.get("scenario_coverage")
+            if coverage is None:
+                # 不声明覆盖 = 这条证据不主张覆盖任何场景。若最终无人覆盖，下面会报。
+                continue
+            if not isinstance(coverage, dict):
+                raise ValidationError(
+                    "BAD_SCENARIO_COVERAGE",
+                    "evidence[%d].scenario_coverage must be an object mapping scenario -> verdict (got %r)"
+                    % (idx, coverage),
+                )
+            for scenario, verdict in coverage.items():
+                declared.setdefault(scenario, []).append(verdict)
+        incomplete = []
+        for scenario in required_scenarios:
+            verdicts = declared.get(scenario)
+            if not verdicts:
+                incomplete.append("%s=NOT_DECLARED" % (scenario,))
+            elif any(v != "PASS" for v in verdicts):
+                incomplete.append("%s=%s" % (scenario, "/".join(str(v) for v in verdicts)))
+        if incomplete:
+            raise ValidationError(
+                "SCENARIO_COVERAGE_INCOMPLETE",
+                "claim %s declares %d required scenario(s) without PASS evidence: %s"
+                % (claim.get("claim_id"), len(incomplete), ", ".join(incomplete)),
+            )
+
 
 def validate_cancelled_claim(claim):
     if claim.get("state") == "Cancelled":

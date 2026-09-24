@@ -384,3 +384,89 @@ def test_each_declared_kind_is_accepted(kind):
     claim = _verified_claim()
     _evidence(claim)["kind"] = kind
     _validate(claim)
+
+
+# ── 场景覆盖（2026-09-24 实测事故的永久守卫）────────────────────────────────
+# `required_scenarios` 此前是**纯人读字段**，模型从不读它。于是 windows-popup-free
+# 的场景 6「正常退出后重启」可以用 `taskkill /F` 近似、证据报告自己写着
+# 「不得据此声称已覆盖」，而门禁照样把这条 claim 判成 Verified ——
+# 即"声明得比证据更强"在机械上无法被发现。以下用例钉住新判据。
+
+
+def _claim_with_scenarios(scenarios, coverage_per_entry):
+    """构造声明了 required_scenarios 的 Verified claim；每条证据带一份 scenario_coverage。"""
+    evidence = []
+    for coverage in coverage_per_entry:
+        entry = {
+            "kind": "windows-field",
+            "collected_at": "2026-08-15T00:00:00Z",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "raw_sha256": "sha256:evidence",
+        }
+        if coverage is not None:
+            entry["scenario_coverage"] = coverage
+        evidence.append(entry)
+    return _verified_claim(required_scenarios=list(scenarios), evidence=evidence)
+
+
+def test_all_declared_scenarios_pass_is_accepted():
+    """阴性对照：逐条 PASS 时判据必须安静 —— 否则它就是"对什么都红"。"""
+    claim = _claim_with_scenarios(
+        ["首次启动", "正常退出后重启"],
+        [{"首次启动": "PASS", "正常退出后重启": "PASS"}],
+    )
+    _validate(claim)
+
+
+def test_declared_scenario_absent_from_coverage_is_rejected():
+    """场景没被任何证据声明覆盖 ⇒ 判红，且错误信息点名是哪个场景。"""
+    claim = _claim_with_scenarios(["首次启动", "正常退出后重启"], [{"首次启动": "PASS"}])
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "SCENARIO_COVERAGE_INCOMPLETE"
+    assert "正常退出后重启=NOT_DECLARED" in str(exc.value)
+
+
+def test_declared_scenario_with_non_pass_verdict_is_rejected():
+    """**本次事故的形状**：场景被声明为未覆盖，就不得算过。"""
+    claim = _claim_with_scenarios(["正常退出后重启"], [{"正常退出后重启": "NOT_COVERED"}])
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "SCENARIO_COVERAGE_INCOMPLETE"
+    assert "正常退出后重启=NOT_COVERED" in str(exc.value)
+
+
+def test_contradictory_verdicts_count_as_not_covered():
+    """同一场景一条证据说 PASS、另一条说未覆盖 ⇒ 从严判未覆盖（不取"有一条 PASS 就算过"）。"""
+    claim = _claim_with_scenarios(["首次启动"], [{"首次启动": "PASS"}, {"首次启动": "NOT_COVERED"}])
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "SCENARIO_COVERAGE_INCOMPLETE"
+
+
+def test_coverage_can_be_split_across_evidence_entries():
+    """覆盖允许分散在多条证据里 —— 判据是"并集是否逐条 PASS"。"""
+    claim = _claim_with_scenarios(["A", "B"], [{"A": "PASS"}, {"B": "PASS"}])
+    _validate(claim)
+
+
+def test_evidence_without_coverage_key_does_not_claim_coverage():
+    """证据不写 scenario_coverage ⇒ 不主张覆盖任何场景，仍须逐条有 PASS。"""
+    claim = _claim_with_scenarios(["A"], [None])
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "SCENARIO_COVERAGE_INCOMPLETE"
+    assert "A=NOT_DECLARED" in str(exc.value)
+
+
+def test_bad_scenario_coverage_shape_is_rejected_fail_closed():
+    """形状不对（不是对象）要报 BAD_SCENARIO_COVERAGE，而不是崩成 TypeError。"""
+    claim = _claim_with_scenarios(["A"], [[]])
+    with pytest.raises(ValidationError) as exc:
+        _validate(claim)
+    assert exc.value.code == "BAD_SCENARIO_COVERAGE"
+
+
+def test_claim_without_required_scenarios_is_unaffected():
+    """未声明 required_scenarios 的 claim 不受这条判据影响（向后兼容）。"""
+    _validate(_verified_claim())

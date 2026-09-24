@@ -59,13 +59,15 @@ ALLOWED_UNCONSUMED = {
     #   command_lock.schema_version  -> release-preflight.py:_load_command_lock 判 UNSUPPORTED_COMMAND_LOCK_SCHEMA
     # 本文件的那条"冻结项不得变成永久豁免"断言当时**红着提醒了**，并给出读取点行号 ——
     # 这正是它存在的意义：修好之后必须回来把豁免删掉，而不是让它悄悄留成永久豁免。
+    # 2026-09-24 再移除一项：claim.required_scenarios —— model.validate_verified_claim 现在逐条校验
+    #   "声明的场景必须被证据覆盖为 PASS"（SCENARIO_COVERAGE_INCOMPLETE）。
+    #   起因是 windows-popup-free 的场景 6「正常退出后重启」用 taskkill /F 近似、
+    #   证据报告自述「不得据此声称已覆盖」，而当时门禁照样判 Verified ——
+    #   即「一条声明得比证据更强的 claim，机械上无法被发现」。本条豁免因此失效，
+    #   按本表约定删掉。
     "claim.risk": (
         "人读的语义元数据（'这条声明在断言什么'）。写入侧只做整字典合并保留"
         "（scripts/record-release-evidence.py:153-159），没有任何校验器读取或断言它。"
-    ),
-    "claim.required_scenarios": (
-        "人读的场景清单（'必须演示哪些场景'）。同 claim.risk，只被写入侧合并保留，"
-        "无校验器读取 —— 门禁不会因为场景没被演示而拦。"
     ),
     "claim.legacy_tasks": (
         "溯源元数据（旧任务名）。同 claim.risk，只被写入侧合并保留，无校验器读取。"

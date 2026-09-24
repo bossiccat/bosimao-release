@@ -158,7 +158,16 @@ def test_records_merge_and_preserve_claim_governance_metadata(tmp_path: Path) ->
     (claims / "android-duplex-audio.json").write_text(
         json.dumps(prior, ensure_ascii=False), encoding="utf-8")
 
-    proc = _run(*_base(policy, claims, evidence, artifact))
+    # 2026-09-24：该 claim 声明了 3 条 required_scenarios，而门禁现在要求逐条声明覆盖为
+    # PASS（SCENARIO_COVERAGE_INCOMPLETE）。本用例关心的是"合并保留"，故这里补齐覆盖，
+    # 以便真正走到合并逻辑；覆盖判据本身由 test_records_refuse_when_declared_scenarios_
+    # are_not_covered 钉住。
+    proc = _run(
+        *_base(policy, claims, evidence, artifact),
+        "--scenario-coverage", "首次启动=PASS",
+        "--scenario-coverage", "App 重启=PASS",
+        "--scenario-coverage", "relay 故障恢复=PASS",
+    )
     assert proc.returncode == 0, proc.stderr
 
     written = json.loads((claims / "android-duplex-audio.json").read_text(encoding="utf-8"))
@@ -181,3 +190,82 @@ def test_records_merge_and_preserve_claim_governance_metadata(tmp_path: Path) ->
     assert len(written["evidence"]) == 1
     assert written["evidence"][0]["raw_sha256"] == (
         "sha256:" + hashlib.sha256(evidence.read_bytes()).hexdigest())
+
+
+# ── 场景覆盖（2026-09-24）────────────────────────────────────────────────────
+# 起因：`required_scenarios` 原是纯人读字段，门禁从不读它 —— 于是
+# windows-popup-free 的场景 6「正常退出后重启」可以用 taskkill /F 近似、
+# 证据报告自己写着「不得据此声称已覆盖」，而 claim 照样能变成 Verified。
+# 现在门禁要求逐条 PASS，记录器必须能声明覆盖；以下用例把这条链路钉住。
+
+
+def _prior_claim_with_scenarios(claims: Path, scenarios) -> None:
+    (claims / "android-duplex-audio.json").write_text(
+        json.dumps({
+            "claim_id": "android-duplex-audio",
+            "state": "EvidencePending",
+            "owner": "impl-team",
+            "reviewer": "independent-qa",
+            "risk": "客户现场出现回声/双讲撕裂",
+            "target": {"artifact_commit": "", "artifact_sha256": "",
+                       "artifact": "packaged app.apk -> AudioEngine -> CapturePath"},
+            "required_scenarios": list(scenarios),
+            "legacy_tasks": ["Jax-Audio-1"],
+            "evidence": [],
+            "superseded_by": None,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def test_refuses_when_declared_scenarios_have_no_coverage(tmp_path: Path) -> None:
+    """声明了 required_scenarios 却不声明覆盖 ⇒ 必须拒绝写盘，且点名每个场景。
+
+    这正是事故形状：门禁若不拦，"声明得比证据更强"的 claim 会静默落地。
+    """
+    policy, claims, evidence, artifact = _fixture(tmp_path)
+    _prior_claim_with_scenarios(claims, ["首次启动", "正常退出后重启"])
+    proc = _run(*_base(policy, claims, evidence, artifact))
+    assert proc.returncode == 1, "缺覆盖声明必须拒绝"
+    assert "SCENARIO_COVERAGE_INCOMPLETE" in proc.stderr
+    assert "正常退出后重启" in proc.stderr, "错误信息必须点名缺哪个场景"
+    assert not (claims / "android-duplex-audio.json").read_text(
+        encoding="utf-8").count('"Verified"'), "拒绝时不得把 state 写成 Verified"
+
+
+def test_refuses_partial_coverage_and_names_the_missing_scenario(tmp_path: Path) -> None:
+    """只覆盖一部分 ⇒ 拒绝，并把没覆盖的那条名字报出来。"""
+    policy, claims, evidence, artifact = _fixture(tmp_path)
+    _prior_claim_with_scenarios(claims, ["首次启动", "App 重启", "正常退出后重启"])
+    proc = _run(
+        *_base(policy, claims, evidence, artifact),
+        "--scenario-coverage", "首次启动=PASS",
+        "--scenario-coverage", "App 重启=PASS",
+    )
+    assert proc.returncode == 1
+    assert "正常退出后重启" in proc.stderr
+
+
+def test_accepts_full_pass_coverage_and_records_it(tmp_path: Path) -> None:
+    """阴性对照：逐条 PASS 时必须接受，并把 scenario_coverage 落进证据条目。"""
+    policy, claims, evidence, artifact = _fixture(tmp_path)
+    _prior_claim_with_scenarios(claims, ["首次启动", "正常退出后重启"])
+    proc = _run(
+        *_base(policy, claims, evidence, artifact),
+        "--scenario-coverage", "首次启动=PASS",
+        "--scenario-coverage", "正常退出后重启=PASS",
+    )
+    assert proc.returncode == 0, proc.stderr
+    written = json.loads((claims / "android-duplex-audio.json").read_text(encoding="utf-8"))
+    assert written["evidence"][0]["scenario_coverage"] == {
+        "首次启动": "PASS", "正常退出后重启": "PASS"}
+
+
+def test_refuses_malformed_scenario_coverage_argument(tmp_path: Path) -> None:
+    """`--scenario-coverage` 不是 `场景=判定` 形式 ⇒ 输入不可用（EXIT_UNUSABLE），不是静默忽略。"""
+    policy, claims, evidence, artifact = _fixture(tmp_path)
+    _prior_claim_with_scenarios(claims, ["首次启动"])
+    proc = _run(*_base(policy, claims, evidence, artifact),
+                "--scenario-coverage", "首次启动")
+    assert proc.returncode != 0
+    assert "场景=判定" in proc.stderr
