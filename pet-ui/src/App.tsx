@@ -1,15 +1,8 @@
-/**
- * 主入口：宠物 + 监控面板 + WS 状态驱动（六态状态机接线）
- * - 状态机驱动渲染：listening/thinking/speaking → VoiceOrb；monitoring/alerting → Pet
- * - WS 事件 → 状态机事件映射（事件来源注释见 petMachine.ts 头）
- * - 四级打扰：alert level ≥3 才进入 alerting 完整提醒态；level 1/2 不动声色
- *   （仅 MonitorPanel 状态点变色，由 session_updated 的 alert_level 驱动）
- */
+/** 主入口：宠物 + 面板 + WS 状态驱动 */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useActor } from "@xstate/react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { EyeOff, Settings as SettingsIcon } from "lucide-react";
 import { Pet } from "./components/Pet";
 import { VoiceOrb, type VoicePhase } from "./components/VoiceOrb";
 import { MonitorPanel, type SessionData } from "./components/MonitorPanel";
@@ -17,12 +10,14 @@ import { ReminderToast, type AlertData } from "./components/ReminderToast";
 import { Settings as SettingsPanel, type MonitorTarget, type SettingsView } from "./components/Settings";
 import { Diagnostics } from "./components/Diagnostics";
 import { About } from "./components/About";
-import { ConnectionBadge, toVoicePhase } from "./components/ConnectionBadge";
+import { ControlDock } from "./components/ControlDock";
+import { toVoicePhase } from "./components/ConnectionBadge";
 import { ErrorBanner, type Fault } from "./components/ErrorBanner";
 import { CaConfirm } from "./components/CaConfirm";
 import { petMachine, type PetState } from "./state/petMachine";
 import { wsClient } from "./state/wsClient";
 import "./styles/global.css";
+import "./styles/shell.css";
 
 export default function App() {
   const [snapshot, send] = useActor(petMachine);
@@ -36,9 +31,6 @@ export default function App() {
   const [hovered, setHovered] = useState(false);
   const wsFaultedRef = useRef(false);
 
-  // CA 安装明示确认（ADR-020 A2）：绝不静默装自签根 CA。
-  // 后端 setup 若未装会 emit ca-confirm-required；因 setup 在 webview 加载前运行，
-  // 事件可能被错过，故 mount 时再用 is_ca_install_required 拉取兜底。
   useEffect(() => {
     if (!isTauri()) return; // vite dev 浏览器环境无 Tauri IPC，跳过
     let disposed = false;
@@ -152,9 +144,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 内容驱动窗口尺寸（商业化 P0 修复 2026-09-02）：全部面板（340-420px 宽）
-  // 在 200x200 视口里被裁剪，是「显示的什么东西」投诉的直接根源。
-  // 面板/弹窗打开时放大窗口，全部关闭后恢复 200x200 宠物态。
   useEffect(() => {
     if (!isTauri()) return;
     let width = 200;
@@ -248,7 +237,7 @@ export default function App() {
           <Pet
             mode={isAlerting ? "alerting" : "monitoring"}
             tone={tone}
-            sizePx={isAlerting ? 140 : 96}
+            sizePx={isAlerting ? 176 : 152}
             opacity={isAlerting ? 1 : 0.9}
             alertPulse={isAlerting}
           />
@@ -265,28 +254,15 @@ export default function App() {
         <ReminderToast alert={alert} onDismiss={dismissAlert} />
       )}
 
-      <button
-        type="button"
-        className="settings-trigger"
-        data-hidden={controlsHidden}
-        aria-label="打开设置"
-        onClick={() => {
+      <ControlDock
+        controlsHidden={controlsHidden}
+        voicePhase={toVoicePhase(machineState)}
+        onToggleSettings={() => {
           setShowSettings((v) => !v);
           setSettingsView("main");
         }}
-      >
-        <SettingsIcon size={16} strokeWidth={1.8} aria-hidden="true" />
-      </button>
-
-      <button
-        type="button"
-        className="hide-trigger"
-        data-hidden={controlsHidden}
-        aria-label="隐藏宠物（可从系统托盘找回）"
-        onClick={handleHidePet}
-      >
-        <EyeOff size={16} strokeWidth={1.8} aria-hidden="true" />
-      </button>
+        onHidePet={handleHidePet}
+      />
 
       {showSettings && (
         <div className="settings-slot" onClick={(e) => e.stopPropagation()}>
@@ -310,10 +286,6 @@ export default function App() {
         </div>
       )}
 
-      <div className="conn-badge-slot" data-hidden={controlsHidden}>
-        <ConnectionBadge voicePhase={toVoicePhase(machineState)} />
-      </div>
-
       {fault && (
         <ErrorBanner
           fault={fault}
@@ -323,63 +295,6 @@ export default function App() {
       )}
 
       {showCaConfirm && <CaConfirm onClose={() => setShowCaConfirm(false)} />}
-
-      <style>{`
-        .app-root { height: 100vh; position: relative; }
-        .pet-anchor {
-          position: fixed; right: 16px; bottom: 16px; z-index: 10;
-          transition: transform var(--motion-fast) var(--ease-standard);
-        }
-        /* idle 态：仅波斯猫本体居中（业界共识：主体即主入口） */
-        .pet-anchor.pet-anchor--idle {
-          right: auto; bottom: auto;
-          left: 50%; top: 50%;
-          transform: translate(-50%, -50%);
-        }
-        .pet-anchor:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 50%; }
-        .panel-slot { position: fixed; right: 16px; bottom: 110px; z-index: 20; }
-        /* 控件淡入三态（商业化 2026-09-03）：默认隐藏，hover/面板打开时浮现 */
-        .settings-trigger, .hide-trigger, .conn-badge-slot {
-          opacity: 1;
-          transition: opacity var(--motion-fast) var(--ease-standard);
-        }
-        .settings-trigger[data-hidden="true"], .hide-trigger[data-hidden="true"], .conn-badge-slot[data-hidden="true"] {
-          opacity: 0;
-          pointer-events: none;
-        }
-        .settings-trigger {
-          position: fixed; left: 10px; bottom: 10px; z-index: 30;
-          display: inline-flex; align-items: center; justify-content: center;
-          width: var(--target-min); height: var(--target-min); /* 44x44 触达目标 */
-          border: 1px solid var(--border); border-radius: 8px;
-          background: var(--surface); color: var(--fg-2);
-          cursor: pointer;
-          transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
-        }
-        .settings-trigger:hover { background: var(--surface-raised); color: var(--fg); }
-        .settings-trigger:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-        .settings-slot { position: fixed; left: 10px; bottom: 48px; z-index: 40; }
-        .hide-trigger {
-          position: fixed; right: 10px; top: 10px; z-index: 30;
-          display: inline-flex; align-items: center; justify-content: center;
-          width: var(--target-min); height: var(--target-min); /* 44x44 触达目标 */
-          border: 1px solid var(--border); border-radius: 8px;
-          background: var(--surface); color: var(--fg-2);
-          cursor: pointer;
-          transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
-        }
-        .hide-trigger:hover { background: var(--surface-raised); color: var(--fg); }
-        .hide-trigger:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-        .conn-badge-slot {
-          position: fixed; left: 10px; top: 10px; z-index: 40;
-        }
-        .ws-badge {
-          position: fixed; left: 10px; top: 10px; z-index: 40;
-          background: var(--danger); color: #fff;
-          font-size: 11px; padding: 3px 8px; border-radius: 6px;
-          font-family: var(--font-mono);
-        }
-      `}</style>
     </div>
   );
 }

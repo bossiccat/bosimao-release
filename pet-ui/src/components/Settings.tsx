@@ -4,6 +4,7 @@
  * - 检测阈值只读展示（config/detection.yaml 当前值）
  * - 主题切换（浅色 token 预留，data-theme="light"）
  * - 推送测试：POST /api/v1/control/test-push
+ * 第5节规格：白底卡片 + --elev-raised + --space-5。样式见 styles/shell.css。
  */
 import { useEffect, useState } from "react";
 import {
@@ -174,117 +175,6 @@ export function Settings({ targets, onToggleTarget, onClose, onNavigate }: Setti
           </button>
         </div>
       </div>
-
-      <style>{`
-        .settings-panel {
-          background: var(--surface);
-          border: 1px solid var(--border);
-          border-radius: 12px;
-          width: 300px;
-          max-height: calc(100vh - 72px);
-          overflow-y: auto;
-          font-size: 13px;
-          box-shadow: var(--elev-modal);
-        }
-        .st-head {
-          display: flex; justify-content: space-between; align-items: center;
-          padding: 10px 14px;
-          border-bottom: 1px solid var(--border-soft);
-          font-family: var(--font-display);
-          font-weight: var(--weight-announce);
-          font-size: 14px;
-        }
-        .st-close {
-          display: inline-flex; align-items: center; justify-content: center;
-          width: var(--target-min); height: var(--target-min); /* 44x44 触达目标 */
-          border: none; border-radius: 6px;
-          background: transparent; color: var(--muted); cursor: pointer;
-          transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
-        }
-        .st-close:hover { background: var(--surface-raised); color: var(--fg); }
-        .st-close:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-        .st-section { padding: 10px 14px; border-bottom: 1px solid var(--border-soft); }
-        .st-section:last-child { border-bottom: none; }
-        .st-section-title {
-          font-family: var(--font-mono);
-          font-size: 11px;
-          color: var(--muted);
-          margin-bottom: 8px;
-          letter-spacing: 0.06em;
-          text-transform: uppercase;
-        }
-        .st-empty { color: var(--muted); padding: 4px 0; }
-        .st-target {
-          display: flex; justify-content: space-between; align-items: center;
-          width: 100%;
-          padding: 7px 0;
-          border: none; background: transparent;
-          color: var(--fg); cursor: pointer;
-          font-size: 13px; font-family: var(--font-body);
-        }
-        .st-target:hover .st-target-name { color: var(--accent); }
-        .st-target:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 6px; }
-        .st-target-name { transition: color var(--motion-fast) var(--ease-standard); }
-        .st-switch {
-          width: 30px; height: 16px;
-          border-radius: 999px;
-          background: var(--surface-raised);
-          border: 1px solid var(--border);
-          position: relative;
-          transition: background-color var(--motion-fast) var(--ease-standard);
-        }
-        .st-switch::after {
-          content: "";
-          position: absolute; top: 2px; left: 2px;
-          width: 10px; height: 10px;
-          border-radius: 50%;
-          background: var(--muted);
-          transition: transform var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
-        }
-        .st-switch.on { background: var(--accent); border-color: var(--accent); }
-        .st-switch.on::after { transform: translateX(14px); background: #fff; }
-        .st-threshold {
-          display: flex; justify-content: space-between; gap: 8px;
-          padding: 4px 0;
-          color: var(--fg-2);
-        }
-        .st-th-label { flex: none; }
-        .st-th-value { color: var(--fg-2); font-size: 12px; text-align: right; }
-        .st-row-btn {
-          display: flex; align-items: center; gap: 8px;
-          width: 100%;
-          padding: 7px 8px;
-          border: 1px solid var(--border);
-          border-radius: 8px;
-          background: transparent;
-          color: var(--fg); cursor: pointer;
-          font-size: 13px; font-family: var(--font-body);
-          transition: background-color var(--motion-fast) var(--ease-standard);
-        }
-        .st-row-btn:hover:not(:disabled) { background: var(--surface-raised); }
-        .st-row-btn:disabled { opacity: 0.6; cursor: default; }
-        .st-row-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-        .st-push-msg { margin-left: auto; font-size: 12px; color: var(--muted); }
-        .st-nav {
-          display: flex; gap: 8px;
-        }
-        .st-nav-btn {
-          flex: 1; min-height: 36px;
-          display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-          border: 1px solid var(--border); border-radius: 8px;
-          background: transparent; color: var(--fg-2); cursor: pointer;
-          font-size: 13px; font-family: var(--font-body);
-          transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
-        }
-        .st-nav-btn:hover { background: var(--surface-raised); color: var(--fg); }
-        .st-nav-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-        .st-spin { animation: st-spin 0.8s linear infinite; }
-        @keyframes st-spin { to { transform: rotate(360deg); } }
-        @media (prefers-reduced-motion: reduce) {
-          .st-spin { animation: none; }
-        }
-        .mono { font-family: var(--font-mono); }
-      `}</style>
     </div>
   );
 }

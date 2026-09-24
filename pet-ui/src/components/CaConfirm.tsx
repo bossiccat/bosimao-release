@@ -4,6 +4,7 @@
  * 把自签根 CA 装进「当前用户受信根库」属受信面扩张，必须明示用户、可取消、幂等。
  * 用户点「同意并安装」才 invoke install_trusted_ca；「暂不安装」跳过（wss 会连不上，
  * 但用户已被告知，属自主选择，绝不静默降级明文）。
+ * 样式见 styles/shell.css（白底卡片 + --elev-raised）。
  */
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -92,88 +93,6 @@ export function CaConfirm({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </div>
-
-      <style>{`
-        .ca-confirm-overlay {
-          position: fixed; inset: 0; z-index: 70;
-          display: flex; align-items: center; justify-content: center;
-          background: var(--overlay);
-          padding: var(--space-4);
-        }
-        .ca-confirm-card {
-          background: var(--surface);
-          border: 1px solid var(--border);
-          border-radius: var(--radius-lg);
-          padding: var(--space-5);
-          max-width: 340px;
-          box-shadow: var(--elev-modal);
-          color: var(--fg);
-        }
-        .ca-confirm-head {
-          display: flex; align-items: center; gap: var(--space-2);
-          margin-bottom: var(--space-3);
-        }
-        .ca-confirm-title {
-          font-family: var(--font-display);
-          font-weight: var(--weight-announce);
-          font-size: 15px;
-        }
-        .ca-confirm-desc {
-          font-size: 13px; line-height: var(--leading-body);
-          color: var(--fg-2);
-          margin-bottom: var(--space-3);
-        }
-        .ca-confirm-privacy {
-          font-size: 12px; color: var(--muted);
-          margin-bottom: var(--space-4);
-        }
-        .ca-confirm-privacy-toggle {
-          display: inline-flex; align-items: center; gap: 4px;
-          border: none; background: transparent;
-          color: var(--accent); cursor: pointer;
-          font-size: 12px; font-family: var(--font-body);
-          padding: 0;
-          transition: color var(--motion-fast) var(--ease-standard);
-        }
-        .ca-confirm-privacy-toggle:hover { color: var(--accent-hover); }
-        .ca-confirm-privacy-toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
-        .ca-confirm-privacy-open { transform: rotate(180deg); }
-        @media (prefers-reduced-motion: reduce) {
-          .ca-confirm-privacy-open { transform: none; }
-        }
-        .ca-confirm-error {
-          font-size: 12px; color: var(--danger);
-          margin-bottom: var(--space-3);
-        }
-        .ca-confirm-actions {
-          display: flex; gap: var(--space-2);
-        }
-        .ca-confirm-primary {
-          flex: 1; min-height: 40px;
-          display: inline-flex; align-items: center; justify-content: center;
-          background: var(--button-primary-bg); color: var(--button-primary-fg);
-          border: none; border-radius: var(--radius-md);
-          font-size: 13px; font-weight: var(--weight-emphasize); cursor: pointer;
-          transition: background-color var(--motion-fast) var(--ease-standard);
-        }
-        .ca-confirm-primary:hover:not(:disabled) { background: var(--button-primary-hover); }
-        .ca-confirm-primary:disabled { opacity: 0.6; cursor: default; }
-        .ca-confirm-secondary {
-          flex: 1; min-height: 40px;
-          display: inline-flex; align-items: center; justify-content: center;
-          background: var(--button-secondary-bg); color: var(--button-secondary-fg);
-          border: 1px solid var(--border); border-radius: var(--radius-md);
-          font-size: 13px; font-weight: var(--weight-emphasize); cursor: pointer;
-          transition: background-color var(--motion-fast) var(--ease-standard);
-        }
-        .ca-confirm-secondary:hover:not(:disabled) { background: var(--surface-raised); }
-        .ca-confirm-secondary:disabled { opacity: 0.6; cursor: default; }
-        .ca-confirm-primary:focus-visible,
-        .ca-confirm-secondary:focus-visible {
-          outline: 2px solid var(--focus); outline-offset: 2px;
-          box-shadow: var(--focus-ring);
-        }
-      `}</style>
     </div>
   );
 }

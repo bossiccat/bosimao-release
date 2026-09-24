@@ -4,6 +4,7 @@
  * - 手动关闭钮 + 可配置自动消失（默认 8s）
  * - 状态点表达语义色（不采用 border-left 彩色条反模式）
  * - 阴影走 --elev-raised token（Task 12 design-tokens）
+ * 第5节规格：白底卡片 + --elev-raised。样式见 styles/shell.css。
  */
 import { useEffect } from "react";
 import { X } from "lucide-react";
@@ -28,9 +29,9 @@ const STATE_LABEL: Record<string, string> = {
   off_track: "跑偏",
 };
 
-const STATE_TONE: Record<string, string> = {
-  stuck: "var(--warn)",
-  off_track: "var(--danger)",
+const STATE_TONE: Record<string, "stuck" | "off_track" | "neutral"> = {
+  stuck: "stuck",
+  off_track: "off_track",
 };
 
 export function ReminderToast({ alert, onDismiss, autoDismissMs = 8000 }: ReminderToastProps) {
@@ -39,7 +40,7 @@ export function ReminderToast({ alert, onDismiss, autoDismissMs = 8000 }: Remind
     return () => clearTimeout(t);
   }, [onDismiss, autoDismissMs]);
 
-  const tone = STATE_TONE[alert.state] ?? "var(--accent)";
+  const tone = STATE_TONE[alert.state] ?? "neutral";
   const label = STATE_LABEL[alert.state] ?? "提醒";
 
   return (
@@ -50,7 +51,7 @@ export function ReminderToast({ alert, onDismiss, autoDismissMs = 8000 }: Remind
       aria-label={`${alert.app_id} ${label}提醒`}
     >
       <div className="rt-head">
-        <span className="rt-dot" style={{ backgroundColor: tone }} aria-hidden="true" />
+        <span className="rt-dot" data-tone={tone} aria-hidden="true" />
         <span className="rt-title">{alert.app_id} · {label}</span>
         <button type="button" className="rt-close" onClick={onDismiss} aria-label="关闭提醒">
           <X size={14} strokeWidth={2} aria-hidden="true" />
@@ -58,50 +59,6 @@ export function ReminderToast({ alert, onDismiss, autoDismissMs = 8000 }: Remind
       </div>
       <div className="rt-body">{alert.summary}</div>
       {alert.suggestion && <div className="rt-sug">{alert.suggestion}</div>}
-      <style>{`
-        .reminder-toast {
-          position: fixed; right: 16px; bottom: 180px; z-index: 30;
-          width: 280px;
-          background: var(--surface);
-          border: 1px solid var(--border);
-          border-radius: 12px;
-          padding: 12px 14px;
-          font-size: 13px;
-          box-shadow: var(--elev-raised);
-          animation: toast-in var(--motion-enter) var(--ease-standard);
-        }
-        .rt-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-        .rt-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-        .rt-title {
-          font-weight: var(--weight-announce);
-          font-family: var(--font-mono);
-          font-size: 12px;
-          color: var(--fg-2);
-        }
-        .rt-close {
-          margin-left: auto;
-          display: inline-flex; align-items: center; justify-content: center;
-          width: var(--target-min); height: var(--target-min); /* 44x44 触达目标 */
-          border: none; border-radius: 6px;
-          background: transparent;
-          color: var(--muted);
-          cursor: pointer;
-          transition:
-            background-color var(--motion-fast) var(--ease-standard),
-            color var(--motion-fast) var(--ease-standard);
-        }
-        .rt-close:hover { background: var(--surface-raised); color: var(--fg); }
-        .rt-close:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-        .rt-body { color: var(--fg); }
-        .rt-sug { margin-top: 6px; color: var(--fg-2); font-size: 12px; }
-        @keyframes toast-in {
-          from { opacity: 0; transform: translateY(8px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        @media (prefers-reduced-motion: reduce) {
-          .reminder-toast { animation: none; }
-        }
-      `}</style>
     </div>
   );
 }

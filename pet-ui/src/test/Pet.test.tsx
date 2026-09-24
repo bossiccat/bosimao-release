@@ -45,4 +45,50 @@ describe("Pet — 商业化三态契约", () => {
     const face = getByTestId("pet-face");
     expect(face.getAttribute("data-tone")).toBe("danger");
   });
+
+  it("重做后仍是完整猫：五态 class / data-state 挂上，默认 idle", () => {
+    const { container } = render(<Pet />);
+    const root = container.querySelector<HTMLElement>(".pet");
+    expect(root!.className).toContain("pet--idle");
+    expect(root!.getAttribute("data-state")).toBe("idle");
+  });
+
+  it("完整猫图层齐全：地面阴影/尾巴/躯干/前爪/头/内外耳/眼/鼻/项圈均在 DOM", () => {
+    const { container } = render(<Pet />);
+    // 头（含面部）、左右耳、状态环、项圈 均存在
+    expect(container.querySelector('[data-testid="pet-face"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="pet-ear-left"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="pet-ear-right"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="pet-collar"]')).not.toBeNull();
+    // 内耳（异色）、鼻、项圈吊牌 应有对应 fill 的 path/circle
+    const svg = container.querySelector("svg")!;
+    const fills = Array.from(svg.querySelectorAll<SVGElement>("[fill]")).map((e) =>
+      (e.getAttribute("fill") || "").replace(/\s/g, "")
+    );
+    expect(fills.some((f) => f === "var(--pet-nose)")).toBe(true);
+    expect(fills.some((f) => f === "var(--pet-inner)")).toBe(true);
+    expect(fills.some((f) => f === "var(--pet-tag)")).toBe(true);
+    // 尾巴组 + 前爪组
+    expect(container.querySelector(".pet-tail")).not.toBeNull();
+    expect(container.querySelector(".pet-paws")).not.toBeNull();
+  });
+
+  it("锥形胡须共 6 根（每侧 3），区别于等粗直线", () => {
+    const { container } = render(<Pet />);
+    const whiskers = container.querySelectorAll(".pet-whiskers > path");
+    expect(whiskers.length).toBe(6);
+  });
+
+  it("禁止运行时内联 <style>：组件不再注入 inline style 标签", () => {
+    const { container } = render(<Pet />);
+    expect(container.querySelector("style")).toBeNull();
+  });
+
+  it("五态视觉可切换：state 直接指定时 data-state 随之变化", () => {
+    for (const s of ["idle", "listening", "thinking", "speaking", "alerting"] as const) {
+      const { container } = render(<Pet state={s} />);
+      expect(container.querySelector<HTMLElement>(".pet")!.getAttribute("data-state")).toBe(s);
+      expect(container.querySelector<HTMLElement>(".pet")!.className).toContain(`pet--${s}`);
+    }
+  });
 });

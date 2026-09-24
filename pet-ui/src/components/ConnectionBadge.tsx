@@ -6,6 +6,7 @@
  *       speaking / recovering / error）
  *
  * 状态呈现不依赖颜色：图标 + 文字标签（可访问性契约 §7）。
+ * 第5节规格：单行状态胶囊，图标 16px，高 32px。样式见 styles/shell.css。
  */
 import { useEffect, useState } from "react";
 import {
@@ -93,38 +94,13 @@ export function ConnectionBadge({
   return (
     <div className="conn-badge" role="status" aria-live="polite">
       <span className={`conn-ws tone-${w.tone}`} title={`控制面：${w.label}`}>
-        <WsIcon size={11} strokeWidth={2.2} aria-hidden="true" />
+        <WsIcon size={16} strokeWidth={2} aria-hidden="true" />
         {w.label}
       </span>
       <span className={`conn-voice tone-${v.tone}`} title={`语音：${v.label}`}>
-        <VoiceIcon size={11} strokeWidth={2.2} aria-hidden="true" />
+        <VoiceIcon size={16} strokeWidth={2} aria-hidden="true" />
         {v.label}
       </span>
-      <style>{`
-        .conn-badge {
-          display: inline-flex; align-items: center; gap: 6px;
-          font-family: var(--font-mono); font-size: 11px;
-          padding: 3px 8px; border-radius: 6px;
-          background: var(--surface-raised); border: 1px solid var(--border);
-          color: var(--fg-2); line-height: 1;
-        }
-        .conn-ws, .conn-voice { display: inline-flex; align-items: center; gap: 4px; }
-        .conn-badge .tone-ok { color: var(--success); }
-        .conn-badge .tone-active { color: var(--info); }
-        .conn-badge .tone-warn { color: var(--warn); }
-        .conn-badge .tone-danger { color: var(--danger); }
-        .conn-badge .tone-neutral { color: var(--fg-2); }
-        .conn-badge .tone-ok svg, .conn-badge .tone-active svg {
-          animation: none;
-        }
-        .conn-badge .tone-active svg, .conn-badge .tone-warn svg {
-          animation: conn-pulse 2s ease-in-out infinite;
-        }
-        @keyframes conn-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
-        @media (prefers-reduced-motion: reduce) {
-          .conn-badge .tone-active svg, .conn-badge .tone-warn svg { animation: none; }
-        }
-      `}</style>
     </div>
   );
 }

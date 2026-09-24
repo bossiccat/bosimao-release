@@ -154,3 +154,17 @@
     transition-duration: 1ms !important;
   }
 }
+
+/* pet 商业化插画配色（2026-09-24 重做）— 颜色全部来自 token，禁止硬编码 */
+:root {
+  --pet-fur-base: #fbfaf7;   /* 毛基色：暖白 */
+  --pet-fur-light: #ffffff;  /* 受光面 */
+  --pet-fur-shade: #e8ece6;  /* 背光面：带绿倾向中性灰 */
+  --pet-fur-deep: #cbd6cc;   /* 深阴影 */
+  --pet-outline: #5b6b60;    /* 描边：不许纯黑 */
+  --pet-inner: #e9b8b6;      /* 内耳 */
+  --pet-nose: #d98c8c;       /* 鼻 */
+  --pet-eye: #2b3a30;        /* 眼/虹膜 */
+  --pet-collar: var(--accent);
+  --pet-tag: #f5c451;        /* 项圈吊牌 */
+}

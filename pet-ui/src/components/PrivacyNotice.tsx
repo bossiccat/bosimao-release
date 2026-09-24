@@ -72,46 +72,6 @@ export function PrivacyNotice() {
           );
         })}
       </ul>
-
-      <style>{`
-        .privacy-notice {
-          padding: 10px 12px;
-          background: var(--surface-subtle);
-          border: 1px solid var(--border-soft);
-          border-radius: var(--radius-md);
-          color: var(--fg-2);
-          margin-top: 8px;
-        }
-        .pn-lock {
-          display: flex; align-items: center; gap: 6px;
-          color: var(--fg);
-          font-weight: var(--weight-emphasize);
-          font-size: 12px;
-          margin-bottom: 6px;
-        }
-        .pn-loop {
-          font-size: 12px;
-          line-height: var(--leading-body);
-          margin-bottom: 8px;
-        }
-        .pn-list { list-style: none; }
-        .pn-item {
-          display: flex; flex-direction: column; gap: 2px;
-          padding: 6px 0;
-          border-top: 1px solid var(--border-soft);
-        }
-        .pn-item:first-of-type { border-top: none; }
-        .pn-item-head {
-          display: flex; align-items: center; gap: 6px;
-          color: var(--fg);
-          font-size: 12px;
-          font-weight: var(--weight-emphasize);
-        }
-        .pn-item-detail {
-          font-size: 12px;
-          line-height: var(--leading-body);
-        }
-      `}</style>
     </div>
   );
 }

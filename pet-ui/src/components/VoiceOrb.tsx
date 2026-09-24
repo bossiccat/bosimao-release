@@ -6,6 +6,7 @@
  * error 使用语义色大号展示；其余状态静态呈现。
  */
 import { Pet } from "./Pet";
+import "../styles/voice-orb.css";
 
 export type VoicePhase =
   | "idle"
@@ -66,37 +67,6 @@ export function VoiceOrb({ phase, tone = "neutral", volume = 0.5 }: VoiceOrbProp
         {/* 波形涟漪（Speaking） */}
         {phase === "speaking" && <div className="speak-ripple" style={{ borderColor: color }} />}
       </Pet>
-      <style>{`
-        .voice-orb { position: relative; display: inline-flex; align-items: center; justify-content: center; }
-        .sonar-ring {
-          position: absolute;
-          border: 2px solid;
-          border-radius: 50%;
-          opacity: 0.7;
-          animation: sonar 0.8s ease-out infinite;
-          pointer-events: none;
-        }
-        @keyframes sonar {
-          0% { transform: scale(0.8); opacity: 0.7; }
-          100% { transform: scale(1.6); opacity: 0; }
-        }
-        .speak-ripple {
-          position: absolute;
-          inset: -6%;
-          border: 1.5px solid;
-          border-radius: 50%;
-          opacity: 0.5;
-          animation: ripple 1.2s ease-in-out infinite;
-          pointer-events: none;
-        }
-        @keyframes ripple {
-          0%, 100% { transform: scale(0.98); opacity: 0.5; }
-          50% { transform: scale(1.04); opacity: 0.15; }
-        }
-        @media (prefers-reduced-motion: reduce) {
-          .sonar-ring, .speak-ripple { animation: none; }
-        }
-      `}</style>
     </div>
   );
 }
