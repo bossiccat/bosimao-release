@@ -5,78 +5,98 @@
 /* ============================================================
    1. 应用外壳布局（原 App.tsx 内联 <style> 抽出）
    ============================================================ */
+/* 应用外壳：flex 垂直节奏（上留白 / 中主体 / 下 dock），空白即呼吸而非空缺 */
 .app-root {
   height: 100vh;
-  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+/* 故障态：顶部横幅占位，给主体让出上方空间（避免横幅压猫） */
+.app-root[data-fault="true"] {
+  padding-top: 48px;
 }
 
+/* 宠物本体：作为 flex 主体居中（垂直节奏的「中主体」） */
 .pet-anchor {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  z-index: 10;
-  transition: transform var(--motion-fast) var(--ease-standard);
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-/* idle 态：仅波斯猫本体居中（业界共识：主体即主入口） */
-.pet-anchor--idle {
-  right: auto;
-  bottom: auto;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-}
+/* pet-anchor--idle 仅作状态标记（居中由 flex 统一处理），不再单独定位 */
 .pet-anchor:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
   border-radius: 50%;
 }
 
+/* 面板容器：底部停靠，上方留给主体与 dock（不遮挡底部控件条） */
 .panel-slot {
   position: fixed;
   right: 16px;
-  bottom: 110px;
+  bottom: 72px;
   z-index: 20;
+  max-height: calc(100vh - 88px);
 }
 
-/* 控件淡入三态：默认隐藏，hover/面板打开时浮现 */
-.settings-trigger,
-.hide-trigger,
-.conn-badge-slot {
-  opacity: 1;
+/* 设置容器：居中停靠在 dock 之上 */
+.settings-slot {
+  position: fixed;
+  left: 50%;
+  bottom: 72px;
+  transform: translateX(-50%);
+  z-index: 40;
+}
+
+/* 底部控件条：状态胶囊 + 操作按钮统一收纳为一条有表面的底座（视觉锚点） */
+.control-dock {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 auto 14px;
+  padding: 7px 9px;
+  border-radius: var(--radius-14);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-card);
   transition: opacity var(--motion-fast) var(--ease-standard);
+  z-index: 30;
 }
-.settings-trigger[data-hidden="true"],
-.hide-trigger[data-hidden="true"],
-.conn-badge-slot[data-hidden="true"] {
-  opacity: 0;
-  pointer-events: none;
+.control-dock[data-hidden="true"] {
+  display: none;
+}
+/* 紧凑窗口（仅桌面宠物 200px 宽）：状态胶囊让位，仅留操作按钮，避免溢出 */
+@media (max-width: 320px) {
+  .conn-badge-slot { display: none; }
 }
 
-/* 图标按钮：40×40 视觉框 + 44px 触达（--target-min）；圆角 --radius-lg；1px --border；hover/active/focus 三态 */
+/* 图标按钮：34px 视觉框；圆角 --radius-10；1px --border；hover/active/focus 三态 */
 .settings-trigger,
 .hide-trigger {
-  position: fixed;
-  z-index: 30;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--target-min);
-  height: var(--target-min);
+  width: 34px;
+  height: 34px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  color: var(--fg-2);
+  border-radius: var(--radius-10);
+  background: var(--surface-soft);
+  color: var(--muted);
   cursor: pointer;
   transition:
     background-color var(--motion-fast) var(--ease-standard),
     color var(--motion-fast) var(--ease-standard),
     border-color var(--motion-fast) var(--ease-standard);
 }
-.settings-trigger { left: 10px; bottom: 10px; }
-.hide-trigger { right: 10px; top: 10px; }
 .settings-trigger:hover,
 .hide-trigger:hover {
-  background: var(--surface-raised);
+  background: var(--surface-sunken);
   color: var(--fg);
   border-color: var(--border-strong);
 }
@@ -91,18 +111,6 @@
   outline: none;
   box-shadow: var(--focus-ring);
 }
-.settings-slot {
-  position: fixed;
-  left: 10px;
-  bottom: 48px;
-  z-index: 40;
-}
-.conn-badge-slot {
-  position: fixed;
-  left: 10px;
-  top: 10px;
-  z-index: 40;
-}
 
 /* ============================================================
    2. 状态胶囊 ConnectionBadge（单行 · 16px 图标 · 高 32px）
@@ -111,16 +119,15 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  height: 32px;
-  padding: 0 12px;
+  height: 30px;
+  padding: 0 10px;
   border-radius: var(--radius-full);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  box-shadow: var(--elev-ring);
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-label);
   line-height: 1;
-  color: var(--fg-2);
+  color: var(--muted);
 }
 .conn-ws,
 .conn-voice {
@@ -151,20 +158,22 @@
    ============================================================ */
 .err-banner {
   position: fixed;
+  top: 12px;
   left: 50%;
-  bottom: 96px;
   transform: translateX(-50%);
   z-index: 60;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  width: calc(100% - 24px);
   max-width: 400px;
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--danger) 35%, #fff);
-  border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--danger) 8%, #fff);
-  box-shadow: var(--elev-raised);
-  color: var(--fg);
+  padding: 9px 12px;
+  background: var(--danger-soft);
+  border: 1px solid color-mix(in srgb, var(--danger) 25%, #fff);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-10);
+  box-shadow: var(--shadow-card);
+  color: var(--danger-ink);
 }
 .err-icon {
   flex: none;
@@ -173,17 +182,18 @@
 .err-text {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
   flex: 1;
 }
 .err-title {
-  font-size: 13px;
+  font-size: var(--text-caption);
   font-weight: 600;
-  color: var(--danger);
+  color: var(--danger-ink);
+  line-height: 1.3;
 }
 .err-reason {
-  font-size: 12px;
+  font-size: var(--text-label);
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -195,41 +205,41 @@
   gap: 6px;
   flex: none;
 }
+/* 主操作降级为次级按钮（不再实心红大按钮，避免压过画面） */
 .err-action {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  min-height: 32px;
-  padding: 0 12px;
-  background: var(--danger);
-  color: #fff;
-  border: none;
-  border-radius: var(--radius-md);
-  font-size: 12px;
+  gap: 4px;
+  min-height: 30px;
+  padding: 0 10px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-10);
+  color: var(--danger-ink);
+  font-size: var(--text-label);
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
-  transition: filter var(--motion-fast) var(--ease-standard);
+  transition: background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
 }
-.err-action:hover { filter: brightness(1.08); }
-.err-action:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 40%, #fff); }
+.err-action:hover { background: var(--surface-soft); border-color: var(--danger); }
+.err-action:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+/* 次要操作降级为文字按钮 */
 .err-dismiss {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  min-height: 32px;
-  padding: 0 10px;
+  gap: 3px;
+  min-height: 30px;
+  padding: 0 6px;
   background: transparent;
-  border: 1px solid color-mix(in srgb, var(--danger) 30%, #fff);
-  border-radius: var(--radius-md);
-  color: var(--danger);
-  font-size: 12px;
-  font-weight: 500;
+  border: none;
+  color: var(--muted);
+  font-size: var(--text-label);
   cursor: pointer;
   white-space: nowrap;
-  transition: background-color var(--motion-fast) var(--ease-standard);
+  transition: color var(--motion-fast) var(--ease-standard);
 }
-.err-dismiss:hover { background: color-mix(in srgb, var(--danger) 14%, #fff); }
+.err-dismiss:hover { color: var(--danger-ink); }
 .err-dismiss:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 /* ============================================================

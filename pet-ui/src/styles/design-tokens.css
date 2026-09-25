@@ -1,15 +1,20 @@
 /* Source: commercial-upgrade-SPEC.md v1.1 + commercial-upgrade-DESIGN.md
    商业化改版 2026-09-16：白底 + 绿色品牌色（与移动端一致）
-   - 主色 #16A34A、浅 #DCFCE7、深字 #052E16、错误 #DC2626
-   - 浅色玻璃/白底卡片感，阴影克制 */
+   2026-09-25 v3 应用壳修订：暖中性灰阶 + 圆润三档圆角(10/14/20) + 新字阶 + 规范阴影
+   - 所有颜色来自 token，禁止硬编码
+   - 品牌绿 #16A34A（软底 #DCFCE7、深字 #052E16）
+   - 危险 #DC2626（软底 #FEF2F2、深字 #B91C1C）
+   - 正文 #17201B、次级 #5B6660、弱化 #9AA5A0、分隔线 #E7EAE8
+   - 软表面 #F7F8F7、凹陷面 #F1F3F1
+   - 圆角三档 10/14/20；阴影 0 1px 2px rgba(16,24,20,.05), 0 8px 24px rgba(16,24,20,.08) */
 :root {
   /* A1 identity */
   --bg: #ffffff;
   --surface: #ffffff;
   --surface-raised: #f4faf5;
-  --fg: #052e16;
-  --muted: #4e6157;
-  --accent: #16a34a;
+  --fg: #17201b;            /* 正文（v3 规范）：暖中性近黑 */
+  --muted: #5b6660;         /* 次级（v3 规范）：暖中性灰绿 */
+  --accent: #16a34a;        /* 品牌绿 */
   --border: #d7e3da;
   --font-display: "Noto Sans SC", "Segoe UI", sans-serif;
   --font-body: "Noto Sans SC", "Segoe UI", sans-serif;
@@ -24,6 +29,8 @@
   --text-2xl: 1.5rem;
   --text-3xl: 2rem;
   --text-4xl: 2.5rem;
+  --text-caption: 12.5px;   /* v3 字阶：弱化正文 */
+  --text-label: 11px;       /* v3 字阶：标签/单位 */
   --weight-read: 400;
   --weight-emphasize: 510;
   --weight-announce: 590;
@@ -50,6 +57,9 @@
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-xl: 16px;
+  --radius-2xl: 20px;       /* v3 圆角档位：大 */
+  --radius-14: 14px;        /* v3 圆角档位：中 */
+  --radius-10: 10px;        /* v3 圆角档位：小 */
   --radius-full: 9999px;
   --border-width: 1px;
   --container-compact: 384px;
@@ -69,8 +79,13 @@
   /* A2 semantic */
   --success: #16a34a;
   --warn: #d97706;
-  --danger: #dc2626;
+  --danger: #dc2626;        /* 危险主色 */
+  --danger-soft: #fef2f2;   /* v3 危险软底（浅红） */
+  --danger-ink: #b91c1c;    /* v3 危险深字 */
   --info: #0e7490;
+  --accent-ink: #052e16;    /* 品牌绿深字（原 --fg 值，抽出为专用） */
+  --accent-soft: #dcfce7;   /* 品牌绿软底 */
+  --fg-weak: #9aa5a0;       /* v3 弱化文字 */
   --focus: #16a34a;
   --motion-instant: 80ms;
   --motion-fast: 150ms;
@@ -83,11 +98,13 @@
   /* B slot */
   --fg-2: var(--muted);
   --accent-on: #ffffff;
-  --accent-soft: #dcfce7;
+  --surface-soft: #f7f8f7;   /* v3 软表面（暖中性） */
+  --surface-sunken: #f1f3f1; /* v3 凹陷面（暖中性） */
   --surface-subtle: #f0f7f2;
   --surface-interactive: var(--surface-raised);
   --border-soft: #e8f0ea;
   --border-strong: #b9ccc0;
+  --divider: #e7eae8;        /* v3 分隔线（暖中性） */
   --accent-hover: #15803d;
   --accent-active: #166534;
   --disabled-bg: #eef3ef;
@@ -97,6 +114,11 @@
   --elev-ring: 0 0 0 1px var(--border);
   --elev-raised: 0 8px 24px #052e161a;
   --elev-modal: 0 16px 40px #052e1624;
+
+  /* v3 规范阴影：克制、暖中性投影 */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 20, 0.05);
+  --shadow-card: 0 1px 2px rgba(16, 24, 20, 0.05), 0 8px 24px rgba(16, 24, 20, 0.08);
+
   --focus-ring: 0 0 0 3px #16a34a59;
   --button-primary-bg: var(--accent);
   --button-primary-fg: var(--accent-on);

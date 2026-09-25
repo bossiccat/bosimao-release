@@ -15,6 +15,7 @@ import { toVoicePhase } from "./components/ConnectionBadge";
 import { ErrorBanner, type Fault } from "./components/ErrorBanner";
 import { CaConfirm } from "./components/CaConfirm";
 import { petMachine, type PetState } from "./state/petMachine";
+import { petStateToEvent } from "./state/petStateEvents";
 import { wsClient } from "./state/wsClient";
 import "./styles/global.css";
 import "./styles/shell.css";
@@ -76,40 +77,17 @@ export default function App() {
         } else if (evt.event === "pet_state") {
           // pet_state 是语音全双工会话的权威状态（backend → UI）
           const state = (evt.data as { state?: string }).state;
-          switch (state) {
-            case "listening":
-              send({ type: "SPEECH_START" });
-              break;
-            case "thinking":
-              send({ type: "SPEECH_END" });
-              break;
-            case "speaking":
-              send({ type: "RESPONSE_START" });
-              break;
-            case "monitoring":
-              send({ type: "RESPONSE_END" });
-              break;
-            case "idle":
-              send({ type: "TIMEOUT" });
-              break;
-            // 2026-08-13 UI 商业化升级：补 connecting/error/recovering 映射（AC-20）
-            case "connecting":
-              send({ type: "START" });
-              break;
-            case "error":
-              send({ type: "ERROR" });
+          const ev = petStateToEvent(state);
+          if (ev) {
+            if (ev === "ERROR") {
               setFault({
                 category: "voice",
                 reason: "语音链路异常，请检查网络或模型服务后重试",
                 actionLabel: "重启语音",
                 action: "restart-voice",
               });
-              break;
-            case "recovering":
-              send({ type: "RETRY" });
-              break;
-            default:
-              break;
+            }
+            send({ type: ev });
           }
         }
       } else if (evt.type === "pong") {
@@ -187,6 +165,11 @@ export default function App() {
   // 三态交互模型（商业化 2026-09-03）：idle 只见波斯猫本体，控件 hover 淡入；
   // 任何面板/横幅打开期间控件保持可见（放大窗口中需可操作）。
   const controlsHidden = !(hovered || showPanel || showSettings || showCaConfirm || fault);
+  // 垂直节奏构图：idle / 故障 / 仅 hover（无面板）时猫居中作为主体；面板/设置/CA 打开时让位（隐藏于其下）
+  const petCentered =
+    controlsHidden || !!fault || !(showPanel || showSettings || showCaConfirm);
+  // 猫主体尺寸：idle 152 充满；出现控件时收小以避免与底部 dock 重叠；故障态 96 适配矮窗
+  const petSize = isAlerting ? 176 : controlsHidden ? 152 : fault ? 96 : 120;
 
   // 监控目标：与 config/monitors.yaml 对齐（session 到达后以实际 app_name 为准）
   const targets = useMemo<MonitorTarget[]>(() => {
@@ -219,12 +202,13 @@ export default function App() {
   return (
     <div
       className="app-root"
+      data-fault={!!fault}
       data-tauri-drag-region
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
       <div
-        className={`pet-anchor${controlsHidden ? " pet-anchor--idle" : ""}`}
+        className={`pet-anchor${petCentered ? " pet-anchor--idle" : ""}`}
         role="button"
         tabIndex={0}
         aria-label="打开监控面板"
@@ -237,7 +221,7 @@ export default function App() {
           <Pet
             mode={isAlerting ? "alerting" : "monitoring"}
             tone={tone}
-            sizePx={isAlerting ? 176 : 152}
+            sizePx={petSize}
             opacity={isAlerting ? 1 : 0.9}
             alertPulse={isAlerting}
           />

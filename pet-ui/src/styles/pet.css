@@ -1,153 +1,248 @@
-/* 宠物「星核 Spark」插画样式（2026-09-24 重做）
-   原 Pet.tsx 内联 <style> 已迁入此处；并补充第 4 节五态动画。
-   约束：禁止 drop-shadow 糊边；transform 动画用 transform-box: fill-box 以元素自身为原点。 */
+/**
+ * 宠物「星核」— 插画资产版样式（2026-09-25 v3）
+ * 精灵：src/assets/jax_pet_sprite.png（ImageGen→matting 资产管线产物）。
+ * 本文件只负责：布局、状态效果层（光环/思考点/动效）、接触阴影。
+ * 颜色全部来自 design-tokens.css，禁止硬编码色值。
+ */
 
 .pet {
-  transition: opacity 0.3s ease;
-  cursor: pointer;
+  position: relative;
+  display: block;
 }
 
-/* 呼吸：整体极轻缩放（idle 常态活着的能量感） */
-.pet-cat {
-  transform-box: fill-box;
-  transform-origin: 50% 100%;
-  animation: pet-breathe 5.5s ease-in-out infinite;
-}
-@keyframes pet-breathe {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.015); }
-}
-
-/* 眨眼：每 ~6s 一次，120ms 级闭合 */
-.pet-eye {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: pet-blink 6.2s ease-in-out infinite;
-}
-@keyframes pet-blink {
-  0%, 93%, 100% { transform: scaleY(1); }
-  95% { transform: scaleY(0.08); }
-  97% { transform: scaleY(1); }
+/* ── 门面精灵 ───────────────────────────────────────────── */
+.pet-sprite {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  transform-origin: 50% 88%;
 }
 
-/* 耳朵（独立枢轴，左右镜像，便于随态前倾/后压/微摆） */
-.pet-ear {
-  transform-box: fill-box;
-  transform-origin: 50% 92%;
-}
-.pet--idle .pet-ear-left { animation: pet-ear-sway-l 4.5s ease-in-out infinite; }
-.pet--idle .pet-ear-right { animation: pet-ear-sway-r 4.5s ease-in-out infinite; }
-@keyframes pet-ear-sway-l {
-  0%, 100% { transform: rotate(-2.5deg); }
-  50% { transform: rotate(2.5deg); }
-}
-@keyframes pet-ear-sway-r {
-  0%, 100% { transform: rotate(2.5deg); }
-  50% { transform: rotate(-2.5deg); }
-}
-
-/* 尾巴（根在左下，慢摆） */
-.pet-tail {
-  transform-box: fill-box;
-  transform-origin: 12% 92%;
-}
-.pet--idle .pet-tail { animation: pet-tail-sway 6s ease-in-out infinite; }
-@keyframes pet-tail-sway {
-  0%, 100% { transform: rotate(-3deg); }
-  50% { transform: rotate(3deg); }
+/* ── 地面接触阴影：让猫"坐"在桌面上 ─────────────────────── */
+.pet-shadow {
+  position: absolute;
+  z-index: 0;
+  left: 50%;
+  bottom: 2.5%;
+  width: 70%;
+  height: 7%;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: radial-gradient(
+    50% 50% at 50% 50%,
+    rgba(0, 0, 0, 0.2) 0%,
+    rgba(0, 0, 0, 0.05) 68%,
+    rgba(0, 0, 0, 0) 100%
+  );
 }
 
-/* 状态光晕（pet-shell）：默认完全不可见 —— idle/thinking 桌面只剩猫本体（规格第 4 节 
-   常态本无光晕，旧版描边环在深色桌面上会读成闭合灰环）。仅语音态 / 提醒态以语义色柔性显形；
-   填充已是径向渐变淡出到 alpha=0，任何态都不会出现硬边圆环。 */
-.pet-shell {
-  transform-box: fill-box;
-  transform-origin: center;
+/* ── 状态/语义光环：径向柔光，非描边硬环 ────────────────── */
+/* idle / thinking 不显形（规格：常态桌面只有猫本体） */
+.pet-halo {
+  position: absolute;
+  inset: -6%;
+  z-index: 0;
+  border-radius: 50%;
   opacity: 0;
-  transition: opacity 0.35s ease;
-}
-.pet--listening .pet-shell,
-.pet--speaking .pet-shell {
-  animation: pet-halo 2.6s ease-in-out infinite;
-}
-.pet--alerting .pet-shell {
-  animation: pet-halo 1.4s ease-in-out infinite;
-}
-@keyframes pet-halo {
-  0%, 100% { opacity: 0.45; transform: scale(1); }
-  50% { opacity: 0.8; transform: scale(1.02); }
+  transition: opacity 0.45s ease;
+  --halo-color: var(--voice-idle);
+  background: radial-gradient(
+    50% 50% at 50% 50%,
+    var(--halo-color) 0%,
+    transparent 70%
+  );
 }
 
-/* 提醒脉冲（整体） */
-.pet-alert-pulse { animation: pet-alert 1s ease-in-out infinite; }
-@keyframes pet-alert {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.05); }
+.pet--listening .pet-halo {
+  --halo-color: var(--voice-listening);
+  opacity: 0.65;
+  animation: pet-halo-breathe 2.4s ease-in-out infinite;
 }
 
-/* listening：双耳前倾（镜像）+ 项圈呼吸发光（瞳孔放大由 SVG 控制） */
-.pet--listening .pet-ear-left { transform: rotate(7deg); }
-.pet--listening .pet-ear-right { transform: rotate(-7deg); }
-.pet--listening .pet-collar-glow { animation: pet-collar-glow 2.4s ease-in-out infinite; }
-@keyframes pet-collar-glow {
-  0%, 100% { opacity: 0.2; }
-  50% { opacity: 0.45; }
+.pet--speaking .pet-halo {
+  --halo-color: var(--voice-speaking);
+  opacity: 0.4;
 }
 
-/* thinking：头侧倾 + 尾巴加速 + 头顶三点 */
-.pet--thinking .pet-head {
-  transform-box: fill-box;
-  transform-origin: 50% 82%;
-  transform: rotate(-7deg);
-}
-.pet--thinking .pet-tail { animation: pet-tail-sway 2.2s ease-in-out infinite; }
-.pet--thinking .pet-think-dots { opacity: 1; animation: pet-think 1.6s ease-in-out infinite; }
-@keyframes pet-think {
-  0%, 100% { opacity: 0.4; }
-  50% { opacity: 1; }
+.pet--alerting .pet-halo {
+  --halo-color: var(--voice-idle);
+  opacity: 0.62;
 }
 
-/* speaking：嘴部开合（三帧循环）+ 身体随语音起伏 */
-.pet--speaking .pet-mouth {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: pet-talk 0.5s steps(1, end) infinite;
+/* 提醒态光环取语义 tone 色 */
+.pet--alerting[data-tone="danger"] .pet-halo {
+  --halo-color: var(--danger);
 }
-@keyframes pet-talk {
-  0% { transform: scaleY(1); }
-  25% { transform: scaleY(0.6); }
-  50% { transform: scaleY(2); }
-  75% { transform: scaleY(1.9); }
-  100% { transform: scaleY(1); }
+.pet--alerting[data-tone="success"] .pet-halo {
+  --halo-color: var(--success);
 }
-.pet--speaking .pet-cat { animation: pet-bob 0.5s ease-in-out infinite; }
-@keyframes pet-bob {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-2px); }
+.pet--alerting[data-tone="warn"] .pet-halo {
+  --halo-color: var(--warn);
+}
+.pet--alerting[data-tone="neutral"] .pet-halo {
+  --halo-color: var(--voice-idle);
 }
 
-/* alerting：全身提亮 + 耳朵后压 + 语义色光晕（tone 决定颜色，见 Pet.tsx） */
-.pet--alerting .pet-cat { filter: brightness(1.06); }
-.pet--alerting .pet-ear { transform: rotate(-14deg); }
+/* alertPulse：光环脉动（不动精灵本体，避免与状态动效叠加冲突） */
+.pet-alert-pulse .pet-halo {
+  animation: pet-halo-breathe 1.2s ease-in-out infinite;
+}
 
-/* 思考点默认隐藏（仅 thinking 态显形） */
-.pet-think-dots { opacity: 0; }
+/* ── 五态动效（作用于精灵本体） ──────────────────────────── */
+.pet--idle .pet-sprite {
+  animation: pet-breathe 3.6s ease-in-out infinite;
+}
 
-/* reduced-motion：全部动画降为静态，仅保留颜色/不透明度差异（全局 media 已兜底，这里再收口） */
-@media (prefers-reduced-motion: reduce) {
-  .pet-cat,
-  .pet-eye,
-  .pet-ear,
-  .pet-tail,
-  .pet-shell,
-  .pet-mouth,
-  .pet-alert-pulse,
-  .pet-collar-glow,
-  .pet-think-dots {
-    animation: none !important;
+.pet--listening .pet-sprite {
+  animation: pet-lean 0.5s ease forwards;
+}
+
+.pet--thinking .pet-sprite {
+  animation: pet-tilt 3s ease-in-out infinite;
+}
+
+.pet--speaking .pet-sprite {
+  animation: pet-bob 1.1s ease-in-out infinite;
+}
+
+.pet--alerting .pet-sprite {
+  animation: pet-firm 0.35s ease-out forwards;
+}
+
+/* ── 思考点（仅 thinking 态显形） ────────────────────────── */
+.pet-think-dots {
+  position: absolute;
+  z-index: 2;
+  top: 2%;
+  right: 13%;
+  left: auto;
+  transform: none;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 5%;
+  /* 显式宽度：绝对定位 + shrink-to-fit 会让子元素的百分比宽度解析为 0 */
+  width: 24%;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+.pet--thinking .pet-think-dots {
+  opacity: 0.92;
+}
+
+.pet-think-dots i {
+  display: block;
+  width: 24%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: var(--fg-2, var(--fg-weak));
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.pet-think-dots i:nth-child(1) {
+  width: 18%;
+}
+.pet-think-dots i:nth-child(2) {
+  width: 26%;
+}
+.pet-think-dots i:nth-child(3) {
+  width: 36%;
+}
+
+.pet--thinking .pet-think-dots i {
+  animation: pet-dot-pop 1.6s ease-in-out infinite;
+}
+.pet--thinking .pet-think-dots i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.pet--thinking .pet-think-dots i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* ── 动效定义 ────────────────────────────────────────────── */
+@keyframes pet-breathe {
+  0%,
+  100% {
+    transform: scale(1);
   }
-  .pet--thinking .pet-think-dots { opacity: 1; }
-  .pet--listening .pet-shell,
-  .pet--speaking .pet-shell { opacity: 0.6; }
-  .pet--alerting .pet-shell { opacity: 0.85; }
+  50% {
+    transform: scale(1.015);
+  }
+}
+
+@keyframes pet-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2.5%);
+  }
+}
+
+@keyframes pet-lean {
+  from {
+    transform: rotate(0deg) scale(1);
+  }
+  to {
+    transform: rotate(-2deg) scale(1.01);
+  }
+}
+
+@keyframes pet-tilt {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(3deg);
+  }
+}
+
+@keyframes pet-firm {
+  from {
+    transform: scale(0.985);
+  }
+  to {
+    transform: scale(1.01);
+  }
+}
+
+@keyframes pet-halo-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  50% {
+    transform: scale(1.04);
+    opacity: 0.68;
+  }
+}
+
+@keyframes pet-dot-pop {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.55;
+  }
+  40% {
+    transform: translateY(-14%);
+    opacity: 1;
+  }
+}
+
+/* 无障碍：偏好减弱动效时全部静止 */
+@media (prefers-reduced-motion: reduce) {
+  .pet-sprite,
+  .pet-halo {
+    animation: none !important;
+    transition: none !important;
+  }
 }
