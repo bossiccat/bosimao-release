@@ -9,6 +9,7 @@ import com.jax.voice.R
 import com.jax.voice.config.VoiceConfig
 import com.jax.voice.net.RtcClient
 import com.jax.voice.net.VoiceSessionApi
+import com.jax.voice.util.DeviceEnvObserver
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -60,6 +61,7 @@ class VoiceForegroundService : Service() {
     private var notifications: VoiceServiceNotifications? = null
     private var exitGate: CompletableDeferred<Unit>? = null
     private var enterGate: CompletableDeferred<Unit>? = null
+    private var deviceEnvObserver: DeviceEnvObserver? = null
 
     @Volatile private var wakeActive = VoiceConfig.WAKE_DEFAULT_ENABLED
     @Volatile private var micRestartCount = 0
@@ -90,6 +92,13 @@ class VoiceForegroundService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        // 取证可观测性：场景4/场景5 设备环境观测（纯观测，零行为变更）。
+        // 与 onDestroy 对称注册/反注册，避免泄漏。
+        deviceEnvObserver = DeviceEnvObserver(applicationContext).also { it.start() }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -456,6 +465,9 @@ class VoiceForegroundService : Service() {
 
     override fun onDestroy() {
         stopping = true
+        // 对称反注册：避免 AudioDeviceCallback / 广播 / NetworkCallback 泄漏
+        deviceEnvObserver?.stop()
+        deviceEnvObserver = null
         micRecorder?.stop()
         micRecorder = null
         dispatcher = null
