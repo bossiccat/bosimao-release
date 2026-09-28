@@ -1,45 +1,86 @@
-/* Source: commercial-upgrade-SPEC.md v1.1 + commercial-upgrade-DESIGN.md
-   商业化改版 2026-09-16：白底 + 绿色品牌色（与移动端一致）
-   2026-09-25 v3 应用壳修订：暖中性灰阶 + 圆润三档圆角(10/14/20) + 新字阶 + 规范阴影
-   - 所有颜色来自 token，禁止硬编码
-   - 品牌绿 #16A34A（软底 #DCFCE7、深字 #052E16）
-   - 危险 #DC2626（软底 #FEF2F2、深字 #B91C1C）
-   - 正文 #17201B、次级 #5B6660、弱化 #9AA5A0、分隔线 #E7EAE8
-   - 软表面 #F7F8F7、凹陷面 #F1F3F1
-   - 圆角三档 10/14/20；阴影 0 1px 2px rgba(16,24,20,.05), 0 8px 24px rgba(16,24,20,.08) */
-:root {
-  /* A1 identity */
-  --bg: #ffffff;
-  --surface: #ffffff;
-  --surface-raised: #f4faf5;
-  --fg: #17201b;            /* 正文（v3 规范）：暖中性近黑 */
-  --muted: #5b6660;         /* 次级（v3 规范）：暖中性灰绿 */
-  --accent: #16a34a;        /* 品牌绿 */
-  --border: #d7e3da;
-  --font-display: "Noto Sans SC", "Segoe UI", sans-serif;
-  --font-body: "Noto Sans SC", "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", "Consolas", monospace;
+/* 贾克斯·星核 桌面端 — v4「暖瓷」设计 Token（规范 2026-09-28）
+   全部颜色来自 token，禁止硬编码。字体栈 / 字阶 / 色彩 / 材质 / 高程 / 圆角 / 缓动
+   严格对齐 outputs/2026-09-28-ui-design-spec-v4.md §2–§8。 */
 
-  /* A1 structure */
-  --text-xs: 0.75rem;
-  --text-sm: 0.875rem;
-  --text-base: 1rem;
-  --text-lg: 1.125rem;
-  --text-xl: 1.25rem;
-  --text-2xl: 1.5rem;
-  --text-3xl: 2rem;
-  --text-4xl: 2.5rem;
-  --text-caption: 12.5px;   /* v3 字阶：弱化正文 */
-  --text-label: 11px;       /* v3 字阶：标签/单位 */
-  --weight-read: 400;
-  --weight-emphasize: 510;
-  --weight-announce: 590;
+:root {
+  /* ── A1 identity ── */
+  --bg: #f5f5f1;
+  --surface: #ffffff;
+  --fg: #232823;
+  --muted: #646c61;
+  --accent: #21a45d;
+  --border: rgba(35, 43, 38, 0.10);
+  --border-soft: rgba(35, 43, 38, 0.06);
+  --border-strong: rgba(35, 43, 38, 0.18);
+
+  /* ── A2 品牌绿 / 吊牌金 / 语义 ── */
+  --accent-on: #ffffff;
+  --accent-hover: #188a4c;
+  --accent-active: #146e3e;
+  --accent-soft: #edf8f2;
+  --accent-ink: #0e4529;
+  --gold: #e3a93c;
+  --gold-ink: #c08a28;
+  --success: #21a45d;
+  --success-soft: #edf8f2;
+  --success-ink: #0e4529;
+  --warn: #b97a14;
+  --warn-soft: #fbf3e4;
+  --warn-ink: #7a5510;
+  --danger: #d64550;
+  --danger-soft: #fbebec;
+  --danger-ink: #a32e38;
+  --info: #2b8ca6;
+  --info-soft: #e7f2f6;
+  --focus: #21a45d;
+
+  /* ── B slot（中性层） ── */
+  --fg-2: #4c534b;
+  --fg-weak: #838b7f;
+  --surface-soft: #f5f5f1;
+  --surface-sunken: #ecede7;
+  --surface-raised: #f4faf5;
+  --surface-subtle: #f0f7f2;
+  --surface-interactive: var(--surface-raised);
+  --divider: rgba(35, 43, 38, 0.06);
+  --disabled-bg: #eef1ec;
+  --disabled-fg: #a8afa3;
+  --overlay: rgba(7, 24, 14, 0.44);
+
+  /* ── 字体栈 ── */
+  --font-display: "Resource Han Rounded SC", "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
+  --font-body: "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+
+  /* ── 字阶（9 级，size 仅记录；family/weight/tracking 见 shell.css 各组件） ── */
+  --text-caption: 11px;
+  --text-label: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-title: 16px;
+  --text-headline: 20px;
+  --text-metric: 22px;
+  --text-brand: 15px;
+
+  /* 保留：未受 v4 改动的旧字阶（关于 / 诊断 / 设备页沿用，避免回归） */
+  --text-xs: 12px;
+  --text-lg: 18px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+  --text-3xl: 32px;
+  --text-4xl: 40px;
   --leading-tight: 1.2;
   --leading-compact: 1.4;
   --leading-body: 1.6;
-  --tracking-display: -0.015em;
+  --leading-porcelain: 1.7;
+  --tracking-display: -0.01em;
   --tracking-body: 0;
-  --tracking-label: 0.02em;
+  --tracking-label: 0.06em;
+  --tracking-caption: 0.02em;
+  --tracking-metric: -0.02em;
+
+  /* ── 间距 ── */
   --space-0: 0;
   --space-1: 4px;
   --space-2: 8px;
@@ -52,15 +93,17 @@
   --space-12: 48px;
   --space-16: 64px;
   --space-20: 80px;
+
+  /* ── 圆角（3 档设计圆角 + 全圆 + 兼容档） ── */
   --radius-none: 0;
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
-  --radius-2xl: 20px;       /* v3 圆角档位：大 */
-  --radius-14: 14px;        /* v3 圆角档位：中 */
-  --radius-10: 10px;        /* v3 圆角档位：小 */
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+  --radius-panel: 22px;
   --radius-full: 9999px;
+
+  /* ── 容器 / 其它尺寸兼容 ── */
   --border-width: 1px;
   --container-compact: 384px;
   --container-settings: 720px;
@@ -76,55 +119,53 @@
   --icon-button: 20px;
   --icon-standalone: 24px;
 
-  /* A2 semantic */
-  --success: #16a34a;
-  --warn: #d97706;
-  --danger: #dc2626;        /* 危险主色 */
-  --danger-soft: #fef2f2;   /* v3 危险软底（浅红） */
-  --danger-ink: #b91c1c;    /* v3 危险深字 */
-  --info: #0e7490;
-  --accent-ink: #052e16;    /* 品牌绿深字（原 --fg 值，抽出为专用） */
-  --accent-soft: #dcfce7;   /* 品牌绿软底 */
-  --fg-weak: #9aa5a0;       /* v3 弱化文字 */
-  --focus: #16a34a;
-  --motion-instant: 80ms;
-  --motion-fast: 150ms;
+  /* ── 玻璃材质（§4.1） ── */
+  --mat-bg: linear-gradient(170deg, rgba(252, 252, 250, 0.90), rgba(244, 246, 241, 0.86));
+  --mat-filter: blur(24px) saturate(1.4);
+  --mat-edge: rgba(35, 43, 38, 0.12);
+  --mat-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.80);
+
+  /* ── 高程（四级，§4.2） ── */
+  --shadow-1: 0 1px 2px rgba(20, 26, 22, 0.05);
+  --shadow-2: 0 1px 2px rgba(20, 26, 22, 0.05), 0 4px 12px rgba(20, 26, 22, 0.07);
+  --shadow-3: 0 1px 2px rgba(20, 26, 22, 0.05), 0 6px 16px rgba(20, 26, 22, 0.08), 0 16px 40px rgba(20, 26, 22, 0.12);
+  --shadow-4: 0 2px 4px rgba(20, 26, 22, 0.06), 0 8px 24px rgba(20, 26, 22, 0.10), 0 28px 64px rgba(20, 26, 22, 0.18);
+
+  /* ── 渐变（§3.6，仅 4 条） ── */
+  --grad-panel: linear-gradient(180deg, #ffffff 0%, #fafaf7 100%);
+  --grad-dock: linear-gradient(165deg, rgba(255, 255, 255, 0.94) 0%, rgba(240, 243, 238, 0.90) 100%);
+  --grad-aura: radial-gradient(circle, color-mix(in srgb, var(--voice-color) 32%, transparent) 0%, transparent 70%);
+  --grad-ca-head: linear-gradient(180deg, #edf8f2 0%, rgba(237, 248, 242, 0) 100%);
+
+  /* ── 缓动（§6.1，5 条） ── */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-pop: cubic-bezier(0.34, 1.40, 0.64, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --ease-loop: cubic-bezier(0.45, 0, 0.55, 1);
+
+  /* ── 时长（§6.2，6 档） ── */
+  --motion-instant: 150ms;
+  --motion-active: 150ms;
+  /* 字面量收容（合格线 A5：组件层禁止散落硬编码色） */
+  --text-on-color: #ffffff;
+  --scrim: rgba(7, 24, 14, 0.44);
+  --ink-strong: #000000;
+  --motion-hover: 150ms;
+  --motion-menu: 120ms;
   --motion-base: 200ms;
   --motion-enter: 250ms;
   --motion-cross-screen: 300ms;
-  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
-  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
 
-  /* B slot */
-  --fg-2: var(--muted);
-  --accent-on: #ffffff;
-  --surface-soft: #f7f8f7;   /* v3 软表面（暖中性） */
-  --surface-sunken: #f1f3f1; /* v3 凹陷面（暖中性） */
-  --surface-subtle: #f0f7f2;
-  --surface-interactive: var(--surface-raised);
-  --border-soft: #e8f0ea;
-  --border-strong: #b9ccc0;
-  --divider: #e7eae8;        /* v3 分隔线（暖中性） */
-  --accent-hover: #15803d;
-  --accent-active: #166534;
-  --disabled-bg: #eef3ef;
-  --disabled-fg: #9aa8a0;
-  --overlay: #052e1673;
-  --elev-flat: none;
-  --elev-ring: 0 0 0 1px var(--border);
-  --elev-raised: 0 8px 24px #052e161a;
-  --elev-modal: 0 16px 40px #052e1624;
+  /* ── 焦点环（§5.1 双环） ── */
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px color-mix(in srgb, var(--accent) 55%, transparent);
 
-  /* v3 规范阴影：克制、暖中性投影 */
-  --shadow-sm: 0 1px 2px rgba(16, 24, 20, 0.05);
-  --shadow-card: 0 1px 2px rgba(16, 24, 20, 0.05), 0 8px 24px rgba(16, 24, 20, 0.08);
-
-  --focus-ring: 0 0 0 3px #16a34a59;
+  /* ── 按钮 / 输入 / 面板 兼容 token（保持旧面板不回归） ── */
   --button-primary-bg: var(--accent);
   --button-primary-fg: var(--accent-on);
   --button-primary-hover: var(--accent-hover);
   --button-primary-active: var(--accent-active);
-  --button-secondary-bg: var(--surface-raised);
+  --button-secondary-bg: var(--surface-soft);
   --button-secondary-fg: var(--fg);
   --button-danger-bg: var(--danger);
   --input-bg: var(--surface);
@@ -134,35 +175,110 @@
   --input-error-border: var(--danger);
   --panel-bg: var(--surface);
   --panel-border: var(--border);
-  --panel-radius: var(--radius-lg);
+  --panel-radius: var(--radius-panel);
   --panel-padding: var(--space-5);
+  --overlay-dim: rgba(7, 24, 14, 0.44);
 
-  /* C extension: product-specific voice status
-     状态色环契约（商业化 2026-09-16）：空闲=灰绿、聆听=绿、通话=深绿、错误=红 */
-  --voice-idle: #8fa69a;
-  --voice-connecting: #4ade80;
-  --voice-listening: #16a34a;
-  --voice-endpointing: #22c55e;
-  --voice-thinking: #15803d;
-  --voice-speaking: #166534;
+  /* ── 旧高程兼容（被新组件改用 --shadow-*，保留以免其它引用断裂） ── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: var(--shadow-3);
+  --elev-modal: var(--shadow-4);
+
+  /* ── 语音状态色（§3.9，覆盖 v3 契约） ── */
+  --voice-idle: #838b7f;
+  --voice-listening: #21a45d;
+  --voice-thinking: #2b8ca6;
+  --voice-speaking: #188a4c;
+  --voice-alerting: #d64550;
+  --voice-connecting: #47b585;
+  --voice-error: #d64550;
+  --voice-endpointing: #47b585;
   --voice-interrupted: var(--warn);
   --voice-recovering: var(--info);
-  --voice-error: var(--danger);
 
+  /* ── 层级 ── */
   --z-dropdown: 1000;
   --z-sticky: 1100;
   --z-modal: 1200;
   --z-toast: 1300;
 }
 
+/* 深色主题「夜檐」（§3.8） */
+:root[data-theme="dark"] {
+  --bg: #101412;
+  --surface: #191e1b;
+  --fg: #edf1ec;
+  --muted: #9aa69d;
+  --accent: #47b585;
+  --border: rgba(237, 241, 236, 0.10);
+  --border-soft: rgba(237, 241, 236, 0.06);
+  --border-strong: rgba(237, 241, 236, 0.18);
+
+  --accent-on: #0b2417;
+  --accent-hover: #7bcda9;
+  --accent-active: #ade1c8;
+  --accent-soft: rgba(71, 181, 133, 0.14);
+  --accent-ink: #ade1c8;
+  --gold: #f0be5a;
+  --gold-ink: #f7d489;
+  --success: #47b585;
+  --success-soft: rgba(71, 181, 133, 0.14);
+  --success-ink: #7bcda9;
+  --warn: #e8b85c;
+  --warn-soft: rgba(232, 184, 92, 0.14);
+  --warn-ink: #e8b85c;
+  --danger: #f0878e;
+  --danger-soft: rgba(240, 135, 142, 0.14);
+  --danger-ink: #f0878e;
+  --info: #6fb4c9;
+  --info-soft: rgba(111, 180, 201, 0.14);
+  --focus: #47b585;
+
+  --fg-2: #c6cec7;
+  --fg-weak: #838b7f;
+  --surface-soft: #1f2421;
+  --surface-sunken: #141815;
+  --surface-raised: #1f2622;
+  --surface-subtle: #1c221f;
+  --surface-interactive: var(--surface-raised);
+  --divider: rgba(237, 241, 236, 0.07);
+  --disabled-bg: #232925;
+  --disabled-fg: #5d665e;
+  --overlay: rgba(7, 24, 14, 0.58);
+
+  --mat-bg: linear-gradient(170deg, rgba(30, 35, 31, 0.88), rgba(24, 28, 25, 0.84));
+  --mat-filter: blur(24px) saturate(1.25);
+  --mat-edge: rgba(0, 0, 0, 0.45);
+  --mat-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.30);
+  --shadow-2: 0 1px 2px rgba(0, 0, 0, 0.30), 0 4px 12px rgba(0, 0, 0, 0.38);
+  --shadow-3: 0 1px 2px rgba(0, 0, 0, 0.30), 0 6px 16px rgba(0, 0, 0, 0.42), 0 16px 40px rgba(0, 0, 0, 0.50);
+  --shadow-4: 0 2px 4px rgba(0, 0, 0, 0.36), 0 8px 24px rgba(0, 0, 0, 0.50), 0 28px 64px rgba(0, 0, 0, 0.62);
+
+  --grad-panel: linear-gradient(180deg, #20251f 0%, #191e1b 100%);
+  --grad-dock: linear-gradient(165deg, rgba(36, 42, 38, 0.92) 0%, rgba(24, 28, 25, 0.88) 100%);
+  --grad-ca-head: linear-gradient(180deg, rgba(71, 181, 133, 0.16) 0%, rgba(71, 181, 133, 0) 100%);
+
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px color-mix(in srgb, var(--accent) 55%, transparent);
+
+  --button-secondary-bg: var(--surface-soft);
+  --input-bg: var(--surface);
+  --panel-bg: var(--surface);
+  --panel-border: var(--border);
+  --elev-raised: var(--shadow-3);
+  --elev-modal: var(--shadow-4);
+  --overlay-dim: rgba(7, 24, 14, 0.58);
+}
+
 :where(button, [role="button"], a, input, select, textarea):focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
+  outline: none;
   box-shadow: var(--focus-ring);
 }
 
 :where(button, [role="button"], a, input, select, textarea) {
-  transition-duration: var(--motion-fast);
+  transition-duration: var(--motion-hover);
   transition-timing-function: var(--ease-standard);
 }
 
@@ -177,16 +293,16 @@
   }
 }
 
-/* pet 商业化插画配色（2026-09-24 重做）— 颜色全部来自 token，禁止硬编码 */
+/* pet 插画配色（2026-09-24 重做）— 颜色全部来自 token，禁止硬编码 */
 :root {
-  --pet-fur-base: #fbfaf7;   /* 毛基色：暖白 */
-  --pet-fur-light: #ffffff;  /* 受光面 */
-  --pet-fur-shade: #e8ece6;  /* 背光面：带绿倾向中性灰 */
-  --pet-fur-deep: #cbd6cc;   /* 深阴影 */
-  --pet-outline: #5b6b60;    /* 描边：不许纯黑 */
-  --pet-inner: #e9b8b6;      /* 内耳 */
-  --pet-nose: #d98c8c;       /* 鼻 */
-  --pet-eye: #2b3a30;        /* 眼/虹膜 */
+  --pet-fur-base: #fbfaf7;
+  --pet-fur-light: #ffffff;
+  --pet-fur-shade: #e8ece6;
+  --pet-fur-deep: #cbd6cc;
+  --pet-outline: #5b6b60;
+  --pet-inner: #e9b8b6;
+  --pet-nose: #d98c8c;
+  --pet-eye: #2b3a30;
   --pet-collar: var(--accent);
-  --pet-tag: #f5c451;        /* 项圈吊牌 */
+  --pet-tag: #f5c451;
 }
