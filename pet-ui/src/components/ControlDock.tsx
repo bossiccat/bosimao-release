@@ -4,7 +4,7 @@
  *   给状态胶囊与按钮明确的视觉锚点（不再各自漂浮）。
  * - 三态模型由 App 的 controlsHidden 驱动；样式见 styles/shell.css。
  */
-import { EyeOff, Settings as SettingsIcon } from "lucide-react";
+import { EyeOff, Power, Settings as SettingsIcon } from "lucide-react";
 import { ConnectionBadge, type VoiceConnPhase } from "./ConnectionBadge";
 
 interface ControlDockProps {
@@ -12,6 +12,7 @@ interface ControlDockProps {
   voicePhase: VoiceConnPhase;
   onToggleSettings: () => void;
   onHidePet: () => void;
+  onQuit: () => void;
 }
 
 export function ControlDock({
@@ -19,6 +20,7 @@ export function ControlDock({
   voicePhase,
   onToggleSettings,
   onHidePet,
+  onQuit,
 }: ControlDockProps) {
   return (
     <div className="control-dock" data-hidden={controlsHidden}>
@@ -42,6 +44,17 @@ export function ControlDock({
         onClick={onHidePet}
       >
         <EyeOff size={16} strokeWidth={1.8} aria-hidden="true" />
+      </button>
+
+      <button
+        type="button"
+        className="quit-trigger"
+        aria-label="退出贾克斯"
+        onClick={() => {
+          if (window.confirm("退出贾克斯？")) onQuit();
+        }}
+      >
+        <Power size={16} strokeWidth={1.8} aria-hidden="true" />
       </button>
     </div>
   );

@@ -197,6 +197,7 @@ fn main() {
             window::set_ignore_cursor_events,
             window::get_sidecar_status,
             hide_pet,
+            quit_app,
             set_pet_size,
             install_trusted_ca,
             is_ca_install_required,
@@ -222,6 +223,14 @@ fn hide_pet(app: tauri::AppHandle) -> Result<(), String> {
         .get_webview_window("pet")
         .ok_or("pet window not found")?;
     win.hide().map_err(|e| e.to_string())
+}
+
+/// 退出应用（商业化 2026-09-28，用户实测暴露 P1：退出入口不可发现——
+/// 宠物右键无菜单、控制坞无退出按钮。现宠物右键菜单与控制坞均可退出）。
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
 }
 
 /// 内容驱动窗口尺寸（商业化 P0 修复 2026-09-02）：200x200 视口裁剪了全部

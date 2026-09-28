@@ -1,35 +1,58 @@
-/* 桌面端外壳与面板（第5节面板与控件 + 第6节工程约束）
-   所有样式由 design-tokens.css 的变量驱动；颜色只来自 token（#fff/#000 例外）。
-   本文件取代 App 与面板组件的运行时内联 <style>，统一收纳外壳布局与面板控件。 */
 
-/* ============================================================
-   1. 应用外壳布局（原 App.tsx 内联 <style> 抽出）
-   ============================================================ */
-/* 应用外壳：flex 垂直节奏（上留白 / 中主体 / 下 dock），空白即呼吸而非空缺 */
-.app-root {
-  height: 100vh;
+/* ── 宠物右键菜单（商业化 2026-09-28，用户实测 P1：退出入口不可发现）── */
+.pet-ctx-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+}
+
+.pet-ctx-menu {
+  position: fixed;
+  z-index: 91;
+  min-width: 172px;
+  padding: var(--space-1);
+  background: var(--surface);
+  border: var(--border-width) solid var(--panel-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-modal, var(--elev-raised));
+}
+
+.pet-ctx-item {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  overflow: hidden;
-}
-/* 故障态：顶部横幅占位，给主体让出上方空间（避免横幅压猫） */
-.app-root[data-fault="true"] {
-  padding-top: 48px;
-}
-
-/* 宠物本体：作为 flex 主体居中（垂直节奏的「中主体」） */
-.pet-anchor {
-  position: relative;
-  flex: 1 1 auto;
+  gap: var(--space-2);
   width: 100%;
-  min-height: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
 }
-/* pet-anchor--idle 仅作状态标记（居中由 flex 统一处理），不再单独定位 */
+
+.pet-ctx-item:hover {
+  background: var(--surface-subtle);
+}
+
+.pet-ctx-item--danger {
+  color: var(--danger);
+}
+
+.pet-ctx-item--danger:hover {
+  background: var(--danger-soft, rgba(220, 38, 38, 0.08));
+}
+
+.pet-ctx-sep {
+  height: var(--border-width);
+  margin: var(--space-1) var(--space-2);
+  background: var(--divider, var(--border-soft));
+}
+ */
 .pet-anchor:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;

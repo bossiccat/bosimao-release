@@ -14,8 +14,10 @@ import { ControlDock } from "./components/ControlDock";
 import { toVoicePhase } from "./components/ConnectionBadge";
 import { ErrorBanner, type Fault } from "./components/ErrorBanner";
 import { CaConfirm } from "./components/CaConfirm";
+import { PetContextMenu } from "./components/PetContextMenu";
 import { petMachine, type PetState } from "./state/petMachine";
 import { petStateToEvent } from "./state/petStateEvents";
+import { computeWindowSize } from "./lib/windowSize";
 import { wsClient } from "./state/wsClient";
 import "./styles/global.css";
 import "./styles/shell.css";
@@ -30,6 +32,7 @@ export default function App() {
   const [fault, setFault] = useState<Fault | null>(null);
   const [showCaConfirm, setShowCaConfirm] = useState(false);
   const [hovered, setHovered] = useState(false);
+  const [petCtx, setPetCtx] = useState<{ x: number; y: number } | null>(null);
   const wsFaultedRef = useRef(false);
 
   useEffect(() => {
@@ -124,24 +127,12 @@ export default function App() {
 
   useEffect(() => {
     if (!isTauri()) return;
-    let width = 200;
-    let height = 200;
-    if (showPanel) {
-      width = Math.max(width, 380);
-      height = Math.max(height, 480);
-    }
-    if (showSettings) {
-      width = Math.max(width, 380);
-      height = Math.max(height, 560);
-    }
-    if (showCaConfirm) {
-      width = Math.max(width, 400);
-      height = Math.max(height, 580);
-    }
-    if (fault) {
-      width = Math.max(width, 440);
-      height = Math.max(height, 220);
-    }
+    const { width, height } = computeWindowSize({
+      showPanel,
+      showSettings,
+      showCaConfirm,
+      fault: !!fault,
+    });
     invoke("set_pet_size", { width, height }).catch(() => {});
   }, [showPanel, showSettings, showCaConfirm, fault]);
 
@@ -214,6 +205,11 @@ export default function App() {
         aria-label="打开监控面板"
         onClick={togglePanel}
         onKeyDown={onAnchorKeyDown}
+        onContextMenu={(e) => {
+          // 商业化 2026-09-28（用户实测 P1：退出入口不可发现）：宠物右键菜单
+          e.preventDefault();
+          setPetCtx({ x: e.clientX, y: e.clientY });
+        }}
       >
         {isVoice ? (
           <VoiceOrb phase={machineState as VoicePhase} tone={tone} volume={0.5} />
@@ -246,7 +242,22 @@ export default function App() {
           setSettingsView("main");
         }}
         onHidePet={handleHidePet}
+        onQuit={() => invoke("quit_app").catch(() => {})}
       />
+
+      {petCtx && (
+        <PetContextMenu
+          x={petCtx.x}
+          y={petCtx.y}
+          onHide={handleHidePet}
+          onSettings={() => {
+            setShowSettings(true);
+            setSettingsView("main");
+          }}
+          onQuit={() => invoke("quit_app").catch(() => {})}
+          onClose={() => setPetCtx(null)}
+        />
+      )}
 
       {showSettings && (
         <div className="settings-slot" onClick={(e) => e.stopPropagation()}>
