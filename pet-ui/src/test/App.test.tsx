@@ -118,4 +118,16 @@ describe("App — 三态交互模型", () => {
     expect(pet.style.width).toBe("152px");
     expect(container.querySelector(".err-banner")).toHaveAttribute("data-place", "below");
   });
+
+  it("监控面板可关闭、可拖动，再点猫缩回", () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "打开监控面板" }));
+    const panel = screen.getByRole("dialog", { name: "监控面板" });
+    expect(panel.querySelector(".mp-head")).toHaveAttribute("data-tauri-drag-region");
+    fireEvent.click(screen.getByRole("button", { name: "关闭监控面板" }));
+    expect(screen.queryByRole("dialog", { name: "监控面板" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "打开监控面板" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开监控面板" }));
+    expect(screen.queryByRole("dialog", { name: "监控面板" })).toBeNull();
+  });
 });

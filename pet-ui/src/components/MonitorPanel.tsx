@@ -50,7 +50,7 @@ export function MonitorPanel({ sessions, onClose, onOpenSettings }: MonitorPanel
 
   return (
     <div className="monitor-panel" role="dialog" aria-label="监控面板">
-      <div className="mp-head">
+      <div className="mp-head" data-tauri-drag-region>
         <span className="mp-title">监控面板</span>
         {onClose && (
           <button type="button" className="mp-close" onClick={onClose} aria-label="关闭监控面板">

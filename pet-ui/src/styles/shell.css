@@ -523,6 +523,7 @@
 }
 .mp-head {
   position: relative;
+  cursor: grab;
   display: flex;
   justify-content: space-between;
   align-items: center;

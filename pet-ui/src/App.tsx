@@ -239,6 +239,7 @@ export default function App() {
         <div className="panel-slot" onClick={(e) => e.stopPropagation()}>
           <MonitorPanel
             sessions={sessions}
+            onClose={() => setShowPanel(false)}
             onOpenSettings={() => {
               setShowSettings(true);
               setSettingsView("main");
