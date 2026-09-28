@@ -100,8 +100,26 @@
   border-radius: var(--radius-full);
   box-shadow: var(--shadow-1);
 }
+.control-dock[data-motion="rise"][data-hidden="false"] .settings-trigger,
+.control-dock[data-motion="rise"][data-hidden="false"] .hide-trigger,
+.control-dock[data-motion="rise"][data-hidden="false"] .quit-trigger {
+  animation: dock-rise 180ms var(--ease-standard) both;
+}
+.control-dock[data-motion="rise"] .hide-trigger { animation-delay: 30ms; }
+.control-dock[data-motion="rise"] .quit-trigger { animation-delay: 60ms; }
 .control-dock[data-hidden="true"] {
   display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .control-dock[data-motion="rise"] .settings-trigger,
+  .control-dock[data-motion="rise"] .hide-trigger,
+  .control-dock[data-motion="rise"] .quit-trigger {
+    animation: none;
+  }
+}
+@keyframes dock-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .conn-badge-slot {
   display: inline-flex;

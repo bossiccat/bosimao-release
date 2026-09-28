@@ -198,6 +198,7 @@ export default function App() {
     >
       <div
         className={`pet-anchor${petCentered ? " pet-anchor--idle" : ""}`}
+        data-stage={petCentered ? "full" : undefined}
         role="button"
         tabIndex={0}
         aria-label="打开监控面板"

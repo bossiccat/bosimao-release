@@ -105,5 +105,7 @@ describe("App — 三态交互模型", () => {
     expect(pet.style.width).toBe("152px");
     expect(container.querySelector(".control-dock")).toHaveAttribute("data-layout", "feet");
     expect(document.querySelector(".conn-label")).toBeNull();
+    expect(container.querySelector(".pet-anchor")).toHaveAttribute("data-stage", "full");
+    expect(container.querySelector(".control-dock")).toHaveAttribute("data-motion", "rise");
   });
 });
