@@ -87,10 +87,14 @@ class DeviceService:
     # ---- register ----
 
     def register_device(self, pairing_code: str, device_name: str, platform: str,
-                        now: float | None = None) -> DeviceRegistration:
-        """原子消费配对码并注册设备；credential_secret 只返回一次"""
+                        now: float | None = None,
+                        device_id: str | None = None) -> DeviceRegistration:
+        """原子消费配对码并注册设备；credential_secret 只返回一次。
+
+        windows 可由客户端指定 device_id（桌宠启动前已落盘）。其它平台忽略该参数。
+        """
         ts = time.time() if now is None else now
-        device_id = str(uuid.uuid4())
+        device_id = device_id or str(uuid.uuid4())
         credential_id = str(uuid.uuid4())
         secret = secrets.token_urlsafe(32)
         expires_at = ts + CREDENTIAL_TTL_DAYS * 86400

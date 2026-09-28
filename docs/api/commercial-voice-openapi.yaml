@@ -1246,7 +1246,7 @@ components:
       required: [platform]
       properties:
         device_name_hint: { type: string, minLength: 1, maxLength: 80 }
-        platform: { type: string, enum: [android] }
+        platform: { type: string, enum: [android, windows] }
     PairingCodeData:
       type: object
       additionalProperties: false
@@ -1286,7 +1286,7 @@ components:
           writeOnly: true
           description: bootstrap 认证主体；与 X-Request-Nonce 一同原子消费。
         device_name: { type: string, minLength: 1, maxLength: 80 }
-        platform: { type: string, enum: [android] }
+        platform: { type: string, enum: [android, windows] }
     RegisteredDeviceData:
       type: object
       additionalProperties: false

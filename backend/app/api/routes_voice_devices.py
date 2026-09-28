@@ -27,13 +27,15 @@ logger = logging.getLogger(__name__)
 
 class CreatePairingCodeRequest(BaseModel):
     device_name_hint: str | None = Field(None, min_length=1, max_length=80)
-    platform: str = Field(..., pattern="^(android)$")
+    platform: str = Field(..., pattern="^(android|windows)$")
 
 
 class RegisterDeviceRequest(BaseModel):
     pairing_code: str = Field(..., min_length=20, max_length=256)
     device_name: str = Field(..., min_length=1, max_length=80)
-    platform: str = Field(..., pattern="^(android)$")
+    platform: str = Field(..., pattern="^(android|windows)$")
+    # 仅 windows 生效：桌宠启动前已经写好设备号，注册必须沿用它，否则进房对不上。
+    device_id: str | None = Field(None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class RevokeDeviceRequest(BaseModel):
@@ -119,7 +121,10 @@ def build_device_router(*, store, validator, nonces, limiter,
         if denied is not None:
             return denied
         try:
-            reg = devices.register_device(req.pairing_code, req.device_name, req.platform)
+            requested_id = req.device_id if req.platform == "windows" else None
+            reg = devices.register_device(
+                req.pairing_code, req.device_name, req.platform, device_id=requested_id,
+            )
         except PairingInvalidError:
             return error(40901)
         data = {

@@ -198,6 +198,58 @@ def test_register_success_secret_returned_once_and_usable(fx: _Fixture) -> None:
     assert session.json()["data"]["scene"] == "trtc_full_duplex"
 
 
+def test_windows_register_keeps_client_device_id(fx: _Fixture) -> None:
+    pairing = fx.client.post(
+        "/api/v1/voice/devices/pairing-code",
+        json={"platform": "windows", "device_name_hint": "this-pc"},
+        headers=fx.owner_headers(_nonce()),
+    )
+    code = pairing.json()["data"]["pairing_code"]
+    wanted = "pc-local-fixed"
+    registered = fx.client.post(
+        "/api/v1/voice/devices/register",
+        json={
+            "pairing_code": code,
+            "device_name": "this-pc",
+            "platform": "windows",
+            "device_id": wanted,
+        },
+        headers={"X-Request-Nonce": _nonce()},
+    )
+    assert registered.status_code == 201, registered.text
+    assert registered.json()["data"]["device_id"] == wanted
+
+
+def test_windows_device_can_register_and_issue_session(fx: _Fixture) -> None:
+    pairing = fx.client.post(
+        "/api/v1/voice/devices/pairing-code",
+        json={"platform": "windows", "device_name_hint": "this-pc"},
+        headers=fx.owner_headers(_nonce()),
+    )
+    assert pairing.status_code == 200, pairing.text
+    code = pairing.json()["data"]["pairing_code"]
+    registered = fx.client.post(
+        "/api/v1/voice/devices/register",
+        json={"pairing_code": code, "device_name": "this-pc", "platform": "windows"},
+        headers={"X-Request-Nonce": _nonce()},
+    )
+    assert registered.status_code == 201, registered.text
+    data = registered.json()["data"]
+    session = fx.client.post(
+        "/api/v1/voice/session",
+        json={"device_id": data["device_id"], "entry_point": "main"},
+        headers=fx.device_headers(data["device_id"], data["credential_secret"], _nonce()),
+    )
+    assert session.status_code == 201, session.text
+    assert session.json()["data"]["user_id"] == data["device_id"]
+    rejected = fx.client.post(
+        "/api/v1/voice/devices/pairing-code",
+        json={"platform": "ios"},
+        headers=fx.owner_headers(_nonce()),
+    )
+    assert rejected.status_code == 422
+
+
 def test_register_consumed_pairing_rejected_and_no_second_device(fx: _Fixture) -> None:
     code, _ = _create_pairing(fx)
     first = _register(fx, code, device_name="phone-a")

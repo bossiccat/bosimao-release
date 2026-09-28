@@ -38,7 +38,7 @@ const ELECTRON_REQUIRED = [
 // 发布路径）。2026-09-19 补 3 个漂移项（adev.js / downlink_pacer.js / resample.js，分别被
 // rtc.js:28 / rtc.js:15 / audio.js:19 require）：补齐是纠正而非放宽。
 const APP_SOURCES = [
-  'adev.js', 'audio.js', 'bridge.js', 'config.js', 'downlink_pacer.js', 'exit-protocol.js',
+  'adev.js', 'audio.js', 'bridge.js', 'config.js', 'desktop-loop.js', 'downlink_pacer.js', 'exit-protocol.js',
   'index.html', 'intent-recovery.js', 'intent-selection.js', 'logger.js',
   'main.js', 'phone.js', 'resample.js', 'rtc-startup.js', 'rtc-termination.js',
   'rtc-test-audio.js', 'rtc.js',

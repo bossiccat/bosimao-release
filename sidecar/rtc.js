@@ -437,7 +437,7 @@ function getSdkVersion() {
 // ---------- 入口 ----------
 async function main() {
   log('BOOT', `role=${ARGS.role}`);
-  if (ARGS.invalid || !['sidecar', 'phone'].includes(ARGS.role)) {
+  if (ARGS.invalid || !['sidecar', 'phone', 'desktop'].includes(ARGS.role)) {
     log('FATAL', 'SIDECAR_INVALID_ARGS');
     requestRendererExit('fatal');
     return;
@@ -465,6 +465,21 @@ async function main() {
 
   if (ARGS.role === 'phone') {
     require('./phone').runPhone(cloud, log);
+    return;
+  }
+
+  if (ARGS.role === 'desktop') {
+    if (!ARGS.device) {
+      log('FATAL', 'DESKTOP_DEVICE_REQUIRED');
+      requestRendererExit('fatal');
+      return;
+    }
+    if (!(process.env.VOICE_DESKTOP_DEVICE_CREDENTIAL || '')) {
+      log('FATAL', 'DESKTOP_DEVICE_CREDENTIAL_MISSING');
+      requestRendererExit('fatal');
+      return;
+    }
+    require('./desktop-loop').runDesktop(cloud, log);
     return;
   }
 

@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 
 const SIDECAR_USER_ID = 'jax-pc-sidecar';
-const VALID_ROLES = new Set(['sidecar', 'phone']);
+const VALID_ROLES = new Set(['sidecar', 'phone', 'desktop']);
 
 function loadEnv() {
   const envPath = path.resolve(__dirname, '..', '.env');
@@ -66,6 +66,13 @@ function validateStartup(args, runtimeEnv) {
   if (args.role === 'sidecar') {
     if (args.device !== undefined) return 'SIDECAR_UNEXPECTED_DEVICE_ARG';
     if (!runtimeEnv.VOICE_SIDECAR_CREDENTIAL) return 'SIDECAR_CREDENTIAL_MISSING';
+    return null;
+  }
+  if (args.role === 'desktop') {
+    if (!args.device) return 'DESKTOP_DEVICE_REQUIRED';
+    if (!(runtimeEnv.VOICE_DESKTOP_DEVICE_CREDENTIAL || '')) {
+      return 'DESKTOP_DEVICE_CREDENTIAL_MISSING';
+    }
     return null;
   }
   if (!args.device) return 'PHONE_DEVICE_REQUIRED';

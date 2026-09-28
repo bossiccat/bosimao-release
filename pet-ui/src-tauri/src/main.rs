@@ -37,11 +37,48 @@ const DEFAULT_CONTROL_PLANE_URL: &str =
     "https://jax-voice-api-283963-7-1436773060.sh.run.tcloudbase.com";
 
 /// sidecar 启动参数。`--sign-url` 取构建期覆盖值，缺省用现役云端控制面。
+/// 本机设备号只生成一次，写在用户配置目录。换号等于换房间，云端对端会对不上。
+fn desktop_device_id() -> String {
+    let base = std::env::var("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let path = base.join("com.jax.pet").join("desktop-device-id");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() && trimmed.len() <= 64 {
+            return trimmed.to_string();
+        }
+    }
+    let id = format!("pc-{}", uuid_v4_simple());
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, &id);
+    id
+}
+
+fn uuid_v4_simple() -> String {
+    let mut bytes = [0u8; 16];
+    // getrandom 0.2 的公开入口是 getrandom()，没有 fill()。
+    getrandom::getrandom(&mut bytes).expect("desktop device id entropy");
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    )
+}
+
 fn sidecar_args() -> Vec<String> {
     let base = option_env!("JAX_CONTROL_PLANE_URL")
         .unwrap_or(DEFAULT_CONTROL_PLANE_URL)
         .trim_end_matches('/');
-    vec!["--role=sidecar".to_string(), format!("--sign-url={base}")]
+    vec![
+        "--role=desktop".to_string(),
+        format!("--device={}", desktop_device_id()),
+        format!("--sign-url={base}"),
+    ]
 }
 const WATCHDOG_HEALTHY_AFTER: Duration = Duration::from_secs(30);
 const COMPILED_MANIFEST_SHA256: &str = env!("JAX_SIDECAR_MANIFEST_SHA256");
@@ -167,6 +204,11 @@ fn main() {
                     SidecarSupervisor::unresolved(error.to_string())
                 }
             };
+            // desktop 角色用管理员身份向云端注册本机设备。凭证只进环境，不进 argv。
+            // 缺失时不阻断启动：说话进程会因拿不到凭证而自己退出，watchdog 再试。
+            if let Ok(owner) = WindowsCredentialStore::owner().load_active() {
+                std::env::set_var(jax_pet::credential::OWNER_CREDENTIAL_ENV, owner.expose());
+            }
             let mut service = SidecarCredentialService::new(WindowsCredentialStore::sidecar());
             let initial_start_failed = if let Err(error) = service.start_initial(&mut supervisor) {
                 eprintln!("sidecar initial start blocked: {error:?}");
