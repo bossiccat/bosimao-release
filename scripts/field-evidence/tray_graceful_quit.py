@@ -223,7 +223,9 @@ def main():
     graceful = None
     if menu_opened:
         q = None
-        for _ in range(30):
+        # 2026-09-28：菜单项枚举等待 3s 实测不够（INCONCLUSIVE，菜单在高负载下
+        # 打开更慢）——加长到 10s。仅加长观察窗，不改变判定逻辑。
+        for _ in range(100):
             q = find_quit()
             if q:
                 break
