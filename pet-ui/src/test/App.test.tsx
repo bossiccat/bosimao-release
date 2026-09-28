@@ -17,10 +17,15 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(() => {}),
 }));
+const connListeners = new Set<(state: string) => void>();
+
 vi.mock("../state/wsClient", () => ({
   wsClient: {
     on: () => () => {},
-    onConn: () => () => {},
+    onConn: (listener: (state: string) => void) => {
+      connListeners.add(listener);
+      return () => connListeners.delete(listener);
+    },
     connect: () => {},
     close: () => {},
     control: () => {},
@@ -117,6 +122,15 @@ describe("App — 三态交互模型", () => {
     const pet = container.querySelector(".pet") as HTMLElement;
     expect(pet.style.width).toBe("152px");
     expect(container.querySelector(".err-banner")).toHaveAttribute("data-place", "below");
+  });
+
+  it("没有手机会话时，不把废弃的本机监控通道显示成控制面中断", () => {
+    render(<App />);
+    act(() => {
+      connListeners.forEach((listener) => listener("reconnecting"));
+    });
+    expect(screen.queryByText(/控制面/)).toBeNull();
+    expect(document.querySelector(".err-banner")).toBeNull();
   });
 
   it("监控面板可关闭、可拖动，再点猫缩回", () => {

@@ -100,22 +100,10 @@ export default function App() {
         }
       }
     });
-    // 控制面断线 → AC-20 分类故障提示（2 秒内可感知）
-    const offConn = wsClient.onConn((state) => {
-      if (state === "reconnecting" && !wsFaultedRef.current) {
-        wsFaultedRef.current = true;
-        setFault({
-          category: "ws",
-          reason: "与后端控制面断开，正在自动重连",
-          actionLabel: "立即重连",
-          action: "reconnect",
-        });
-      }
-      if (state === "open") {
-        wsFaultedRef.current = false;
-        setFault(null);
-      }
-    });
+    // 本机 /ws/pet 是已废弃的截屏监控通道，云端语音控制面没有这条接口。
+    // 断线只代表「没有旧监控后端」，不能再显示成「控制面连接中断」。
+    // 语音是否可用由 sidecar 轮询云端 /session/pending 决定，不走这条 WebSocket。
+    const offConn = wsClient.onConn(() => {});
     wsClient.connect();
     return () => {
       off();
