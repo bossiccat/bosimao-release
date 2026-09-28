@@ -1,106 +1,102 @@
 /**
- * 连接状态徽章 — 双层状态（2026-08-13 UI 商业化升级，AC-20）
+ * 连接状态徽章 — 状态胶囊（§5.1 / §5.8）
  *
- * 上层：WS 控制面连接（connecting / open / reconnecting）
- * 下层：语音全双工会话体验态（idle / connecting / listening / thinking /
- *       speaking / recovering / error）
- *
- * 状态呈现不依赖颜色：图标 + 文字标签（可访问性契约 §7）。
- * 第5节规格：单行状态胶囊，图标 16px，高 32px。样式见 styles/shell.css。
+ * 胶囊 = 控制面小点（ws）+ 语音状态点（voice 色 + aura/blink）+ 声波条（speaking）+ 文字。
+ * 状态呈现不依赖颜色对比：点色 + 文字标签（可访问性契约 §7）。
+ * 语音四态视觉：listening/connecting/alerting → aura 呼吸；thinking → 三闪；speaking → 声波条。
  */
 import { useEffect, useState } from "react";
-import {
-  Wifi,
-  WifiOff,
-  LoaderCircle,
-  AudioLines,
-  CircleAlert,
-  RefreshCw,
-  PowerOff,
-  type LucideIcon,
-} from "lucide-react";
 import { wsClient, type WsConnState } from "../state/wsClient";
 import type { PetState } from "../state/petMachine";
 
 export type VoiceConnPhase =
   | "idle"
   | "connecting"
-  | "session"
+  | "listening"
+  | "thinking"
+  | "speaking"
+  | "alerting"
   | "error"
   | "recovering";
 
 interface VoiceMeta {
-  icon: LucideIcon;
   label: string;
-  tone: "neutral" | "active" | "danger" | "warn";
 }
 
 function voiceMeta(phase: VoiceConnPhase): VoiceMeta {
   switch (phase) {
     case "connecting":
-      return { icon: LoaderCircle, label: "语音连接中", tone: "active" };
-    case "session":
-      return { icon: AudioLines, label: "语音会话中", tone: "active" };
+      return { label: "语音连接中" };
+    case "listening":
+      return { label: "聆听中" };
+    case "thinking":
+      return { label: "思考中" };
+    case "speaking":
+      return { label: "说话中" };
+    case "alerting":
+      return { label: "需要注意" };
     case "error":
-      return { icon: CircleAlert, label: "语音故障", tone: "danger" };
+      return { label: "语音故障" };
     case "recovering":
-      return { icon: RefreshCw, label: "恢复中", tone: "warn" };
+      return { label: "恢复中" };
     default:
-      return { icon: PowerOff, label: "语音待机", tone: "neutral" };
+      return { label: "空闲" };
   }
 }
 
-/** 由语音体验态映射到连接阶段（idle/connecting 之外的会话态归为 session） */
+/** 由语音体验态映射到连接阶段（§5.8 四态 + 连接/恢复/故障） */
 export function toVoicePhase(state: PetState): VoiceConnPhase {
   switch (state) {
     case "connecting":
       return "connecting";
+    case "listening":
+    case "endpointing":
+    case "interrupted":
+      return "listening";
+    case "thinking":
+      return "thinking";
+    case "speaking":
+      return "speaking";
     case "recovering":
       return "recovering";
     case "error":
       return "error";
-    case "idle":
-      return "idle";
     default:
-      return "session"; // listening/endpointing/thinking/speaking/interrupted
+      return "idle";
   }
 }
 
 function wsMeta(state: WsConnState) {
   switch (state) {
     case "open":
-      return { icon: Wifi, label: "已连接", tone: "ok" as const };
+      return { tone: "ok" as const, label: "已连接" };
     case "reconnecting":
-      return { icon: WifiOff, label: "重连中", tone: "warn" as const };
+      return { tone: "warn" as const, label: "重连中" };
     default:
-      return { icon: LoaderCircle, label: "连接中", tone: "neutral" as const };
+      return { tone: "neutral" as const, label: "连接中" };
   }
 }
 
-export function ConnectionBadge({
-  voicePhase,
-}: {
-  voicePhase: VoiceConnPhase;
-}) {
+export function ConnectionBadge({ voicePhase }: { voicePhase: VoiceConnPhase }) {
   const [ws, setWs] = useState<WsConnState>(() => wsClient.getConnState());
-
   useEffect(() => wsClient.onConn(setWs), []);
 
   const v = voiceMeta(voicePhase);
   const w = wsMeta(ws);
-  const VoiceIcon = v.icon;
-  const WsIcon = w.icon;
 
   return (
-    <div className="conn-badge" role="status" aria-live="polite">
-      <span className={`conn-ws tone-${w.tone}`} title={`控制面：${w.label}`}>
-        <WsIcon size={16} strokeWidth={2} aria-hidden="true" />
-        {w.label}
-      </span>
-      <span className={`conn-voice tone-${v.tone}`} title={`语音：${v.label}`}>
-        <VoiceIcon size={16} strokeWidth={2} aria-hidden="true" />
-        {v.label}
-      </span>
+    <div className="conn-badge" role="status" aria-live="polite" data-phase={voicePhase}>
+      <span className="conn-ws-dot" data-tone={w.tone} title={`控制面：${w.label}`} />
+      <span className="conn-dot" />
+      {voicePhase === "speaking" && (
+        <span className="conn-bars" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+          <i />
+        </span>
+      )}
+      <span className="conn-label">{v.label}</span>
     </div>
   );
 }

@@ -146,7 +146,6 @@ export default function App() {
     if (action === "restart-voice") wsClient.control("restart_voice");
     setFault(null);
   };
-
   const machineState = snapshot.value as PetState;
   const isVoice =
     machineState === "listening" || machineState === "thinking" || machineState === "speaking";
@@ -189,7 +188,6 @@ export default function App() {
   const handleToggleTarget = (appId: string, enabled: boolean) => {
     wsClient.control(enabled ? "start_monitoring" : "stop_monitoring", appId);
   };
-
   return (
     <div
       className="app-root"
@@ -226,7 +224,13 @@ export default function App() {
 
       {showPanel && (
         <div className="panel-slot" onClick={(e) => e.stopPropagation()}>
-          <MonitorPanel sessions={sessions} />
+          <MonitorPanel
+            sessions={sessions}
+            onOpenSettings={() => {
+              setShowSettings(true);
+              setSettingsView("main");
+            }}
+          />
         </div>
       )}
 
@@ -242,7 +246,7 @@ export default function App() {
           setSettingsView("main");
         }}
         onHidePet={handleHidePet}
-        onQuit={() => invoke("quit_app").catch(() => {})}
+        onConfirmQuit={() => invoke("quit_app").catch(() => {})}
       />
 
       {petCtx && (

@@ -1,5 +1,49 @@
-/* 全局样式（深色开发者环境）— Phase 2 设计 Token（Task 12：切换 design-tokens.css，弃用旧 tokens.css） */
+/* 全局样式 — v4「暖瓷」：先声明自托管字体，再引入 token。
+   字体文件见 src/assets/fonts/，按 UI 字符集子集化（≤120KB/权重）。 */
 @import "./design-tokens.css";
+
+@font-face {
+  font-family: "Resource Han Rounded SC";
+  src: url("../assets/fonts/ResourceHanRoundedSC-Medium.subset.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Resource Han Rounded SC";
+  src: url("../assets/fonts/ResourceHanRoundedSC-Bold.subset.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Noto Sans SC";
+  src: url("../assets/fonts/NotoSansSC-Regular.subset.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Noto Sans SC";
+  src: url("../assets/fonts/NotoSansSC-Medium.subset.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Noto Sans SC";
+  src: url("../assets/fonts/NotoSansSC-Bold.subset.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../assets/fonts/JetBrainsMono-Regular.subset.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../assets/fonts/JetBrainsMono-SemiBold.subset.woff2") format("woff2");
+  font-weight: 600;
+  font-display: swap;
+}
 
 * {
   margin: 0;

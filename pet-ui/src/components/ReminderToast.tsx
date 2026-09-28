@@ -2,12 +2,11 @@
  * 提醒气泡 — 与 docs/SPEC.md §4.2 / DESIGN.md 四级打扰契约一致
  * - role="alert" + aria-live="assertive"（屏幕阅读器即时播报）
  * - 手动关闭钮 + 可配置自动消失（默认 8s）
- * - 状态点表达语义色（不采用 border-left 彩色条反模式）
- * - 阴影走 --elev-raised token（Task 12 design-tokens）
- * 第5节规格：白底卡片 + --elev-raised。样式见 styles/shell.css。
+ * - 状态点表达语义色（不采用彩色竖条反模式）
+ * - 阴影走 --shadow-3 token；样式见 styles/shell.css .reminder-toast。
  */
 import { useEffect } from "react";
-import { X } from "lucide-react";
+import { BellRing, X } from "lucide-react";
 
 export interface AlertData {
   app_id: string;
@@ -51,10 +50,13 @@ export function ReminderToast({ alert, onDismiss, autoDismissMs = 8000 }: Remind
       aria-label={`${alert.app_id} ${label}提醒`}
     >
       <div className="rt-head">
+        <span className="rt-chapter" aria-hidden="true">
+          <BellRing size={14} strokeWidth={1.75} />
+        </span>
         <span className="rt-dot" data-tone={tone} aria-hidden="true" />
         <span className="rt-title">{alert.app_id} · {label}</span>
         <button type="button" className="rt-close" onClick={onDismiss} aria-label="关闭提醒">
-          <X size={14} strokeWidth={2} aria-hidden="true" />
+          <X size={14} strokeWidth={1.75} aria-hidden="true" />
         </button>
       </div>
       <div className="rt-body">{alert.summary}</div>
