@@ -29,12 +29,21 @@ vi.mock("../state/wsClient", () => ({
 }));
 
 import App from "../App";
+import { clampMenuPosition } from "../components/PetContextMenu";
 
 beforeEach(() => {
   cleanup();
 });
 
 describe("App — 三态交互模型", () => {
+  it("右键菜单位置在 200×200 微窗内始终完整可见", () => {
+    vi.stubGlobal("innerWidth", 200);
+    vi.stubGlobal("innerHeight", 200);
+    expect(clampMenuPosition(199, 199)).toEqual({ x: 16, y: 42 });
+    expect(clampMenuPosition(0, 0)).toEqual({ x: 4, y: 4 });
+    vi.unstubAllGlobals();
+  });
+
   it("idle 态：设置/隐藏控件隐藏（data-hidden=true），徽章隐藏", () => {
     render(<App />);
     const settings = screen.getByRole("button", { name: "打开设置" });

@@ -14,7 +14,7 @@ import { ControlDock } from "./components/ControlDock";
 import { toVoicePhase } from "./components/ConnectionBadge";
 import { ErrorBanner, type Fault } from "./components/ErrorBanner";
 import { CaConfirm } from "./components/CaConfirm";
-import { PetContextMenu } from "./components/PetContextMenu";
+import { PetContextMenu, clampMenuPosition } from "./components/PetContextMenu";
 import { petMachine, type PetState } from "./state/petMachine";
 import { petStateToEvent } from "./state/petStateEvents";
 import { computeWindowSize } from "./lib/windowSize";
@@ -204,9 +204,9 @@ export default function App() {
         onClick={togglePanel}
         onKeyDown={onAnchorKeyDown}
         onContextMenu={(e) => {
-          // 商业化 2026-09-28（用户实测 P1：退出入口不可发现）：宠物右键菜单
+          // 商业化 2026-09-28（P1 退出入口）+ clamp 防 200×200 微窗裁切
           e.preventDefault();
-          setPetCtx({ x: e.clientX, y: e.clientY });
+          setPetCtx(clampMenuPosition(e.clientX, e.clientY));
         }}
       >
         {isVoice ? (

@@ -14,6 +14,13 @@ export interface PetContextMenuProps {
   onClose: () => void;
 }
 
+/** 200×200 微窗防裁切：菜单宽 ~172px + 8px 边距，越界则向内收。 */
+export function clampMenuPosition(x: number, y: number): { x: number; y: number } {
+  const maxX = window.innerWidth - 184;
+  const maxY = window.innerHeight - 158;
+  return { x: Math.max(4, Math.min(x, maxX)), y: Math.max(4, Math.min(y, maxY)) };
+}
+
 export function PetContextMenu({
   x,
   y,
