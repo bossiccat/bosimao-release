@@ -35,7 +35,7 @@ export function ErrorBanner({
   const Icon = meta.icon;
 
   return (
-    <div className="err-banner" role="alert">
+    <div className="err-banner" role="alert" data-place="below">
       <Icon className="err-icon" size={16} strokeWidth={1.75} aria-hidden="true" />
       <div className="err-text">
         <span className="err-title">{meta.title}</span>

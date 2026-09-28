@@ -7,7 +7,7 @@
  * - 面板打开期间控件保持可见（在放大窗口中可操作）
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, act } from "@testing-library/react";
 
 // Tauri IPC / 事件 / WS 客户端全部 mock（jsdom 无 Tauri 运行时）
 vi.mock("@tauri-apps/api/core", () => ({
@@ -107,5 +107,15 @@ describe("App — 三态交互模型", () => {
     expect(document.querySelector(".conn-label")).toBeNull();
     expect(container.querySelector(".pet-anchor")).toHaveAttribute("data-stage", "full");
     expect(container.querySelector(".control-dock")).toHaveAttribute("data-motion", "rise");
+  });
+
+  it("故障提示落在角色下方，角色比例保持 152", () => {
+    const { container } = render(<App />);
+    act(() => {
+      (window as Window & { __jaxShowFault?: () => void }).__jaxShowFault?.();
+    });
+    const pet = container.querySelector(".pet") as HTMLElement;
+    expect(pet.style.width).toBe("152px");
+    expect(container.querySelector(".err-banner")).toHaveAttribute("data-place", "below");
   });
 });

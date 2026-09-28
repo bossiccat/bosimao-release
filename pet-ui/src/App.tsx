@@ -159,7 +159,7 @@ export default function App() {
   const petCentered =
     controlsHidden || !!fault || !(showPanel || showSettings || showCaConfirm);
   // 角色始终是主角：悬停不再缩小给工具条让位。故障矮窗仍用 96。
-  const petSize = isAlerting ? 176 : fault ? 96 : 152;
+  const petSize = isAlerting ? 176 : 152;
 
   // 监控目标：与 config/monitors.yaml 对齐（session 到达后以实际 app_name 为准）
   const targets = useMemo<MonitorTarget[]>(() => {
@@ -193,6 +193,18 @@ export default function App() {
       className="app-root"
       data-fault={!!fault}
       data-tauri-drag-region
+      ref={(node) => {
+        if (!import.meta.env.VITEST) return;
+        (window as Window & { __jaxShowFault?: () => void }).__jaxShowFault = node
+          ? () =>
+              setFault({
+                category: "ws",
+                reason: "与后端控制面断开，正在自动重连",
+                actionLabel: "立即重连",
+                action: "reconnect",
+              })
+          : undefined;
+      }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >

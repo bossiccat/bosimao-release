@@ -28,8 +28,8 @@ export function computeWindowSize(inputs: WindowSizeInputs): {
     height = Math.max(height, 580);
   }
   if (inputs.fault) {
-    width = Math.max(width, 440);
-    height = Math.max(height, 220);
+    width = Math.max(width, 280);
+    height = Math.max(height, 292);
   }
   return { width, height };
 }

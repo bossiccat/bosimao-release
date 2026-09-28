@@ -411,7 +411,7 @@
    ───────────────────────────────────────────── */
 .err-banner {
   position: fixed;
-  top: 12px;
+  top: 176px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 60;
