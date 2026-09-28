@@ -66,7 +66,7 @@ describe("App — 三态交互模型", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开监控面板" }));
     // 面板出现：MonitorPanel 标题渲染（sessions 为空时显示空态提示）
     expect(screen.getByText("监控面板")).toBeInTheDocument();
-    expect(screen.getByText(/暂无监控目标/)).toBeInTheDocument();
+    expect(screen.getByText(/还没有可监控的目标/)).toBeInTheDocument();
     // 面板打开期间控件不隐藏
     expect(screen.getByRole("button", { name: "打开设置" }).closest("[data-hidden]")).toHaveAttribute(
       "data-hidden",

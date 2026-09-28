@@ -36,7 +36,7 @@ export function ErrorBanner({
 
   return (
     <div className="err-banner" role="alert">
-      <Icon className="err-icon" size={16} strokeWidth={2} aria-hidden="true" />
+      <Icon className="err-icon" size={16} strokeWidth={1.75} aria-hidden="true" />
       <div className="err-text">
         <span className="err-title">{meta.title}</span>
         <span className="err-reason">{fault.reason}</span>
@@ -46,7 +46,7 @@ export function ErrorBanner({
           {fault.actionLabel}
         </button>
         <button type="button" className="err-dismiss" onClick={onDismiss} aria-label="关闭提示">
-          <X size={13} strokeWidth={2} aria-hidden="true" />
+          <X size={14} strokeWidth={1.75} aria-hidden="true" />
           <span>关闭</span>
         </button>
       </div>
