@@ -25,7 +25,7 @@ export function ControlDock({
   const [confirmingQuit, setConfirmingQuit] = useState(false);
 
   return (
-    <div className="control-dock" data-hidden={controlsHidden}>
+    <div className="control-dock" data-hidden={controlsHidden} data-layout="feet">
       <div className="conn-badge-slot" data-hidden={controlsHidden}>
         <ConnectionBadge voicePhase={voicePhase} />
       </div>

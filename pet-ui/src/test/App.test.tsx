@@ -96,4 +96,14 @@ describe("App — 三态交互模型", () => {
     const pet = container.querySelector(".pet") as HTMLElement;
     expect(pet.style.opacity).toBe("0.9");
   });
+
+  it("悬停不缩小角色：脚边动作浮出，常态不显示状态文字", () => {
+    const { container } = render(<App />);
+    const pet = container.querySelector(".pet") as HTMLElement;
+    expect(pet.style.width).toBe("152px");
+    fireEvent.mouseEnter(container.querySelector(".app-root") as HTMLElement);
+    expect(pet.style.width).toBe("152px");
+    expect(container.querySelector(".control-dock")).toHaveAttribute("data-layout", "feet");
+    expect(document.querySelector(".conn-label")).toBeNull();
+  });
 });

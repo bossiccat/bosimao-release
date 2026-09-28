@@ -75,24 +75,30 @@
    ───────────────────────────────────────────── */
 .control-dock {
   position: absolute;
-  bottom: 8px;
+  bottom: 6px;
   left: 50%;
   transform: translateX(-50%);
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  width: calc(100% - 16px);
+  justify-content: center;
+  gap: 8px;
+  width: auto;
   max-width: 184px;
-  height: 46px;
-  padding: 6px;
-  border-radius: var(--radius-panel);
-  background: var(--mat-bg);
-  -webkit-backdrop-filter: var(--mat-filter);
-  backdrop-filter: var(--mat-filter);
-  border: 1px solid var(--mat-edge);
-  box-shadow: var(--mat-highlight), var(--shadow-3);
+  height: auto;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   z-index: 30;
-  transition: opacity var(--motion-hover) var(--ease-standard);
+}
+.control-dock[data-layout="feet"] .settings-trigger,
+.control-dock[data-layout="feet"] .hide-trigger,
+.control-dock[data-layout="feet"] .quit-trigger {
+  background: var(--mat-bg);
+  border: 1px solid var(--mat-edge);
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-1);
 }
 .control-dock[data-hidden="true"] {
   display: none;

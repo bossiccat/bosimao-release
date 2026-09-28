@@ -158,8 +158,8 @@ export default function App() {
   // 垂直节奏构图：idle / 故障 / 仅 hover（无面板）时猫居中作为主体；面板/设置/CA 打开时让位（隐藏于其下）
   const petCentered =
     controlsHidden || !!fault || !(showPanel || showSettings || showCaConfirm);
-  // 猫主体尺寸：idle 152 充满；出现控件时收小以避免与底部 dock 重叠；故障态 96 适配矮窗
-  const petSize = isAlerting ? 176 : controlsHidden ? 152 : fault ? 96 : 120;
+  // 角色始终是主角：悬停不再缩小给工具条让位。故障矮窗仍用 96。
+  const petSize = isAlerting ? 176 : fault ? 96 : 152;
 
   // 监控目标：与 config/monitors.yaml 对齐（session 到达后以实际 app_name 为准）
   const targets = useMemo<MonitorTarget[]>(() => {

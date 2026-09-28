@@ -96,7 +96,7 @@ export function ConnectionBadge({ voicePhase }: { voicePhase: VoiceConnPhase }) 
           <i />
         </span>
       )}
-      <span className="conn-label">{v.label}</span>
+      {voicePhase !== "idle" && <span className="conn-label">{v.label}</span>}
     </div>
   );
 }
