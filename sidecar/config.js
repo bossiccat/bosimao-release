@@ -70,7 +70,9 @@ function validateStartup(args, runtimeEnv) {
   }
   if (args.role === 'desktop') {
     if (!args.device) return 'DESKTOP_DEVICE_REQUIRED';
-    if (!(runtimeEnv.VOICE_DESKTOP_DEVICE_CREDENTIAL || '')) {
+    // 设备凭证可以是上次注册留下的，也可以由 desktop-loop 用管理员凭证现场注册。
+    // 两者都没有才是真的无法开会话。
+    if (!(runtimeEnv.VOICE_DESKTOP_DEVICE_CREDENTIAL || runtimeEnv.VOICE_OWNER_CREDENTIAL || '')) {
       return 'DESKTOP_DEVICE_CREDENTIAL_MISSING';
     }
     return null;

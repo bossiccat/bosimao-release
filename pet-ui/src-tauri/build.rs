@@ -63,6 +63,7 @@ fn emit_rerun_rules(manifest_dir: &Path) {
         "../../sidecar/audio.js",
         "../../sidecar/bridge.js",
         "../../sidecar/config.js",
+        "../../sidecar/desktop-loop.js",
         "../../sidecar/exit-protocol.js",
         "../../sidecar/index.html",
         "../../sidecar/logger.js",

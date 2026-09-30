@@ -11,6 +11,10 @@ pub const SIDECAR_CREDENTIAL_MAX_BYTES: usize = 512;
 pub const OWNER_CREDENTIAL_TARGET: &str = "JaxPet/com.jax.pet/voice-owner/v1";
 pub const OWNER_CREDENTIAL_ENV: &str = "VOICE_OWNER_CREDENTIAL";
 
+// 本机设备凭证与 sidecar（云端对端）分开。desktop 角色用它向控制面开会话，
+// 明文只进子进程环境，不进 argv。
+pub const DESKTOP_DEVICE_CREDENTIAL_ENV: &str = "VOICE_DESKTOP_DEVICE_CREDENTIAL";
+
 pub struct SecretString(Zeroizing<String>);
 
 impl SecretString {

@@ -474,7 +474,7 @@ async function main() {
       requestRendererExit('fatal');
       return;
     }
-    if (!(process.env.VOICE_DESKTOP_DEVICE_CREDENTIAL || '')) {
+    if (!(process.env.VOICE_DESKTOP_DEVICE_CREDENTIAL || process.env.VOICE_OWNER_CREDENTIAL || '')) {
       log('FATAL', 'DESKTOP_DEVICE_CREDENTIAL_MISSING');
       requestRendererExit('fatal');
       return;
