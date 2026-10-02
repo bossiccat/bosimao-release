@@ -3,6 +3,7 @@
 //! 唯一职责：externalBin 存在性与 SHA-256 校验、固定参数启动、单实例、
 //! 优雅退出（stdin shutdown 行）与超时强制终止。不链接 TRTC、不处理 PCM。
 
+use std::io::PipeWriter;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -70,6 +71,16 @@ pub struct SidecarSupervisor {
     spec: Option<SidecarSpec>,
     resolve_error: Option<String>,
     child: Option<Child>,
+    /// 父进程持有的 sidecar stdin 写端。
+    ///
+    /// 2026-10-02 os error 231 修复：`Stdio::piped()` 在 Windows 上经
+    /// `NtCreateNamedPipeFile` + `NtOpenFile`（\Device\NamedPipe\ 单向实例，
+    /// 子进程端请求 GENERIC_READ）创建；在命名管道打开被安全软件策略改写的
+    /// 宿主上（读打开放行、写打开拒绝的策略恰好相反的组合）该序列 100% 返回
+    /// ERROR_PIPE_BUSY(231)，spawn 在 CreateProcessW 之前失败 → 首启弹窗。
+    /// 改用 `std::io::pipe()`（kernel32 `CreatePipe` 双工实现）+ `Stdio::from`
+    /// 句柄包装：子进程拿到读端，父进程持有写端写 shutdown 行，语义不变。
+    child_stdin: Option<PipeWriter>,
     state: SidecarState,
     /// 解析成功时持有的 generation 租约，存活到 child 退出。
     lease: Option<GenerationLease>,
@@ -88,6 +99,7 @@ impl SidecarSupervisor {
             spec: Some(spec),
             resolve_error: None,
             child: None,
+            child_stdin: None,
             state: SidecarState::Stopped,
             lease: None,
         }
@@ -99,6 +111,7 @@ impl SidecarSupervisor {
             spec: Some(spec),
             resolve_error: None,
             child: None,
+            child_stdin: None,
             state: SidecarState::Stopped,
             lease: Some(lease),
         }
@@ -111,6 +124,7 @@ impl SidecarSupervisor {
             spec: None,
             resolve_error: Some(diagnostic),
             child: None,
+            child_stdin: None,
             state: SidecarState::Stopped,
             lease: None,
         }
@@ -208,6 +222,14 @@ impl SidecarSupervisor {
         };
         #[cfg(not(windows))]
         let mut cmd = Command::new(&binary_path);
+        // stdin 管道（os error 231 修复，2026-10-02）：
+        // `Stdio::piped()` 的 NT 单向管道序列（子进程端 GENERIC_READ 相对打开）
+        // 在命名管道策略被改写的宿主上 100% 返回 ERROR_PIPE_BUSY(231)。
+        // `std::io::pipe()` 走 kernel32 `CreatePipe` 双工实现，不受影响；
+        // 子进程拿读端（Stdio::From<PipeReader> 纯句柄包装，不经 NT 序列），
+        // 父进程持写端，shutdown 行语义与 `piped()` 完全一致。
+        let (stdin_read, stdin_write) =
+            std::io::pipe().map_err(|e| SidecarError::SpawnFailed(format!("stdin pipe: {e}")))?;
         let child = cmd
             .args(&args)
             .current_dir(&current_dir)
@@ -222,12 +244,13 @@ impl SidecarSupervisor {
             // 由上面 .env 显式注入，不依赖宿主继承。
             .env_remove("ELECTRON_RUN_AS_NODE")
             .env_remove("NODE_OPTIONS")
-            .stdin(Stdio::piped())
+            .stdin(Stdio::from(stdin_read))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| SidecarError::SpawnFailed(e.to_string()))?;
         self.child = Some(child);
+        self.child_stdin = Some(stdin_write);
         self.state = SidecarState::Running;
         Ok(())
     }
@@ -236,14 +259,16 @@ impl SidecarSupervisor {
     /// 返回最终退出码（0 = 优雅，非 0 = 被终止）。
     pub fn stop(&mut self) -> Result<i32, SidecarError> {
         let mut child = self.child.take().ok_or(SidecarError::NotRunning)?;
+        // 优雅停止：向父进程持有的 stdin 写端写 shutdown 行。
+        // 写端随后被 drop 关闭 → 子进程读完该行后得到 EOF（与旧 piped() 语义一致）。
+        if let Some(mut stdin_write) = self.child_stdin.take() {
+            let _ = std::io::Write::write_all(&mut stdin_write, b"shutdown\n");
+        }
         let graceful_timeout = self
             .spec
             .as_ref()
             .map(|spec| spec.graceful_timeout)
             .unwrap_or_default();
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = std::io::Write::write_all(&mut stdin, b"shutdown\n");
-        }
         let deadline = Instant::now() + graceful_timeout;
         let code = loop {
             if let Some(status) = child
@@ -273,6 +298,8 @@ impl SidecarSupervisor {
         match child.try_wait().ok()? {
             Some(status) => {
                 self.state = SidecarState::Stopped;
+                // child 已退出：stdin 写端同步释放，避免句柄残留影响下次 start。
+                self.child_stdin.take();
                 // child 已退出：显式释放 generation 租约。
                 self.lease.take();
                 Some(status.code().unwrap_or(-1))
