@@ -1,6 +1,6 @@
 {
   "claim_id": "windows-popup-free",
-  "state": "Review",
+  "state": "Verified",
   "owner": "impl-team",
   "reviewer": "independent-qa",
   "risk": "客户 Windows 交互桌面出现产品后代命令窗口",
@@ -47,6 +47,13 @@
       "installer": "outputs/jax-pet-setup-1.0.0-x64-20261003-6e0db63.exe",
       "installer_sha256": "41bf5afbc16b4816a4fbc9dbd767c24b43d0096a55367b1fc8a063ee875eae07",
       "note": "被测 jax-pet.exe（payload sha256 04bc56b7…，11306496 B）由该 NSIS 安装包静默安装产生；源码 commit 6e0db63c30d860ffe33b09727b11756a9aaaff05（sidecar.rs std::io::pipe 修复）。"
+    },
+    {
+      "kind": "independent-review",
+      "verdict": "APPROVE",
+      "reviewer": "independent-qa",
+      "reviewed_utc": "2026-10-03T10:20:00Z",
+      "note": "独立评审员实际执行六项验证并全部通过：(1) 重算两份证据文件 sha256 与 claim 逐字节一致（另实测尺子两副本 sha256=8cb80eb6…/15333B 一致）；(2) 重算装机 jax-pet.exe sha256=04bc56b7… 与 target 一致，git cat-file 确认 commit 6e0db63c 存在且 sidecar.rs +31/-4；(3) 独立解析 samples JSON 全部 51 采样：S1–S6 可见控制台窗口=0/孤儿=0/probe_trusted=True，唯一非零(all=2)在 S0 阳性自检；(4) 亲读 %LOCALAPPDATA%/Temp/jax-pe/legacy_tasks_probe.json 确认 verdict=LEGACY_TASKS_ABSENT、gate 五项全过，接受 S5 修正为实质 PASS；(5) 未覆盖项不构成阻断（本机正是曾 100% 复现 os error 231 的敌对宿主机，在此 PASS 是最严格检验）；(6) 测量非空集 0（S1 product_windows=32，含正常 GUI 类）。签核：无 REJECT 阻断项。"
     }
   ],
   "superseded_by": null
