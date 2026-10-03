@@ -1,6 +1,6 @@
 {
   "claim_id": "windows-popup-free",
-  "state": "Verified",
+  "state": "Review",
   "owner": "impl-team",
   "reviewer": "independent-qa",
   "risk": "客户 Windows 交互桌面出现产品后代命令窗口",
@@ -54,6 +54,13 @@
       "reviewer": "independent-qa",
       "reviewed_utc": "2026-10-03T10:20:00Z",
       "note": "独立评审员实际执行六项验证并全部通过：(1) 重算两份证据文件 sha256 与 claim 逐字节一致（另实测尺子两副本 sha256=8cb80eb6…/15333B 一致）；(2) 重算装机 jax-pet.exe sha256=04bc56b7… 与 target 一致，git cat-file 确认 commit 6e0db63c 存在且 sidecar.rs +31/-4；(3) 独立解析 samples JSON 全部 51 采样：S1–S6 可见控制台窗口=0/孤儿=0/probe_trusted=True，唯一非零(all=2)在 S0 阳性自检；(4) 亲读 %LOCALAPPDATA%/Temp/jax-pe/legacy_tasks_probe.json 确认 verdict=LEGACY_TASKS_ABSENT、gate 五项全过，接受 S5 修正为实质 PASS；(5) 未覆盖项不构成阻断（本机正是曾 100% 复现 os error 231 的敌对宿主机，在此 PASS 是最严格检验）；(6) 测量非空集 0（S1 product_windows=32，含正常 GUI 类）。签核：无 REJECT 阻断项。"
+    },
+    {
+      "kind": "audit-rework",
+      "verdict": "DOWNGRADE_TO_REVIEW",
+      "auditor": "independent-audit-wave3",
+      "audited_utc": "2026-10-03T11:30:00Z",
+      "note": "应用户要求对该 claim 做全链条复审（三路独立审计：修复代码质量/取证方法学与免疫边界/遗留搁置项）。复审发现一个 P1：(场景6) tray 优雅退出路径从未真实执行——六场景取证中该场景只覆盖 WM_CLOSE(close-to-hide) 与 taskkill 强杀近似，报告明示『tray quit → app.exit(0) 那条路径是空白，不得据此声称已覆盖』；此前 APPROVE 评审第 5 条以『未覆盖项不构成阻断』接受，恰为 release-harness.md:68 明文禁止的『已接受的限定也算过』档位，该 APPROVE 被复审推翻。回退 Review。补证约束（已实测）：本取证会话 GetCursorPos 返回 ACCESS_DENIED(0x5)，产品 tray wndproc 在光标查询失败时直接 return，托盘菜单在无光标会话物理上无法打开（含真实鼠标与全部自动化手段，2026-09-24/27/28 三次历史尝试同因失败），故 tray 优雅退出只能由用户在真实交互桌面亲手执行取证。其余复审结论：修复为机制根治非环境绕过（5/12 测试真实覆盖新路径，句柄生命周期无泄漏）；自家生产代码免疫边界完整（o020 测试文件残留 Stdio::piped 但被 credential-test-support feature gate 排除不进生产）；14 僵尸进程系旧版本遗弃物，新版本六场景起停孤儿=0 实证无复发机制；X: subst 已随重启消失；360 归因悬置不影响取证有效性但外推边界应声明为『仅覆盖同型 NPFS 读拒策略，异构安全软件机制未检验』；判据盲区（非控制台类弹窗不可见）与 claim risk 字面（『命令窗口』）一致、与 claim 名称（popup-free）不完全一致，需声明。"
     }
   ],
   "superseded_by": null
