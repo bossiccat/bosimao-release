@@ -1,12 +1,12 @@
 {
   "claim_id": "windows-popup-free",
-  "state": "EvidencePending",
+  "state": "Review",
   "owner": "impl-team",
   "reviewer": "independent-qa",
   "risk": "客户 Windows 交互桌面出现产品后代命令窗口",
   "target": {
-    "artifact_commit": "",
-    "artifact_sha256": "",
+    "artifact_commit": "6e0db63c30d860ffe33b09727b11756a9aaaff05",
+    "artifact_sha256": "04bc56b735d5b949cc8344c972e1355076e16b05867cf21770fdf25e20b8424e",
     "artifact": "packaged jax-pet.exe -> Tauri SidecarSupervisor -> jax-rtc-sidecar.exe"
   },
   "required_scenarios": [
@@ -18,6 +18,36 @@
     "正常退出后重启"
   ],
   "legacy_tasks": ["Jax-Watchdog-AtStartup", "Jax-Watchdog-Every5Min", "jax-watchdog"],
-  "evidence": [],
+  "evidence": [
+    {
+      "kind": "field-evidence-report",
+      "path": "outputs/2026-10-03-windows-popup-free-field-evidence.md",
+      "sha256": "d6ff03f65cb066360963b8cb7e6e53fd812db7fbd25724cb6ff3deb30f79e20f",
+      "size": 26603,
+      "captured_utc": "2026-10-03T09:39:34Z/09:56:49Z",
+      "note": "六场景现场取证（装机形态），含补充证据章节（S5 计划任务 LEGACY_TASKS_ABSENT + FAIL 归因修正：6/6 场景核心判据达标）。执行器 scripts/field-evidence/run_field_evidence_1003.py，探针 win_popup_capture.py（sha256 8cb80eb6979b1c0fdd6058e9599d50d00c115240b5f4e93642e5405737b2050e），尺子自检阳性 +2 / 阴性 -2。"
+    },
+    {
+      "kind": "field-evidence-samples",
+      "path": "outputs/2026-10-03-windows-popup-free-field-samples.json",
+      "sha256": "140f50a5e4a664b7899d41aa45fdf0bc24ba43dcb5c06ac0248e7e706e55351c",
+      "size": 473201,
+      "captured_utc": "2026-10-03T09:39:34Z/09:56:49Z",
+      "note": "六场景全部原始采样（进程树/窗口谱系/健康探针/stderr 计数），S5 含 21 次采样跨度 675s。"
+    },
+    {
+      "kind": "scheduled-tasks-probe",
+      "path": "%LOCALAPPDATA%/Temp/jax-pe/legacy_tasks_probe.json",
+      "verdict": "LEGACY_TASKS_ABSENT",
+      "probe_utc": "2026-10-03T09:57:26Z",
+      "note": "三只 legacy 任务与阴性对照不可区分地 ABSENT，gate 五项全过；probe_legacy_tasks.ps1 只读探针，PowerShell 直调补跑（脚本内 python→powershell 通道被执行环境拦截，详见报告补充章节 A）。"
+    },
+    {
+      "kind": "artifact-chain",
+      "installer": "outputs/jax-pet-setup-1.0.0-x64-20261003-6e0db63.exe",
+      "installer_sha256": "41bf5afbc16b4816a4fbc9dbd767c24b43d0096a55367b1fc8a063ee875eae07",
+      "note": "被测 jax-pet.exe（payload sha256 04bc56b7…，11306496 B）由该 NSIS 安装包静默安装产生；源码 commit 6e0db63c30d860ffe33b09727b11756a9aaaff05（sidecar.rs std::io::pipe 修复）。"
+    }
+  ],
   "superseded_by": null
 }
