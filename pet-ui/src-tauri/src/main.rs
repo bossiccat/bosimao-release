@@ -133,6 +133,15 @@ fn main() {
             // 原 config 建窗无法挂 on_navigation —— 用户实测 webview 被导航到
             // 站外页面（闲鱼风控页）在 200x200 无边框窗里渲染 = 内容失控。
             // 迁移后导航白名单见 jax_pet::navigation（fail-closed）。
+            //
+            // 冷启动方框修复（2026-10-04 用户实测）：`.visible(true)` 下窗口
+            // 创建即显示，而 WebView2 controller 异步创建完成前窗口内容为空，
+            // 桌面裸露窗口类背景刷 = 用户看到灰色方框（探针实测：窗口
+            // visible 后 ~57-60ms 方框期，帧色单色灰 RGB(171,168,167)）。
+            // 业界标准 hide-until-first-frame：先隐藏，页面加载完成
+            // （on_page_load Finished）后再 show + set_focus，方框期对用户不可见。
+            // 防御：只对本页 index.html 的导航 show（避免假想的空白页
+            // Finished 触发过早 show 让方框回归；show 幂等，重复触发无害）。
             let pet_window = tauri::WebviewWindowBuilder::new(
                 app,
                 "pet",
@@ -146,13 +155,25 @@ fn main() {
             .skip_taskbar(true)
             .resizable(false)
             .shadow(false)
-            .visible(true)
+            .visible(false)
             .on_navigation(|url| {
                 let allowed = jax_pet::navigation::is_allowed_navigation(url.as_str());
                 if !allowed {
                     eprintln!("pet webview navigation blocked: {url}");
                 }
                 allowed
+            })
+            .on_page_load(|win, payload| {
+                // 注：WebviewUrl::App("index.html") 会被 tauri 归一化为 app 根 URL
+                // （manager/webview.rs "ignore index.html just to simplify the url"），
+                // 实际导航 path 是 "/"；显式 index.html 路径一并覆盖，防未来改路由后失效。
+                let path = payload.url().path();
+                if payload.event() == tauri::webview::PageLoadEvent::Finished
+                    && (path == "/" || path.ends_with("index.html"))
+                {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
             })
             .build()?;
             let _ = pet_window; // label "pet" 供 get_webview_window 使用
