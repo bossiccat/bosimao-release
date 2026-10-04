@@ -146,9 +146,14 @@ app.whenReady().then(async () => {
   win.webContents.session.webRequest.onErrorOccurred((details) => {
     diagLog(`[net] ${details.resourceType} ${details.url} -> ${details.error}`);
   });
-  win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
-    if (level >= 2) {
-      diagLog(`[console:${level}] ${sourceId}:${line} ${message}`);
+  // Electron 35 起 console-message 回调签名变更（对象参数 + level 数字变字符串，
+  // 见 electron#41613 / docs api web-contents 'console-message'）：
+  //   旧: (event, level: number, message, line, sourceId)
+  //   新: ({ level: 'info'|'warning'|'error'|'debug', message, lineNumber, sourceId, frame })
+  // 本仓 electron 精确 pin 43.4.1，直接按新签名；warning+error 与旧 level>=2 语义对齐。
+  win.webContents.on('console-message', ({ level, message, lineNumber, sourceId }) => {
+    if (level === 'warning' || level === 'error') {
+      diagLog(`[console:${level}] ${sourceId}:${lineNumber} ${message}`);
     }
   });
   win.webContents.on('render-process-gone', fatalMain);
