@@ -271,8 +271,32 @@ fn hide_pet(app: tauri::AppHandle) -> Result<(), String> {
 /// 宠物右键无菜单、控制坞无退出按钮。现宠物右键菜单与控制坞均可退出）。
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
-    app.exit(0);
+    stop_sidecar_and_exit(&app);
     Ok(())
+}
+
+/// 退出前优雅停止 sidecar（2026-10-04 tray 退出 sidecar 孤儿缺陷修复）。
+///
+/// 缺陷实锤：用户右键托盘「退出」后 jax-pet.exe 退出，但 sidecar 全树
+/// （1 主 + 3 子）成为孤儿永久残留——两个退出入口（此处与 tray.rs "quit"）
+/// 都是裸 `app.exit(0)`，而 `app.exit` 直接终止进程、不运行 managed state
+/// 的 Drop，supervisor 的 stop() 从未被调用。6e0db63c 修好了 stop() 的
+/// stdin 管道机制，但退出路径没人调用它。
+///
+/// 修复：退出前经 service.stop()（含 restart_allowed=false，防 watchdog 在
+/// 退出窗口期竞争重启）走 supervisor.stop() 写 shutdown 行优雅停止，再 exit。
+fn stop_sidecar_and_exit(app: &tauri::AppHandle) {
+    let supervisor_state = app.state::<Mutex<SidecarSupervisor>>();
+    let service_state = app.state::<Mutex<SidecarCredentialService<WindowsCredentialStore>>>();
+    if let (Ok(mut supervisor), Ok(mut service)) = (supervisor_state.lock(), service_state.lock()) {
+        if supervisor.state() == jax_pet::sidecar::SidecarState::Running {
+            match service.stop(&mut supervisor) {
+                Ok(()) => eprintln!("sidecar stopped gracefully on quit"),
+                Err(error) => eprintln!("sidecar stop on quit failed: {error:?}"),
+            }
+        }
+    }
+    app.exit(0);
 }
 
 /// 内容驱动窗口尺寸（商业化 P0 修复 2026-09-02）：200x200 视口裁剪了全部

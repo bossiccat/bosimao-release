@@ -30,7 +30,9 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false);
     tray_builder = tray_builder.on_menu_event(|app, event| match event.id.as_ref() {
-        "quit" => app.exit(0),
+        // 2026-10-04 tray 退出 sidecar 孤儿缺陷修复：退出前先优雅停止 sidecar
+        // （裸 app.exit(0) 不运行 managed state 的 Drop，sidecar 全树孤儿残留）。
+        "quit" => crate::stop_sidecar_and_exit(app),
         "show" => toggle_window(app),
         "sidecar_toggle" => toggle_sidecar(app),
         "autostart_toggle" => toggle_autostart(app),

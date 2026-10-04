@@ -27,6 +27,28 @@ ipcMain.on(EXIT_CHANNEL, (_event, payload) => exitArbiter.decide(payload));
 process.on('uncaughtException', fatalMain);
 process.on('unhandledRejection', fatalMain);
 process.on('SIGTERM', () => exitArbiter.decide({ kind: 'controlled' }));
+
+// 父进程优雅停机通道（2026-10-04 tray 退出 sidecar 孤儿缺陷修复，JS 侧配套）：
+// 此前 shutdown 行是死信通道——本进程从不读 stdin，supervisor.stop() 写完行
+// 只能等 graceful_timeout 超时后 kill（且 kill 只杀 Electron 主进程，子进程
+// 仍有残留风险）。现在两条触发路径都收敛到受控退出：
+//   1) 行内容含 "shutdown" —— 父进程 jax-pet.exe 经 supervisor.stop() 写入；
+//   2) stdin 'end'（EOF）—— 父进程死亡/被强杀时管道写端关闭，sidecar 自行
+//      退出，兜底杜绝一切形式的孤儿残留。
+// 生产 spawn 恒为管道（sidecar.rs Stdio::from(PipeReader)），不会出现立即 EOF；
+// 开发态终端直跑时 stdin 是 TTY，Ctrl+D 才 EOF，不误伤。
+try {
+  let stdinShutdownBuf = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    stdinShutdownBuf += chunk;
+    if (stdinShutdownBuf.includes('shutdown')) exitArbiter.decide({ kind: 'controlled' });
+  });
+  process.stdin.on('end', () => exitArbiter.decide({ kind: 'controlled' }));
+  process.stdin.resume();
+} catch (_) {
+  // stdin 不可用时维持现状：依赖父进程侧 stop() 的超时强杀兜底。
+}
 app.disableHardwareAcceleration();
 // 2026-09-02 GPU 沙箱修复：部分环境（本机实测复现）GPU 进程沙箱初始化失败 →
 // Chromium 连试 6 次 "GPU process exited unexpectedly: exit_code=1" 后

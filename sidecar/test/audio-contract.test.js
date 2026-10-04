@@ -100,9 +100,13 @@ test('SIGTERM 后 Electron 主进程退出', { timeout: 60000 }, async () => {
   );
   let stderr = '';
   child.stderr.on('data', (d) => { stderr += d; });
+  // exit 监听必须在任何等待之前注册（2026-10-04）：main.js 的 stdin EOF 兜底
+  // （父进程死亡时管道关闭 → sidecar 自退）在 stdio='ignore'（NUL 设备立即
+  // EOF）下会让进程在下方 6s 等待窗口内就自行退出——事件不回放，晚注册 =
+  // 永久假超时。进程提前退出也符合「进程会退出」的契约（code=0 优雅路径）。
+  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
   await new Promise((r) => setTimeout(r, 6000)); // 等待主进程就绪
   // Windows 下子进程可能持有 stdio 管道（GPU/renderer），'close' 会延迟——用 'exit' 判定进程退出
-  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
   child.kill('SIGTERM');
   const res = await Promise.race([exited, new Promise((_, rej) => setTimeout(() => rej(new Error(`SIGTERM 后 20s 未退出\nstderr=${stderr}`)), 20000))]);
   // 契约 = SIGTERM 后进程退出（超时即失败）；Windows 下 Node 的 SIGTERM 为 TerminateProcess 语义
