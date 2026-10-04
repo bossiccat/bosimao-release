@@ -27,6 +27,7 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let tray_icon = app.default_window_icon().cloned();
     let mut tray_builder = TrayIconBuilder::new()
         .icon(tray_icon.ok_or_else(|| tauri::Error::AssetNotFound("tray icon".into()))?)
+        .tooltip("贾克斯 · 星核")
         .menu(&menu)
         .show_menu_on_left_click(false);
     tray_builder = tray_builder.on_menu_event(|app, event| match event.id.as_ref() {
