@@ -33,9 +33,11 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -384,6 +386,15 @@ class BridgeSupervisor:
         #    `role=sidecar` 带 --device 会被判 SIDECAR_UNEXPECTED_DEVICE_ARG 并退出
         #    （config.js:64 / rtc.js:364；--device 只属于 role=phone）。
         #    实测：容器因此崩溃重启，且该错误只能靠产品自报才看到。
+        #
+        # 优雅停机走 shutdown 文件信号（2026-10-05 Electron 43 stdin 双回归迁移，
+        # 见 sidecar/main.js）：sidecar 500ms 轮询该文件，出现即受控退出。
+        # SIGTERM 打在 xvfb-run 包装进程上触达不到 Electron 进程树，此文件是
+        # 唯一能优雅触达 sidecar 本体的通道；路径唯一（pid + uuid），防撞名。
+        self.sidecar_shutdown_file = os.path.join(
+            tempfile.gettempdir(),
+            f"jax-sidecar-{os.getpid()}-{uuid.uuid4().hex}.shutdown",
+        )
         self.sidecar = Child(
             "sidecar",
             [
@@ -403,7 +414,7 @@ class BridgeSupervisor:
                 f"--sign-url={self.sign_url}",
             ],
             SIDECAR_DIR,
-            {},
+            {"JAX_SIDECAR_SHUTDOWN_FILE": self.sidecar_shutdown_file},
             # 打开渲染进程日志后行数陡增，尾部窗口放大一倍多，保证"进房失败 errCode="
             # 这类一行定生死的死因不会被高频状态行挤出 /status.sidecar.output_tail。
             tail_lines=300,
@@ -553,6 +564,15 @@ class BridgeSupervisor:
 
     def terminate_all(self) -> None:
         self.shutting_down = True
+        # 先写 shutdown 文件：sidecar（Electron）轮询到即受控退出。SIGTERM 只能
+        # 触达 xvfb-run 包装进程，杀不到真正的 Electron 进程树——优雅路径必须
+        # 走文件信号（2026-10-05 E43 stdin 双回归迁移）。写入失败不阻断后续
+        # SIGTERM/强杀路径。
+        try:
+            with open(self.sidecar_shutdown_file, "w", encoding="utf-8"):
+                pass
+        except OSError:
+            pass
         for child in self._children():
             child.signal(signal.SIGTERM)
         deadline = time.monotonic() + 10
@@ -560,6 +580,11 @@ class BridgeSupervisor:
             while child.alive() and time.monotonic() < deadline:
                 time.sleep(0.2)
             child.signal(signal.SIGKILL)
+        # 清理信号文件，防临时目录残留（幂等）。
+        try:
+            os.remove(self.sidecar_shutdown_file)
+        except OSError:
+            pass
 
     def watch(self) -> None:
         """任一子进程退出即进入宽限期，然后以非零码退出（由平台重启）。

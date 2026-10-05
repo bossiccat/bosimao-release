@@ -1,7 +1,7 @@
 //! sidecar.rs — Tauri/Rust supervisor（ADR-017）。
 //!
 //! 唯一职责：externalBin 存在性与 SHA-256 校验、固定参数启动、单实例、
-//! 优雅退出（stdin shutdown 行）与超时强制终止。不链接 TRTC、不处理 PCM。
+//! 优雅退出（shutdown 文件信号）与超时强制终止。不链接 TRTC、不处理 PCM。
 
 use std::io::PipeWriter;
 use std::path::{Path, PathBuf};
@@ -71,7 +71,7 @@ pub struct SidecarSupervisor {
     spec: Option<SidecarSpec>,
     resolve_error: Option<String>,
     child: Option<Child>,
-    /// 父进程持有的 sidecar stdin 写端。
+    /// 父进程持有的 sidecar stdin 写端（**已闲置**）。
     ///
     /// 2026-10-02 os error 231 修复：`Stdio::piped()` 在 Windows 上经
     /// `NtCreateNamedPipeFile` + `NtOpenFile`（\Device\NamedPipe\ 单向实例，
@@ -80,7 +80,16 @@ pub struct SidecarSupervisor {
     /// ERROR_PIPE_BUSY(231)，spawn 在 CreateProcessW 之前失败 → 首启弹窗。
     /// 改用 `std::io::pipe()`（kernel32 `CreatePipe` 双工实现）+ `Stdio::from`
     /// 句柄包装：子进程拿到读端，父进程持有写端写 shutdown 行，语义不变。
+    ///
+    /// 2026-10-05 Electron 43 stdin 双回归迁移（e2e 实锤）：E43 主进程下
+    /// stdin 'end' 立即假触发（秒退）+ 'data' 永不触发（shutdown 行死信），
+    /// sidecar 已不再读 stdin，优雅停机改走 shutdown 文件信号（见
+    /// `shutdown_file`）。管道仅为最小改动面保留，闲置无害。
     child_stdin: Option<PipeWriter>,
+    /// shutdown 信号文件路径（spawn 时生成、经 JAX_SIDECAR_SHUTDOWN_FILE 注入
+    /// 子进程）。优雅停机 = 创建该文件，sidecar 500ms 轮询到即受控退出。
+    /// child 退出时清理（防临时目录残留）。
+    shutdown_file: Option<PathBuf>,
     state: SidecarState,
     /// 解析成功时持有的 generation 租约，存活到 child 退出。
     lease: Option<GenerationLease>,
@@ -100,6 +109,7 @@ impl SidecarSupervisor {
             resolve_error: None,
             child: None,
             child_stdin: None,
+            shutdown_file: None,
             state: SidecarState::Stopped,
             lease: None,
         }
@@ -112,6 +122,7 @@ impl SidecarSupervisor {
             resolve_error: None,
             child: None,
             child_stdin: None,
+            shutdown_file: None,
             state: SidecarState::Stopped,
             lease: Some(lease),
         }
@@ -125,6 +136,7 @@ impl SidecarSupervisor {
             resolve_error: Some(diagnostic),
             child: None,
             child_stdin: None,
+            shutdown_file: None,
             state: SidecarState::Stopped,
             lease: None,
         }
@@ -225,16 +237,32 @@ impl SidecarSupervisor {
         // stdin 管道（os error 231 修复，2026-10-02）：
         // `Stdio::piped()` 的 NT 单向管道序列（子进程端 GENERIC_READ 相对打开）
         // 在命名管道策略被改写的宿主上 100% 返回 ERROR_PIPE_BUSY(231)。
-        // `std::io::pipe()` 走 kernel32 `CreatePipe` 双工实现，不受影响；
-        // 子进程拿读端（Stdio::From<PipeReader> 纯句柄包装，不经 NT 序列），
-        // 父进程持写端，shutdown 行语义与 `piped()` 完全一致。
+        // `std::io::pipe()` 走 kernel32 `CreatePipe` 双工实现，不受影响。
+        // 2026-10-05 E43 stdin 双回归迁移后 sidecar 不再读 stdin，此管道仅为
+        // 最小改动面保留（闲置无害）；shutdown 行语义已由下方 shutdown 文件取代。
         let (stdin_read, stdin_write) =
             std::io::pipe().map_err(|e| SidecarError::SpawnFailed(format!("stdin pipe: {e}")))?;
+        // shutdown 文件信号（2026-10-05 Electron 43 stdin 双回归迁移）：
+        // E43 主进程下 stdin 'end' 立即假触发（秒退）、'data' 永不触发（死信），
+        // 优雅停机改走文件——路径唯一（pid + 纳秒时间戳），经
+        // JAX_SIDECAR_SHUTDOWN_FILE 注入；sidecar 500ms 轮询到文件出现即受控
+        // 退出。跨平台（Windows 桌面 + Linux CloudRun 容器）、无网络栈、幂等。
+        let shutdown_file = std::env::temp_dir().join(format!(
+            "jax-sidecar-{}-{}.shutdown",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        // 唯一路径防御性清理：即使撞名也绝不把陈旧文件当成新信号。
+        let _ = std::fs::remove_file(&shutdown_file);
         let child = cmd
             .args(&args)
             .current_dir(&current_dir)
             .env(SIDECAR_CREDENTIAL_ENV, launch.expose())
             .env("NODE_EXTRA_CA_CERTS", &ca_cert_path)
+            .env("JAX_SIDECAR_SHUTDOWN_FILE", &shutdown_file)
             // RP-07 补充（2026-09-02）：Electron 在 C++ 引导期（早于任何 JS）读取
             // ELECTRON_RUN_AS_NODE 决定是否退化为纯 Node 模式；main.js 的 JS 层净化
             // 来不及救引导期。宿主（如 WorkBuddy shell）注入的 ELECTRON_RUN_AS_NODE=1
@@ -251,18 +279,23 @@ impl SidecarSupervisor {
             .map_err(|e| SidecarError::SpawnFailed(e.to_string()))?;
         self.child = Some(child);
         self.child_stdin = Some(stdin_write);
+        self.shutdown_file = Some(shutdown_file);
         self.state = SidecarState::Running;
         Ok(())
     }
 
-    /// 先写 shutdown 行优雅停止，窗口内未退出则强制终止。
+    /// 先创建 shutdown 信号文件优雅停止，窗口内未退出则强制终止。
     /// 返回最终退出码（0 = 优雅，非 0 = 被终止）。
     pub fn stop(&mut self) -> Result<i32, SidecarError> {
         let mut child = self.child.take().ok_or(SidecarError::NotRunning)?;
-        // 优雅停止：向父进程持有的 stdin 写端写 shutdown 行。
-        // 写端随后被 drop 关闭 → 子进程读完该行后得到 EOF（与旧 piped() 语义一致）。
-        if let Some(mut stdin_write) = self.child_stdin.take() {
-            let _ = std::io::Write::write_all(&mut stdin_write, b"shutdown\n");
+        // 优雅停止：创建 shutdown 文件，sidecar 轮询到（500ms 周期）即走受控
+        // 退出。写端句柄随手释放——E43 stdin 双回归迁移后 sidecar 不再读
+        // stdin，管道仅为最小改动面保留。
+        self.child_stdin.take();
+        let shutdown_file = self.shutdown_file.take();
+        if let Some(file) = &shutdown_file {
+            // 文件不存在则创建，存在则覆盖——幂等。
+            let _ = std::fs::write(file, b"");
         }
         let graceful_timeout = self
             .spec
@@ -286,6 +319,10 @@ impl SidecarSupervisor {
             }
             std::thread::sleep(Duration::from_millis(10));
         };
+        // 无论 child 是否读到信号都清理文件，防临时目录残留。
+        if let Some(file) = &shutdown_file {
+            let _ = std::fs::remove_file(file);
+        }
         self.state = SidecarState::Stopped;
         // child 已退出：显式释放 generation 租约（ADR-027 §5）。
         self.lease.take();
@@ -300,6 +337,10 @@ impl SidecarSupervisor {
                 self.state = SidecarState::Stopped;
                 // child 已退出：stdin 写端同步释放，避免句柄残留影响下次 start。
                 self.child_stdin.take();
+                // child 已退出：清理 shutdown 信号文件（若有），防临时目录残留。
+                if let Some(file) = self.shutdown_file.take() {
+                    let _ = std::fs::remove_file(file);
+                }
                 // child 已退出：显式释放 generation 租约。
                 self.lease.take();
                 Some(status.code().unwrap_or(-1))

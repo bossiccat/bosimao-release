@@ -28,27 +28,23 @@ process.on('uncaughtException', fatalMain);
 process.on('unhandledRejection', fatalMain);
 process.on('SIGTERM', () => exitArbiter.decide({ kind: 'controlled' }));
 
-// 父进程优雅停机通道（2026-10-04 tray 退出 sidecar 孤儿缺陷修复，JS 侧配套）：
-// 此前 shutdown 行是死信通道——本进程从不读 stdin，supervisor.stop() 写完行
-// 只能等 graceful_timeout 超时后 kill（且 kill 只杀 Electron 主进程，子进程
-// 仍有残留风险）。现在两条触发路径都收敛到受控退出：
-//   1) 行内容含 "shutdown" —— 父进程 jax-pet.exe 经 supervisor.stop() 写入；
-//   2) stdin 'end'（EOF）—— 父进程死亡/被强杀时管道写端关闭，sidecar 自行
-//      退出，兜底杜绝一切形式的孤儿残留。
-// 生产 spawn 恒为管道（sidecar.rs Stdio::from(PipeReader)），不会出现立即 EOF；
-// 开发态终端直跑时 stdin 是 TTY，Ctrl+D 才 EOF，不误伤。
-try {
-  let stdinShutdownBuf = '';
-  process.stdin.setEncoding('utf8');
-  process.stdin.on('data', (chunk) => {
-    stdinShutdownBuf += chunk;
-    if (stdinShutdownBuf.includes('shutdown')) exitArbiter.decide({ kind: 'controlled' });
-  });
-  process.stdin.on('end', () => exitArbiter.decide({ kind: 'controlled' }));
-  process.stdin.resume();
-} catch (_) {
-  // stdin 不可用时维持现状：依赖父进程侧 stop() 的超时强杀兜底。
-}
+// 父进程优雅停机通道（2026-10-05 Electron 43 stdin 双回归迁移，JS 侧配套）：
+// 原 stdin 方案（data→"shutdown" 行 + end→EOF 兜底）在 Electron 43 主进程下
+// 双回归（e2e 实锤 2026-10-05，证据 outputs/deploy-backup-20260911 与
+// tmp/e43-min-app 判别探针组）：
+//   1) 'end'（EOF）在 PIPE/inherit 下立即假触发（父进程持续写入也不例止；
+//      同二进制 node 模式正常）→ sidecar 启动即"受控退出"秒退（生产 spawn
+//      2-4s 内死，stdout 仅 2 字节）；
+//   2) 'data' 事件永不触发 → shutdown 行死信 → 优雅停机失灵，退化为超时强杀。
+// 故整体删除 stdin 监听，迁移为 shutdown 文件信号：父进程 spawn 时生成唯一
+// 路径经 JAX_SIDECAR_SHUTDOWN_FILE 传入，停机时创建该文件；本进程轮询到文件
+// 出现即走受控退出（与原 stdin shutdown 完全同路径同语义）。env 未设 = 不启用
+//（开发态终端直跑兼容）。生产已全线 E43，无旧版 Electron 兼容负担。
+const { watchShutdownFile } = require('./shutdown-file');
+watchShutdownFile(
+  process.env.JAX_SIDECAR_SHUTDOWN_FILE,
+  () => exitArbiter.decide({ kind: 'controlled' })
+);
 app.disableHardwareAcceleration();
 // 2026-09-02 GPU 沙箱修复：部分环境（本机实测复现）GPU 进程沙箱初始化失败 →
 // Chromium 连试 6 次 "GPU process exited unexpectedly: exit_code=1" 后

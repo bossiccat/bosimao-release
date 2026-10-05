@@ -27,15 +27,22 @@ fn stub_worker() {
         let _ = std::fs::write(path, args.join("\n"));
     }
     match mode {
-        // 优雅退出：stdin 收到 shutdown 行后 exit(0)
+        // 优雅退出：轮询 JAX_SIDECAR_SHUTDOWN_FILE（与生产 sidecar/main.js 的
+        // shutdown 文件信号同语义，2026-10-05 E43 stdin 双回归迁移）。
+        // env 未注入则 panic（非零退出），graceful 测试据此证明传播链完整。
         "graceful" => {
-            let mut line = String::new();
-            let _ = std::io::stdin().read_line(&mut line);
-            std::process::exit(0);
+            let path = std::env::var("JAX_SIDECAR_SHUTDOWN_FILE")
+                .expect("supervisor must inject JAX_SIDECAR_SHUTDOWN_FILE");
+            loop {
+                if std::path::Path::new(&path).exists() {
+                    std::process::exit(0);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
         }
         // 立即崩溃：模拟 sidecar 启动即挂
         "crash" => std::process::exit(1),
-        // 挂死：不读 stdin，等待被终止
+        // 挂死：不轮询 shutdown 文件，等待被终止
         "hang" => std::thread::sleep(Duration::from_secs(600)),
         _ => std::thread::sleep(Duration::from_secs(600)),
     }
@@ -257,7 +264,7 @@ fn stop_kills_hung_child_after_graceful_timeout() {
         vec!["--exact".into(), "stub_worker".into(), "--nocapture".into()],
     ));
     start(&mut sup).expect("start");
-    // 优雅写入会因 stub 不读 stdin 而超时，随后强制终止
+    // 优雅信号（shutdown 文件）会被挂死 stub 无视，超时后强制终止
     let code = sup.stop().expect("stop must terminate hung child");
     assert_ne!(code, 0, "hung stub killed by supervisor, non-zero exit");
     assert_eq!(sup.state(), SidecarState::Stopped);

@@ -35,7 +35,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-D = ROOT / "outputs" / "deploy-backup-20260911"
+# 默认仍是旧证据目录；复跑验收时设 SIM_OUT_DIR 指向新目录（本进程会把它透传
+# 给 run-rtc-bridge/run-sidecar/run-phone——三者读同一个变量），避免覆盖上一轮证据。
+D = Path(os.environ.get("SIM_OUT_DIR")
+         or (ROOT / "outputs" / "deploy-backup-20260911"))
 BRIDGE_LOG = D / "local-rtc-bridge.log"
 SIDECAR_MAIN_LOG = D / "sidecar-logs" / "sidecar-sidecar.log"
 SIDECAR_ALT_LOG = D / "sidecar-logs" / "sidecar-main-diag.log"

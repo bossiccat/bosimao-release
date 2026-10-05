@@ -19,8 +19,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SIDECAR = ROOT / "sidecar"
-LOGDIR = ROOT / "outputs" / "deploy-backup-20260911" / "sidecar-logs"
-OUT = ROOT / "outputs" / "deploy-backup-20260911" / "local-sidecar.out.log"
+# 默认仍是旧证据目录；复跑验收时设 SIM_OUT_DIR 指向新目录，避免覆盖上一轮证据。
+OUT_DIR = Path(os.environ.get("SIM_OUT_DIR")
+               or (ROOT / "outputs" / "deploy-backup-20260911"))
+LOGDIR = OUT_DIR / "sidecar-logs"
+OUT = OUT_DIR / "local-sidecar.out.log"
 
 
 def load_env() -> dict[str, str]:

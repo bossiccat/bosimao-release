@@ -302,10 +302,11 @@ fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
 /// （1 主 + 3 子）成为孤儿永久残留——两个退出入口（此处与 tray.rs "quit"）
 /// 都是裸 `app.exit(0)`，而 `app.exit` 直接终止进程、不运行 managed state
 /// 的 Drop，supervisor 的 stop() 从未被调用。6e0db63c 修好了 stop() 的
-/// stdin 管道机制，但退出路径没人调用它。
+/// 优雅停机机制（2026-10-05 起：shutdown 文件信号，原 stdin 行因 Electron 43
+/// 双回归弃用），但退出路径没人调用它。
 ///
 /// 修复：退出前经 service.stop()（含 restart_allowed=false，防 watchdog 在
-/// 退出窗口期竞争重启）走 supervisor.stop() 写 shutdown 行优雅停止，再 exit。
+/// 退出窗口期竞争重启）走 supervisor.stop() 创建 shutdown 文件优雅停止，再 exit。
 fn stop_sidecar_and_exit(app: &tauri::AppHandle) {
     let supervisor_state = app.state::<Mutex<SidecarSupervisor>>();
     let service_state = app.state::<Mutex<SidecarCredentialService<WindowsCredentialStore>>>();

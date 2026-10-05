@@ -100,10 +100,11 @@ test('SIGTERM 后 Electron 主进程退出', { timeout: 60000 }, async () => {
   );
   let stderr = '';
   child.stderr.on('data', (d) => { stderr += d; });
-  // exit 监听必须在任何等待之前注册（2026-10-04）：main.js 的 stdin EOF 兜底
-  // （父进程死亡时管道关闭 → sidecar 自退）在 stdio='ignore'（NUL 设备立即
-  // EOF）下会让进程在下方 6s 等待窗口内就自行退出——事件不回放，晚注册 =
-  // 永久假超时。进程提前退出也符合「进程会退出」的契约（code=0 优雅路径）。
+  // exit 监听必须在任何等待之前注册（事件不回放，晚注册 = 永久假超时）。
+  // 历史注（2026-10-05）：当年注册早挂是为防 main.js 的 stdin EOF 兜底在
+  // stdio='ignore' 下提前自退；该兜底已随 Electron 43 stdin 双回归迁移删除
+  // （改 shutdown 文件信号），此约束保留为通用稳健性要求。进程提前退出仍
+  // 符合「进程会退出」的契约（code=0 优雅路径）。
   const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
   await new Promise((r) => setTimeout(r, 6000)); // 等待主进程就绪
   // Windows 下子进程可能持有 stdio 管道（GPU/renderer），'close' 会延迟——用 'exit' 判定进程退出
