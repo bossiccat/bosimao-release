@@ -27,6 +27,11 @@ function runNpm(args, cwd, fail) {
   if (result.status !== 0) fail('SIDECAR_PACKAGE_NPM_CI_FAILED');
 }
 
+function runNode(args, cwd, fail) {
+  const result = spawnSync(process.execPath, args, { cwd, stdio: 'inherit', shell: false, env: { ...process.env } });
+  if (result.status !== 0) fail('SIDECAR_PACKAGE_NODE_SCRIPT_FAILED');
+}
+
 // 2026-09-02 cpSync 机器级故障规避：本机（2026-09-01 02:30 后）fs.cpSync 任何参数组合
 // 均触发 0xC0000409 fail-fast 硬崩（node 22/24、bash/PowerShell、大小目录全复现，
 // 疑似安全软件 hook 层问题），而 copyFileSync 全量验证通过。用逐文件递归拷贝
@@ -214,7 +219,24 @@ function buildPackage(config, api) {  const {
     if (!fs.existsSync(source)) fail('SIDECAR_PACKAGE_APP_SOURCE_MISSING');
     fs.copyFileSync(source, path.join(appDir, relative));
   }
-  runNpm(['ci', '--omit=dev'], appDir, fail);
+  // a560e6a 起 package.json 带 postinstall: node scripts/patch-download-interop.js，
+  // 而 APP_SOURCES 是根级平铺闭集（verifyAppSourceSet 只比对根文件），`scripts/` 子目录
+  // 从不进 staged 树 ⇒ staged app 的 npm ci --omit=dev 执行 postinstall 时必然
+  // MODULE_NOT_FOUND。按同一 fail-closed 语义显式投递脚本本体。
+  const interopPatchScript = path.join(config.sidecarDir, 'scripts', 'patch-download-interop.js');
+  if (!fs.existsSync(interopPatchScript)) fail('SIDECAR_PACKAGE_APP_SOURCE_MISSING');
+  fs.mkdirSync(path.join(appDir, 'scripts'), { recursive: true });
+  fs.copyFileSync(interopPatchScript, path.join(appDir, 'scripts', 'patch-download-interop.js'));
+  // 生命周期顺序倒挂修复：SDK（trtc-electron-sdk）的 install 脚本经 download@8 下载并
+  // 解压原生库 zip，而 @xhmikosr/decompress fork 9+ 是 ESM-only —— 裸 require 拿到
+  // namespace 对象即崩。npm 生命周期里 root postinstall（打 interop 补丁）晚于依赖
+  // install ⇒ SDK 下载在 staged 树必然静默失败（download.js catch 后 signale.error
+  // 不退非零），NATIVE 门禁才判红。改为 --ignore-scripts 安装后手动按序执行：
+  // 补丁（fail-closed，needle 丢失即失败）→ SDK install/postinstall（rebuild 单包）。
+  // 产物完整性仍由下方 NATIVE_REQUIRED / provenance 闭集门禁兜底。
+  runNpm(['ci', '--omit=dev', '--ignore-scripts'], appDir, fail);
+  runNode([path.join('scripts', 'patch-download-interop.js')], appDir, fail);
+  runNpm(['rebuild', 'trtc-electron-sdk'], appDir, fail);
   const installedSdk = JSON.parse(fs.readFileSync(path.join(appDir, 'node_modules', 'trtc-electron-sdk', 'package.json'), 'utf8')).version;
   if (installedSdk !== config.sdkVersion) fail('SIDECAR_PACKAGE_SDK_VERSION_MISMATCH');
 
