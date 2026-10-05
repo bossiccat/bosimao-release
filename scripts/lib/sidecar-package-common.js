@@ -42,7 +42,7 @@ const APP_SOURCES = [
   'index.html', 'intent-recovery.js', 'intent-selection.js', 'logger.js',
   'main.js', 'phone.js', 'resample.js', 'rtc-startup.js', 'rtc-termination.js',
   'rtc-test-audio.js', 'rtc.js',
-  'security.js',
+  'security.js', 'shutdown-file.js',
   'package.json', 'package-lock.json',
 ];
 const MANIFEST_KEYS = [
