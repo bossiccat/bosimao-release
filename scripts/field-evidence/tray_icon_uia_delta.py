@@ -12,8 +12,11 @@ tray_icon_uia_delta.py — Windows 11 XAML 任务栏下的托盘图标数取证�
 
 已知假阳性陷阱：时钟按钮 name 含当前时间（"时钟 17:41"），快照跨分钟会
 把「改名」误判成「出现」。判读时凡 aid=SystemTrayIcon 的时间类按钮一律人工排除；
-本 app 托盘无 tooltip（TrayIconBuilder 未设 tooltip）⇒ 差分里 name='' 的
-NotifyItemIcon 才是我们的图标（aid=NotifyItemIcon = 通知区域图标类）。
+本 app 图标特征：aid='NotifyItemIcon' 且 name='贾克斯 · 星核'
+（commit 3ae70f7 起 TrayIconBuilder 设了 tooltip；此前无 tooltip 时代 name=''）。
+⚠️ 溢出物化陷阱（2026-10-05 实证）：本 app 图标默认进 Win11 溢出区（隐藏图标），
+飞出窗收起时按钮不物化（UIA 读 0，差分漏检）——快照前必须先 Invoke 任务栏
+chevron（name 含 '隐藏的图标'）展开溢出窗，且 A/B 两态都要展开，口径才一致。
 
 用法（依赖 comtypes，本机装在受管 venv）：
   python tray_icon_uia_delta.py snapshot <label>   # 落盘 tmp/tray_snap_<label>.json
@@ -88,7 +91,7 @@ def delta(label_a, label_b):
         print(f"  x{n} [{CT.get(ct, ct)}] name={name!r} automationId={aid!r}")
     print(f"结论（原值）: {sum(diff.values())}")
     print("判读提示: 时钟按钮（aid=SystemTrayIcon 且 name 含'时钟'）跨分钟改名会进入差分，须人工扣除；")
-    print("          本 app 图标特征 = aid='NotifyItemIcon' 且 name=''（未设 tooltip）。")
+    print("          本 app 图标特征 = aid='NotifyItemIcon' 且 name='贾克斯 · 星核'（3ae70f7 起设 tooltip）。")
 
 
 if __name__ == "__main__":
