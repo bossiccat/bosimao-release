@@ -7,7 +7,8 @@
   "scripts": {
     "start": "electron .",
     "sidecar": "electron . --role=sidecar",
-    "phone": "electron . --role=phone"
+    "phone": "electron . --role=phone",
+    "postinstall": "node scripts/patch-download-interop.js"
   },
   "dependencies": {
     "trtc-electron-sdk": "13.4.802-beta.3"
@@ -17,6 +18,7 @@
   },
   "overrides": {
     "qs": "^6.14.0",
-    "decode-uri-component": "^0.4.1"
+    "decode-uri-component": "^0.4.1",
+    "decompress": "npm:@xhmikosr/decompress@^11.1.4"
   }
 }
