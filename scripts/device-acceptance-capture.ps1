@@ -50,9 +50,13 @@ $LogcatTags = @(
     "VoiceService:*",      # VoiceForegroundService
     "VoiceSessionCoord:*", # VoiceSessionCoordinator
     "BargeInCtrl:*",       # BargeInController
-    "CaptureGain:*",
-    "RtcCustomAudio:*"
+    "RtcCustomAudio:*",    # RealCustomAudioSource lvl 行（会话内 500ms 周期）
+    "MicRecorder:*",       # 会话外 KWS/麦克风日志
+    "DeviceEnv:*",         # DeviceEnvObserver：audio_device/screen/network/lifecycle（场景4/5 唯一证据源）
+    "RtcClient:*"          # RtcClient（注意 onEnterRoom result 只进 DiagLog，RtcClient.kt:139）
 )
+# 2026-10-06 审计（35df39d）：移除 "CaptureGain:*" —— CaptureGainStage 纯计算零日志，
+# 留着只是死过滤；新增 MicRecorder/DeviceEnv/RtcClient（TAG 均已在源码 const val 实锤）。
 
 # ------------------------------------------------------------------- state
 $script:AdbPath  = $null
