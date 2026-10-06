@@ -5,8 +5,8 @@
   "reviewer": "independent-qa",
   "risk": "客户 Windows 交互桌面出现产品后代命令窗口",
   "target": {
-    "artifact_commit": "65cbe326aded9f7c8b9f5af7a1b89e842f99dd0a",
-    "artifact_sha256": "be688f6d4a1698dc4ca204bbef9aeebbe02a051ca04a03b3798ab35a4c88ac30",
+    "artifact_commit": "f13c955184090ed6e9f8e9a86df6dc2f77bb5263",
+    "artifact_sha256": "sha256:56d97eabf2dd292645dd2b7b24920ab7ea06c42e5de16e8b9a513414038e3ee4",
     "artifact": "packaged jax-pet.exe -> Tauri SidecarSupervisor -> jax-rtc-sidecar.exe"
   },
   "required_scenarios": [
@@ -17,81 +17,28 @@
     "两个历史五分钟 watchdog 周期",
     "正常退出后重启"
   ],
-  "legacy_tasks": ["Jax-Watchdog-AtStartup", "Jax-Watchdog-Every5Min", "jax-watchdog"],
+  "legacy_tasks": [
+    "Jax-Watchdog-AtStartup",
+    "Jax-Watchdog-Every5Min",
+    "jax-watchdog"
+  ],
   "evidence": [
     {
-      "kind": "field-evidence-report",
+      "kind": "windows-field",
+      "collected_at": "2026-10-06T04:10:02Z",
+      "expires_at": "2026-10-09T04:10:02Z",
       "path": "outputs/2026-10-03-windows-popup-free-field-evidence.md",
-      "sha256": "d6ff03f65cb066360963b8cb7e6e53fd812db7fbd25724cb6ff3deb30f79e20f",
-      "size": 26603,
-      "captured_utc": "2026-10-03T09:39:34Z/09:56:49Z",
-      "note": "六场景现场取证（装机形态），含补充证据章节（S5 计划任务 LEGACY_TASKS_ABSENT + FAIL 归因修正：6/6 场景核心判据达标）。执行器 scripts/field-evidence/run_field_evidence_1003.py，探针 win_popup_capture.py（sha256 8cb80eb6979b1c0fdd6058e9599d50d00c115240b5f4e93642e5405737b2050e），尺子自检阳性 +2 / 阴性 -2。"
-    },
-    {
-      "kind": "field-evidence-samples",
-      "path": "outputs/2026-10-03-windows-popup-free-field-samples.json",
-      "sha256": "140f50a5e4a664b7899d41aa45fdf0bc24ba43dcb5c06ac0248e7e706e55351c",
-      "size": 473201,
-      "captured_utc": "2026-10-03T09:39:34Z/09:56:49Z",
-      "note": "六场景全部原始采样（进程树/窗口谱系/健康探针/stderr 计数），S5 含 21 次采样跨度 675s。"
-    },
-    {
-      "kind": "scheduled-tasks-probe",
-      "path": "%LOCALAPPDATA%/Temp/jax-pe/legacy_tasks_probe.json",
-      "verdict": "LEGACY_TASKS_ABSENT",
-      "probe_utc": "2026-10-03T09:57:26Z",
-      "note": "三只 legacy 任务与阴性对照不可区分地 ABSENT，gate 五项全过；probe_legacy_tasks.ps1 只读探针，PowerShell 直调补跑（脚本内 python→powershell 通道被执行环境拦截，详见报告补充章节 A）。"
-    },
-    {
-      "kind": "artifact-chain",
-      "installer": "outputs/jax-pet-setup-1.0.0-x64-20261003-6e0db63.exe",
-      "installer_sha256": "41bf5afbc16b4816a4fbc9dbd767c24b43d0096a55367b1fc8a063ee875eae07",
-      "note": "被测 jax-pet.exe（payload sha256 04bc56b7…，11306496 B）由该 NSIS 安装包静默安装产生；源码 commit 6e0db63c30d860ffe33b09727b11756a9aaaff05（sidecar.rs std::io::pipe 修复）。"
-    },
-    {
-      "kind": "independent-review",
-      "verdict": "APPROVE",
-      "reviewer": "independent-qa",
-      "reviewed_utc": "2026-10-03T10:20:00Z",
-      "note": "独立评审员实际执行六项验证并全部通过：(1) 重算两份证据文件 sha256 与 claim 逐字节一致（另实测尺子两副本 sha256=8cb80eb6…/15333B 一致）；(2) 重算装机 jax-pet.exe sha256=04bc56b7… 与 target 一致，git cat-file 确认 commit 6e0db63c 存在且 sidecar.rs +31/-4；(3) 独立解析 samples JSON 全部 51 采样：S1–S6 可见控制台窗口=0/孤儿=0/probe_trusted=True，唯一非零(all=2)在 S0 阳性自检；(4) 亲读 %LOCALAPPDATA%/Temp/jax-pe/legacy_tasks_probe.json 确认 verdict=LEGACY_TASKS_ABSENT、gate 五项全过，接受 S5 修正为实质 PASS；(5) 未覆盖项不构成阻断（本机正是曾 100% 复现 os error 231 的敌对宿主机，在此 PASS 是最严格检验）；(6) 测量非空集 0（S1 product_windows=32，含正常 GUI 类）。签核：无 REJECT 阻断项。"
-    },
-    {
-      "kind": "audit-rework",
-      "verdict": "DOWNGRADE_TO_REVIEW",
-      "auditor": "independent-audit-wave3",
-      "audited_utc": "2026-10-03T11:30:00Z",
-      "note": "应用户要求对该 claim 做全链条复审（三路独立审计：修复代码质量/取证方法学与免疫边界/遗留搁置项）。复审发现一个 P1：(场景6) tray 优雅退出路径从未真实执行——六场景取证中该场景只覆盖 WM_CLOSE(close-to-hide) 与 taskkill 强杀近似，报告明示『tray quit → app.exit(0) 那条路径是空白，不得据此声称已覆盖』；此前 APPROVE 评审第 5 条以『未覆盖项不构成阻断』接受，恰为 release-harness.md:68 明文禁止的『已接受的限定也算过』档位，该 APPROVE 被复审推翻。回退 Review。补证约束（已实测）：本取证会话 GetCursorPos 返回 ACCESS_DENIED(0x5)，产品 tray wndproc 在光标查询失败时直接 return，托盘菜单在无光标会话物理上无法打开（含真实鼠标与全部自动化手段，2026-09-24/27/28 三次历史尝试同因失败），故 tray 优雅退出只能由用户在真实交互桌面亲手执行取证。其余复审结论：修复为机制根治非环境绕过（5/12 测试真实覆盖新路径，句柄生命周期无泄漏）；自家生产代码免疫边界完整（o020 测试文件残留 Stdio::piped 但被 credential-test-support feature gate 排除不进生产）；14 僵尸进程系旧版本遗弃物，新版本六场景起停孤儿=0 实证无复发机制；X: subst 已随重启消失；360 归因悬置不影响取证有效性但外推边界应声明为『仅覆盖同型 NPFS 读拒策略，异构安全软件机制未检验』；判据盲区（非控制台类弹窗不可见）与 claim risk 字面（『命令窗口』）一致、与 claim 名称（popup-free）不完全一致，需声明。"
-    },
-    {
-      "kind": "rework-fix",
-      "fix_commit": "65cbe326aded9f7c8b9f5af7a1b89e842f99dd0a",
-      "committed_local": "2026-10-04",
-      "note": "复审 P1 唯一阻断项修复入库：全部退出路径（tray.rs \"quit\" 分支与前端 quit_app 命令）由裸 app.exit(0) 改为 stop_sidecar_and_exit()——先经 SidecarCredentialService::stop（restart_allowed=false 防 watchdog 在退出窗口期竞争重启）→ supervisor.stop() 写 shutdown 行优雅停止 sidecar 全树，再退出；配套 sidecar/main.js stdin 双触发（含 \"shutdown\" 行 + EOF 兜底）。5 文件 +200/-3；JS 106/106、Rust 15/15 全量通过。同批构建工具 commit e0a5bef814ab954e3060b1a7ae7234d58afdbdf9（node-verify-shim + NSI 长路径补丁，WorkBuddy 沙箱环境绕行，不触及产品行为）。"
-    },
-    {
-      "kind": "artifact-chain",
-      "installer": "outputs/jax-pet-setup-1.0.0-x64-20261004-65cbe32.exe",
-      "installer_sha256": "621a9b0d2c3c179f98efb2369ef6cde136be58086b5d87f5e7132cb0f2e2b889",
-      "payload_sha256": "be688f6d4a1698dc4ca204bbef9aeebbe02a051ca04a03b3798ab35a4c88ac30",
-      "note": "修复后重打包并装机：NSIS 静默安装 exit=0；装机 jax-pet.exe sha256 与 payload 精确一致；装机 jrt\\current.json → g-564c7e18；修复标记 stdinShutdownBuf×3 已在装机产物中确认。源码 commit 65cbe326aded9f7c8b9f5af7a1b89e842f99dd0a。"
-    },
-    {
-      "kind": "manual-tray-quit-retest",
-      "verdict": "CLEAN_EXIT",
-      "verdict_path": "outputs/2026-10-03-s6-manual-tray-quit-verdict.json",
-      "verdict_sha256": "3561a9fa0cf92fb4d79d27ae92b67a3f0cb52199996dc0c38ccbd9ecb2a35e85",
-      "samples_path": "outputs/2026-10-03-s6-manual-tray-quit-samples.jsonl",
-      "samples_sha256": "43f3d84e292d5da9056d7ed0de5eb0ea02177832c1e87711ee9981f52f8c1cbb",
-      "captured_local": "2026-10-04T13:54:39+08:00/14:12:10+08:00",
-      "note": "复审补证约束（tray 优雅退出只能由用户在真实交互桌面亲手执行）下的场景6 人工复测：用户亲手托盘菜单「退出」，采样器 scripts/field-evidence/s6_manual_tray_quit_sampler.py 纯被动观测（零注入/零模拟）。window 1051.4s / 201 有效样本：WAIT_START×1661 全零进程、ALIVE×4（进程数恒=1）、GONE_OBSERVE×4 全零；worst={console_product:0, orphans:0, sidecar_residue:0}；trusted_all_witnessed=true（起/退均被人工目击，测量非空集）。同场观察到独立外观缺陷『托盘双图标』，已单独定性为 tauri.conf.json 声明式 trayIcon + 代码 TrayIconBuilder 双注册（tauri-2.11.5 app.rs:2416-2437 对 config.app.tray_icon 自动 build 无菜单托盘），修复 commit 1b4d327d6cc5e0708e3f6c55aea3ef82ac186772（删除声明式配置，保留带菜单的代码版托盘；cargo check RC=0），与弹窗 claim 判据无涉，另行复测。"
-    },
-    {
-      "kind": "independent-review",
-      "verdict": "APPROVE",
-      "reviewer": "independent-qa-rework",
-      "reviewed_utc": "2026-10-04T06:36:26Z",
-      "note": "复审后重新独立评审，八项验证全部实际执行并通过：(1) 重算三份 evidence sha256 逐字节一致（verdict 3561a9fa…/samples 43f3d84e…/installer 621a9b0d…）；claim 共 9 条 evidence，state 当时为 Review。(2) git show --stat 65cbe32 = 5 文件 +200/-3；tray.rs:33 quit 分支→crate::stop_sidecar_and_exit(app)；main.rs:283-298 定义仅 supervisor.state()==Running 时经 SidecarCredentialService::stop（restart_allowed=false 栅栏）再 app.exit(0)，stop 失败/锁 poisoned 仍 exit 由 EOF 兜底；sidecar/main.js:33-49 stdin 双触发（含 shutdown 行 + EOF）均收敛 exitArbiter 受控退出，外层 try/catch 兜底；supervisor 写 shutdown 行机制在 6e0db63c 已入库，机制评估为双层无死角。(3) python 独立解析 samples JSONL 全部 1669 行（不信 claim 统计）：JSONL 为追加模式多轮累积，末次运行=末 201 行（label #0..#200 连续）=WAIT_START×193+ALIVE×4+GONE_OBSERVE×4，与 verdict n_samples=201 自洽；窗口 1051.4s≈201 轮×约5.2s 节奏自洽；全程 worst visible_console_windows_product=0/orphans=0/sidecar_residue=0，orphan_sidecar_pids 全程空；probe_trusted 1669/1669=true；start_seen 语义正确（WAIT_START false→ALIVE/GONE true）。(4) verdict 五关键字段实测符合：CLEAN_EXIT/quit_observed=true/start_seen=true/trusted_all_witnessed=true/method=human hand+passive-only。(5) 装机验证：实际路径 %LOCALAPPDATA%\\贾克斯·星核\\jax-pet.exe（中文目录名，注册表 jax/pet 过滤不命中，field-evidence.md:5 有记载）sha256 重算=be688f6d4a1698dc4ca204bbef9aeebbe02a051ca04a03b3798ab35a4c88ac30 与 target 精确一致，mtime Oct 4 13:41 与复测时间线 13:54-14:12 吻合；jrt\\current.json 实读→g-564c7e1805466630…=g-564c7e18；装机 g-564c7e18\\resources\\app\\main.js 含 stdinShutdownBuf×3、sha256=8b59f2e2… 与仓库 HEAD sidecar/main.js 逐字节一致且在 generation.json manifest 记录匹配。(6) git 链：HEAD=959a523，merge-base --is-ancestor 确认 959a5231 为 HEAD 祖先；链 de8f74d(回退)→65cbe32(修复)→e0a5bef(构建工具)→1b4d327(双图标修复)→959a523(证据)；target artifact_commit=65cbe32 在链且 cat-file 完整。(7) 红线：release-harness.md 实际路径 docs/governance/release-harness.md（非 governance/ 下），其场景覆盖段明文只允许『补测把场景真做掉』或『收窄 required_scenarios』两路；本次为前者（用户真实交互桌面亲手托盘退出+被动采样），非『已接受的限定也算过』。(8) P1 实质闭合：tray 退出真实执行（#193 首见 pid 34708→#197 树全消失→20s 窗 4 采样零残留）+sidecar 零残留+判决可信（纯被动采样器经读码确认零注入、probe 全程 trusted、起/退均观测非空集）。发现三处不阻断瑕疵，如实记录：a) claim note『ALIVE×4（进程数恒=1）』按 probe 通道口径成立（phase 判据用 probe），但 snapshot 通道第 4 条 ALIVE（#196）roots=0——sampler.py:68 probe 与 :89 snapshot 为两次独立捕获，#196 恰为退出瞬间边界样本，非矛盾非残留；b) claim note 将 201（末次运行）与 1661（全文件追加累积 WAIT_START）混于一句，口径混搭但两数均可独立复算；c) 顶层 jax-rtc-sidecar.exe mtime=Sep 29 系安装器未覆盖未变文件，运行时按 current.json 走 g-564c7e18 generation，其内 sidecar 已含修复，无实质影响。签核：无 REJECT 阻断项，reinstate Verified。"
+      "raw_sha256": "sha256:d0c9ef1c2332af17796ef6af161e67ce5de06f7f36fa6071ccf116ad5dc06800",
+      "scenario_coverage": {
+        "首次启动": "PASS",
+        "App 重启": "PASS",
+        "relay 故障恢复": "PASS",
+        "rtc bridge 故障恢复": "PASS",
+        "两个历史五分钟 watchdog 周期": "PASS",
+        "正常退出后重启": "PASS"
+      }
     }
   ],
-  "superseded_by": null
+  "superseded_by": null,
+  "attempts": []
 }
