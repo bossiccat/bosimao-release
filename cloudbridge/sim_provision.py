@@ -142,15 +142,19 @@ def provision_sim_device(
     owner_credential: str,
     *,
     device_name: str = DEFAULT_DEVICE_NAME,
+    platform: str = "android",
     timeout_s: float = DEFAULT_TIMEOUT_S,
 ) -> SimDevice:
-    """按真机顺序完成 provisioning：privacy 门禁 → pairing-code → register。"""
+    """按真机顺序完成 provisioning：privacy 门禁 → pairing-code → register。
+
+    platform 默认 'android'（手机模拟器历史口径不变）；desktop 变体传 'windows'。
+    """
     enable_cloud_processing(base_url, owner_credential, timeout_s=timeout_s)
 
     status, body = _request(
         "POST",
         _url(base_url, PAIRING_CODE_PATH),
-        {"platform": "android", "device_name_hint": device_name},
+        {"platform": platform, "device_name_hint": device_name},
         owner_credential=owner_credential,
         timeout_s=timeout_s,
     )
@@ -163,7 +167,7 @@ def provision_sim_device(
     status, body = _request(
         "POST",
         _url(base_url, REGISTER_PATH),
-        {"pairing_code": pairing_code, "device_name": device_name, "platform": "android"},
+        {"pairing_code": pairing_code, "device_name": device_name, "platform": platform},
         timeout_s=timeout_s,
     )
     _raise_if_bad("register", status, body)

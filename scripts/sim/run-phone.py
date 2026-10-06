@@ -24,8 +24,10 @@ import sim_phone  # noqa: E402
 import sim_provision  # noqa: E402
 
 # 默认仍是旧证据目录；复跑验收时设 SIM_OUT_DIR 指向新目录，避免覆盖上一轮证据。
+# ⚠️ 必须 .resolve()：LOGDIR 会传给 electron 子进程（其 cwd=sidecar/），相对路径
+# 会被解析到 sidecar/ 下 ⇒ 日志分裂（2026-10-06 实锤，见 run-sim-e2e.py 注释）。
 D = Path(os.environ.get("SIM_OUT_DIR")
-         or (ROOT / "outputs" / "deploy-backup-20260911"))
+         or (ROOT / "outputs" / "deploy-backup-20260911")).resolve()
 LOGDIR = D / "sidecar-logs-phone"
 OUT = D / "local-phone.out.log"
 
