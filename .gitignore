@@ -208,3 +208,6 @@ artifacts/release-evidence/
 /pet-ui/src-tauri/_cargo_*.txt
 /pet-ui/src-tauri/_walk_probe.py
 /certs/client.crt
+
+# e43-smoke-lean 冒烟基建：仅入库源码，运行时日志不入库（DIRTY_WORKTREE 门禁清障 2026-10-06）
+/sidecar/e43-smoke-lean/logs/
